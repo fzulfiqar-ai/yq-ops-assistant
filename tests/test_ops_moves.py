@@ -1937,6 +1937,55 @@ def _():
         assert own[0]["outcome"] == "set aside: sent to its own store; booked back in there"
 
 
+@test("moves: an issue booked in under two receipts (pairing step S) is one pair: both on its line, no item to check, checks 0")
+def _():
+    # SIO 28 sends a bank and a holder to Van B; Van B books them in under two receipts, the second holding exactly
+    # what the first lacks (the gate holds on the numbers: 7 and 8 apart)
+    split = (sio(28, mday(3, 16), MAIN, VB, [(M_BANK, 2), (M_NOCOST, 1)])
+             + strv(20, mday(3, 16), VB, [(M_BANK, 2)]) + strv(21, mday(3, 17), VB, [(M_NOCOST, 1)]))
+    with moves_world(MoveWorld(rows=mv_rows(extra=split))) as w:
+        a = moves.audit("7d")
+        p = a.result.by_issue["SIO:T-26-03-28"]
+        assert isinstance(p, pairing.Pair) and (p.step, p.outcome, len(p.also)) == ("S", "received", 1), p
+        both = {p.receipt.no, p.also[0].no}
+        assert both == {"STRV:T-26-03-20", "STRV:T-26-03-21"}
+        assert a.result.by_receipt["STRV:T-26-03-20"] is p is a.result.by_receipt["STRV:T-26-03-21"]
+        numbers = {n for e in a.exceptions for n in e["issues"] + [e["receipt"]]}
+        assert not numbers & (both | {"SIO:T-26-03-28"}), "one pair, received: never an item to check"
+        assert len(a.exceptions) == 5, "the week's five items stay as they were"
+        vb = by_store(a)[VB]
+        assert (vb.units["received"], vb.units["issued_to"]) == (16 + 3, 6 + 3) and vb.balanced
+        assert a.base.bucket["SIO:T-26-03-28"] == "to_other" and a.main.units["to_other"] == 39 + 3
+        assert all(r.balanced for r in a.stores + [a.main])
+        # Van B's list: the issue's line names both receipts, and neither stands on a line of its own
+        mine = moves.audit("7d", rep="van b")
+        lines = [m for m in mine.store_moves if m["number"] in both | {"SIO:T-26-03-28"}]
+        assert [m["number"] for m in lines] == ["SIO:T-26-03-28"], lines
+        assert lines[0]["outcome"] == "received, under 2 receipts" and {lines[0]["receipt"], *lines[0]["also"]} == both
+        assert f"{p.receipt.no} + {p.also[0].no}" in "\n".join(moves.screen_lines(mine))
+        moved = next(m for m in sales_json(mine.facts())["store_moves"] if m["number"] == "SIO:T-26-03-28")
+        assert (moved["receipt"], moved["also"]) == (p.receipt.no, [p.also[0].no])
+        # the golden list keeps it with all three legs; the review text names both receipts, and the sample takes it
+        root = paths.data_root()
+        folder = root / "business_data" / "Focus ERP 2026-03-17"
+        folder.mkdir(parents=True)
+        real_load = ledger.load
+        ledger.load = lambda path=None, use_cache=True: w.ledger_()
+        try:
+            res = moves.run(MvArgs(golden=True, ledger_=str(folder)))
+        finally:
+            ledger.load = real_load
+        assert res["ok"] and res["flags"]["split"] == 1 and res["flags"]["sample"].count("split") == 1, res["flags"]
+        doc = json.loads((paths.golden_dir() / "pairs_accessories.json").read_text(encoding="utf-8"))
+        (s,) = doc["split"]
+        assert (s["issue"], s["receipt"], s["also"], s["outcome"], s["step"]) == ("SIO:T-26-03-28", p.receipt.no,
+                                                                                [p.also[0].no], "received", "S")
+        assert [leg["number"] for leg in s["also_legs"]] == [p.also[0].no] and all(c["also"] == [] for c in doc["clean"])
+        review = (root / "exports" / "ops" / "2026-03-17" / "moves-golden-review.txt").read_text(encoding="utf-8")
+        assert "split (received)" in review and f"{p.receipt.no} + {p.also[0].no}" in review
+        assert review.count("      and      ") == 1
+
+
 @test("moves shares: sold and sent back over opening plus received; n/a with nothing to divide by")
 def _():
     with moves_world():

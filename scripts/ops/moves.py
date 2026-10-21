@@ -24,6 +24,8 @@ view - so a transfer voucher that also holds other items (SIM) is paired on its 
 partly out of scope; then pair() with the data date = the ledger's last day. The stores are read through StoreRules
 built from config 'warehouses.main', 'damage', 'not_counted' and 'aliases': a van is a store whose name ends
 " - Acc WH", an outlet is Causeway or YQ Roadshow (StoreRules.kind). Pairs are made by contents, never by number.
+An issue booked in under two receipts (pairing step S: Pair.also) is one pair: both receipts are received at its
+store, the store's list names both on the issue's line, and the second is never a receipt with no issue.
 
 EACH STORE (each van and outlet, and the main store), in units and in BHD, for the window:
   opening           balances(as_of = the day before the window), received minus issued, every voucher
@@ -83,9 +85,11 @@ Audits are memoised in the process per (ledger sha, or 'db:' + its last day; the
 the costs and the indexes are worked out once per ledger.
 
 The hidden option --golden-build (never in the skill) writes business_data/ops/golden/pairs_accessories.json (every
-exception and the first GOLDEN_CLEAN clean pairs by the sha256 of the issue number) and a review text under
-exports/ops/<D>/, both local and git-ignored, from the ledger --ledger names (default: the folder
-golden/pairing.json names, else the loaded folder).
+exception, every pair booked in under two receipts, and the first GOLDEN_CLEAN clean pairs by the sha256 of the
+issue number, each leg with its lines) and a review text under exports/ops/<D>/ (its SAMPLE: GOLDEN_PER_KIND of
+each kind of exception and of the split pairs, then clean pairs, GOLDEN_SAMPLE in all), both local and
+git-ignored, from the ledger --ledger names (default: the folder golden/pairing.json names, else the loaded
+folder).
 
 Every owner-facing line passes the wording guard (fmt.careful): "to check", "differs", "not received yet", never
 an accusation. Screens and facts go to exports/ops/<D>/ (sales.save_screen); store and item names appear there and on
@@ -941,22 +945,25 @@ def _movements(a: Audit) -> dict:
             "to_check_uncosted": sum(1 for e in a.exceptions if e["uncosted"])}
 
 
-def _outcome_words(base: _Base, got) -> tuple[str, str | None, str]:
-    """(what became of an issue, its receipt number, the basis words) for a store's list of transfers."""
+def _outcome_words(base: _Base, got) -> tuple[str, str | None, tuple, str]:
+    """(what became of an issue, its receipt number, the further receipts of a pair booked in under two (step S),
+    the basis words) for a store's list of transfers."""
     if isinstance(got, pairing.Pair):
         basis = _basis_short(got.basis)
         words = {pairing.RECEIVED: "received", pairing.LATE: "received after its deadline",
                  pairing.QTY_DIFFERS: "received with other quantities, to check",
                  pairing.ELSEWHERE: f"booked in at {store_word(base.name_of(got.received_at), base.stores)}, "
                                     "to check"}[got.outcome]
+        if got.also:
+            words += f", under {len(got.also) + 1} receipts"
         if got.ambiguous:
             words += " (one of identical issues)"
-        return words, got.receipt.no, basis
+        return words, got.receipt.no, tuple(x.no for x in got.also), basis
     if got.outcome == pairing.IN_GRACE:
-        return f"not received yet (due {_day(got.deadline, base.d)})", None, ""
+        return f"not received yet (due {_day(got.deadline, base.d)})", None, (), ""
     if got.outcome == pairing.TWINS:
-        return (f"{got.missing} of {len(got.issues)} identical issues without a receipt, to check", None, "")
-    return f"not received after its deadline ({_day(got.deadline, base.d)}), to check", None, ""
+        return (f"{got.missing} of {len(got.issues)} identical issues without a receipt, to check", None, (), "")
+    return f"not received after its deadline ({_day(got.deadline, base.d)}), to check", None, (), ""
 
 
 def _store_moves(a: Audit) -> list[dict]:
@@ -966,17 +973,17 @@ def _store_moves(a: Audit) -> list[dict]:
     listed: set = set()
     for i in base.legs.issues:
         if first <= i.day <= last and store in (i.wh, i.to):
-            words, receipt, basis = _outcome_words(base, base.result.by_issue[i.no])
+            words, receipt, also, basis = _outcome_words(base, base.result.by_issue[i.no])
             out.append({"date": i.day, "number": i.no, "from": base.name_of(i.wh), "to": base.name_of(i.to),
-                        "units": i.units, "outcome": words, "receipt": receipt, "basis": basis})
-            if receipt:
-                listed.add(receipt)
+                        "units": i.units, "outcome": words, "receipt": receipt, "also": list(also), "basis": basis})
+            if receipt:                                # each receipt of the pair on this line, never on its own
+                listed.update((receipt,) + also)
     for x in base.result.aside:                        # vouchers set aside: an own-store move on one line, its mirror named
         if x.kind == "issue" and x.day is not None and first <= x.day <= last and store in (x.wh, x.to):
             words = f"set aside: {x.reason}" + ("; booked back in there" if x.partner else "")   # its Receipt column
             out.append({"date": x.day, "number": x.voucher, "from": base.name_of(x.wh), "to": base.name_of(x.to),
                         "units": sum((u for _item, u in x.lines), ZERO), "outcome": words, "receipt": x.partner,
-                        "basis": ""})
+                        "also": [], "basis": ""})
             if x.partner:
                 listed.add(x.partner)
     for r in base.legs.receipts:
@@ -987,11 +994,13 @@ def _store_moves(a: Audit) -> list[dict]:
             words, issue_no = "a receipt with no issue found, to check", None
         elif isinstance(got, pairing.Aside):
             words, issue_no = f"set aside: books in {got.partner}, sent to its own store", got.partner
-        else:
+        else:                                          # a pair whose issue is not on the list: of another window
             issue_no = got.issue.no
-            words = f"booked in for {issue_no} of {_day(got.issue.day, base.d)}"
+            others = [n for n in (got.receipt.no,) + tuple(x.no for x in got.also) if n != r.no]
+            words = (f"booked in for {issue_no} of {_day(got.issue.day, base.d)}"
+                     + (f", with {' + '.join(others)}" if others else ""))
         out.append({"date": r.day, "number": r.no, "from": None, "to": base.name_of(r.wh), "units": r.units,
-                    "outcome": words, "receipt": None, "basis": "", "issue": issue_no})
+                    "outcome": words, "receipt": None, "also": [], "basis": "", "issue": issue_no})
     out.sort(key=lambda m: (m["date"], pairing.parse_number(m["number"])))
     return out
 
@@ -1331,7 +1340,8 @@ def _store_move_lines(a: Audit) -> list[str]:
         return ["ITS TRANSFERS  none in the window."]
     stores = a.store_rules
     rows = [[_day(m["date"], a.d), m["number"], store_word(m["from"], stores), store_word(m["to"], stores),
-             fmt.units(m["units"]), m.get("receipt") or "", m["basis"], m["outcome"]]
+             fmt.units(m["units"]), " + ".join([m["receipt"]] + list(m.get("also") or [])) if m.get("receipt") else "",
+             m["basis"], m["outcome"]]
             for m in moves[:STORE_MOVES_SHOWN]]
     lines = [f"ITS TRANSFERS  {_plural(len(moves), 'voucher')} in the window, oldest first"]
     lines += _indent(fmt.grid(["Date", "Voucher", "From", "To", "Units", "Receipt", "Basis", "What became of it"], rows,
@@ -1478,9 +1488,19 @@ def _leg_json(base: _Base, leg) -> dict:
             "lines": _lines(leg.lines), "narration_hash": leg.narr}
 
 
-def _golden_cases(a: Audit) -> tuple[list[dict], list[dict]]:
+def _pair_json(base: _Base, p: pairing.Pair, kind: str) -> dict:
+    """A pair as the golden list records it: the issue, its receipt and the further receipts of a pair booked in
+    under two (step S, Pair.also), every leg's lines."""
+    return {"kind": kind, "outcome": p.outcome, "step": p.step, "issue": p.issue.no, "receipt": p.receipt.no,
+            "also": [x.no for x in p.also], "lag": p.lag, "basis": list(p.basis), "issue_leg": _leg_json(base, p.issue),
+            "receipt_leg": _leg_json(base, p.receipt), "also_legs": [_leg_json(base, x) for x in p.also],
+            "sha256_of_issue": "sha256:" + _hash(p.issue.no)}
+
+
+def _golden_cases(a: Audit) -> tuple[list[dict], list[dict], list[dict]]:
     """(every exception of the audit, with both legs; the clean pairs kept: step A, not one of identical issues,
-    the first GOLDEN_CLEAN by the sha256 of the issue number)."""
+    the first GOLDEN_CLEAN by the sha256 of the issue number; every pair booked in under two receipts, step S, by
+    the day and number of its issue)."""
     base = a.base
     issue_of = {i.no: i for i in base.legs.issues}
     receipt_of = {r.no: r for r in base.legs.receipts}
@@ -1492,20 +1512,21 @@ def _golden_cases(a: Audit) -> tuple[list[dict], list[dict]]:
         cases.append(case)
     clean = [p for p in base.result.pairs if p.step == "A" and not p.ambiguous]
     clean.sort(key=lambda p: (_hash(p.issue.no), p.issue.no))
-    kept = [{"kind": "clean", "outcome": p.outcome, "issue": p.issue.no, "receipt": p.receipt.no, "lag": p.lag,
-             "basis": list(p.basis), "issue_leg": _leg_json(base, p.issue), "receipt_leg": _leg_json(base, p.receipt),
-             "sha256_of_issue": "sha256:" + _hash(p.issue.no)} for p in clean[:GOLDEN_CLEAN]]
-    return cases, kept
+    split = sorted((p for p in base.result.pairs if p.also), key=lambda p: (p.issue.day, pairing.parse_number(p.issue.no)))
+    return cases, [_pair_json(base, p, "clean") for p in clean[:GOLDEN_CLEAN]], [_pair_json(base, p, "split")
+                                                                                  for p in split]
 
 
-def _sample(cases: list[dict], clean: list[dict]) -> list[tuple[str, dict]]:
-    """The cases to read with the owner: at most GOLDEN_PER_KIND of each kind of exception (by the sha256 of their
-    number), the rest clean pairs (in their order), GOLDEN_SAMPLE in all."""
+def _sample(cases: list[dict], clean: list[dict], split: list[dict] = ()) -> list[tuple[str, dict]]:
+    """The cases to read with the owner: at most GOLDEN_PER_KIND of each kind of exception and of the pairs booked in
+    under two receipts (each by the sha256 of its number), the rest clean pairs (in their order), GOLDEN_SAMPLE in
+    all."""
     picked: list[tuple[str, dict]] = []
     for kind in EXCEPTION_KINDS:
         mine = [c for c in cases if c["kind"] == kind]
         mine.sort(key=lambda c: _hash(c["issues"][0] if c["issues"] else c["receipt"]))
         picked += [(kind, c) for c in mine[:GOLDEN_PER_KIND]]
+    picked += [("split", c) for c in sorted(split, key=lambda c: _hash(c["issue"]))[:GOLDEN_PER_KIND]]
     picked = picked[:GOLDEN_SAMPLE]
     picked += [("clean", c) for c in clean[:GOLDEN_SAMPLE - len(picked)]]
     return picked
@@ -1519,17 +1540,19 @@ def _leg_text(leg: dict | None, d: date) -> str:
     return f"{leg['number']} {_day(leg['date'], d)}, {where}: {lines}"
 
 
-def golden_review(a: Audit, cases: list[dict], clean: list[dict]) -> list[str]:
+def golden_review(a: Audit, cases: list[dict], clean: list[dict], split: list[dict] = ()) -> list[str]:
     d = a.d
-    sample = _sample(cases, clean)
-    lines = [f"GOLDEN REVIEW  {a.source['file']} (the ledger runs to {_day(d)}): {_plural(len(cases), 'exception')} "
-             f"and {_plural(len(clean), 'clean pair')}, accessories only. Local only: never committed or sent.", "",
-             f"SAMPLE  {len(sample)} cases to read with Furqan ({GOLDEN_PER_KIND} of each kind of exception where there "
-             "are, then clean pairs; chosen by the sha256 of the voucher number)"]
+    sample = _sample(cases, clean, split)
+    lines = [f"GOLDEN REVIEW  {a.source['file']} (the ledger runs to {_day(d)}): {_plural(len(cases), 'exception')}, "
+             f"{_plural(len(split), 'pair')} booked in under two receipts and {_plural(len(clean), 'clean pair')}, "
+             "accessories only. Local only: never committed or sent.", "",
+             f"SAMPLE  {len(sample)} cases to read with Furqan ({GOLDEN_PER_KIND} of each kind of exception and of the "
+             "pairs booked in under two receipts where there are, then clean pairs; chosen by the sha256 of the voucher "
+             "number)"]
     grid = []
     for n, (kind, c) in enumerate(sample, 1):
-        if kind == "clean":
-            grid.append([str(n), f"clean ({c['outcome']})", c["issue"], c["receipt"],
+        if kind in ("clean", "split"):
+            grid.append([str(n), f"{kind} ({c['outcome']})", c["issue"], " + ".join([c["receipt"]] + c["also"]),
                          ", ".join(BASIS_WORDS[b] for b in c["basis"]) or "by contents"])
         else:
             grid.append([str(n), kind.replace("_", " "), ", ".join(c["issues"]) or "-", c["receipt"] or "-",
@@ -1541,11 +1564,13 @@ def golden_review(a: Audit, cases: list[dict], clean: list[dict]) -> list[str]:
         for leg in c["issue_legs"]:
             lines.append(f"      issue    {_leg_text(leg, d)}")
         lines.append(f"      receipt  {_leg_text(c['receipt_leg'], d)}")
-    for n, c in enumerate(clean, len(cases) + 1):
+    for n, c in enumerate(list(split) + list(clean), len(cases) + 1):
         basis = ", ".join(BASIS_WORDS[b] for b in c["basis"]) or "by contents"
-        lines.append(f"  [{n}] clean, {c['outcome']}, lag {c['lag']} days, {basis}")
+        lines.append(f"  [{n}] {c['kind']}, {c['outcome']}, lag {c['lag']} days, {basis}")
         lines.append(f"      issue    {_leg_text(c['issue_leg'], d)}")
         lines.append(f"      receipt  {_leg_text(c['receipt_leg'], d)}")
+        for leg in c["also_legs"]:
+            lines.append(f"      and      {_leg_text(leg, d)}")
     return lines
 
 
@@ -1561,10 +1586,10 @@ def golden_build(args) -> dict:
         a = audit(None, prefer=str(source))
     except MovesInput as exc:
         return dict(out, ok=False, text=str(exc), exit=1)
-    cases, clean = _golden_cases(a)
+    cases, clean, split = _golden_cases(a)
     base = a.base
     by_kind = {k: sum(1 for c in cases if c["kind"] == k) for k in EXCEPTION_KINDS}
-    doc = {"version": 1, "folder": source.name if source.is_dir() else source.parent.name, "file": a.source["file"],
+    doc = {"version": 2, "folder": source.name if source.is_dir() else source.parent.name, "file": a.source["file"],
            "sha256": base.led.sha, "first_date": base.first, "data_date": a.d, "scope": "accessories",
            "rules": {"lag_max": base.rules.lag_max, "dn_max": base.rules.dn_max, "quick_lag": base.rules.quick_lag,
                      "damage_grace_days": base.rules.damage_grace_days},
@@ -1572,19 +1597,21 @@ def golden_build(args) -> dict:
            "out_of_scope": base.legs.out_of_scope, "exceptions_by_kind": by_kind,
            "aside": [{"voucher": x.voucher, "kind": x.kind, "reason": x.reason, "partner": x.partner}
                      for x in base.result.aside],
-           "exceptions": cases, "clean_rule": f"step A, not among identical issues: the first {GOLDEN_CLEAN} by the "
-                                              "sha256 of the issue number", "clean": clean}
+           "exceptions": cases, "split": split,
+           "clean_rule": f"step A, not among identical issues: the first {GOLDEN_CLEAN} by the sha256 of the issue number",
+           "clean": clean}
     target = paths.golden_dir() / "pairs_accessories.json"
     review = paths.exports_dir(a.d) / "moves-golden-review.txt"
-    text_review = "\n".join(_guarded(ln).rstrip() for ln in golden_review(a, cases, clean)) + "\n"
+    text_review = "\n".join(_guarded(ln).rstrip() for ln in golden_review(a, cases, clean, split)) + "\n"
     files = [paths.write_text(target, json.dumps(_jsonable(doc), indent=1, ensure_ascii=False) + "\n"),
              paths.write_text(review, text_review)]
     kinds = ", ".join(f"{k.replace('_', ' ')} {n}" for k, n in by_kind.items())
     text = "\n".join(_guarded(ln) for ln in (
-        f"GOLDEN  {doc['folder']}, the ledger to {_day(a.d)}: {_plural(len(cases), 'exception')} ({kinds}) and "
-        f"{_plural(len(clean), 'clean pair')}",
+        f"GOLDEN  {doc['folder']}, the ledger to {_day(a.d)}: {_plural(len(cases), 'exception')} ({kinds}), "
+        f"{_plural(len(split), 'pair')} booked in under two receipts and {_plural(len(clean), 'clean pair')}",
         f"  Written: {target.relative_to(paths.data_root()) if paths.allowed_output(target) else target}",
         f"  Review:  {review.relative_to(paths.data_root()) if paths.allowed_output(review) else review}",
         "  Both are local (git-ignored): the review names stores, items and vouchers."))
     return dict(out, data_date=a.d.isoformat(), text=text, files=[str(f) for f in files],
-                flags={"golden": True, "exceptions": by_kind, "clean": len(clean)})
+                flags={"golden": True, "exceptions": by_kind, "split": len(split), "clean": len(clean),
+                       "sample": [k for k, _c in _sample(cases, clean, split)]})
