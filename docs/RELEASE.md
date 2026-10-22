@@ -431,6 +431,50 @@ engine files while the API is the older one, so loads wait until Claude reverts 
 
 ---
 
+## Release r10: the long-number mask
+
+*For the owner. What goes live: every run of 10 or more digits typed into a Focus narration (a phone number with its
+country code, a bank account number) is masked like the 9-digit and the 15-digit ones, its last 3 digits kept: in
+`v_sales` (and so for the AI), in the stored narrations of the order lines and the stock ledger, and by the loader on
+every load from then on. Order numbers (8-digit runs) are untouched. There is no release script: the commands below,
+one at a time, in PowerShell in the project folder, on `main`, after `git pull --ff-only`; never from a code worktree,
+never during a Focus load.*
+
+**When.** After a morning load, at a quiet hour. The release changes engine files (`scripts/text_mask.py`,
+`scripts/ingest.py`), so from the pull until the API deploy has finished `/yq-load` refuses ("a portal release is
+merged but not live"): go from the backup to the deploy in one sitting, and upload nothing on the portal's Data page
+in between (its upload still parses with the older mask until the deploy).
+
+**Before step 1.** CI is green for the pushed head commit (`render_deploy` deploys any commit without asking CI), and
+`<sha>` below is that head: the release is two commits, and the first alone fails CI and leaves `ops status` saying
+"merged but not live". The data step masks every stored run of 9 digits or more that is still in clear, so it also
+masks the older ID numbers the optional R7b data step (`r7_narration_mask_data_migration.sql`) would have masked.
+
+```
+python -m scripts.yq_backup release r10                                           # 1. the encrypted backup: keep its last line (the archive)
+python -m scripts.apply_sql scripts/r10_long_number_mask_migration.sql --rehearse  # 2. "Rehearsal OK" (on production, rolled back)
+python -m scripts.apply_sql scripts/r10_long_number_mask_migration.sql             #    "Done." (an error = nothing applied: tell Claude)
+python -m scripts.audit_grants                                                     #    must exit 0
+python -m scripts.render_deploy status                                             # 3. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                       #    <sha> = the r10 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                       # 4. "commit" = the first 12 characters of <sha>
+python -m scripts.ops status                                                       #    no "merged but not live": /yq-load works again
+python -m scripts.ops moves portal                                                 #    must print PASS (read-only)
+```
+
+**The mask cannot be undone.** The migration replaces those digits in the stored narrations with stars; only the
+backup of step 1 keeps the old text (encrypted). `row_hash` is not changed (it is made from the raw cells, as in 2b)
+and no key holds the narration, so the next load matches every stored row: nothing is loaded twice or missed, and a
+re-load of the same dates reads unchanged. Not masked (known limits): digits written in groups ("4111 1111 1111
+1111"), Arabic-Indic digits, runs of 8 digits or fewer (a local phone number without its country code).
+
+**If something is wrong.** The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 3> --wait`.
+`v_sales` back to the R7b mask: `python -m scripts.apply_sql scripts/r10_long_number_mask_reverse.sql`, then
+`python -m scripts.audit_grants` (the stored narrations stay masked). Then tell Claude: `main` still carries the r10
+engine files, so `/yq-load` waits until Claude reverts `main` or the API is deployed again.
+
+---
+
 ## Reference: what R6 added to the checks
 
 - `/health` → `commit` (RENDER_GIT_COMMIT): the smoke can prove which build answers.

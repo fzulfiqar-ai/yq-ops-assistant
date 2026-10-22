@@ -37,7 +37,7 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_product_economics` | `r7d_margin_exvat_migration.sql` (R7d, 27-Sep-2026: `margin_bhd` / `margin_pct` on the EX-VAT price, the other 7 columns verbatim; before that `economics_v2_migration.sql` → `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no`. Re-running `economics_v2_migration.sql` after R7d **silently puts the VAT-inclusive margin back** (same 9 columns) — never do it |
 | `v_price_tracker` | `r7d_margin_exvat_migration.sql` (R7d: `margin_now_pct` / `margin_before_pct` on the EX-VAT price; before that `price_tracker_migration.sql`) | not in the baseline. `price_tracker_migration.sql` DROPs and re-creates the view — re-running it after R7d loses the ex-VAT margin **and the grants**; never do it |
 | `v_catalog_reserved`, `ar_ageing_totals` | `economics_v2_migration.sql` (R2) | not in the baseline — staff reserved-stock view (M10) and Focus's own AR Grand Total per snapshot |
-| `v_sales` | `r7_narration_mask_migration.sql` (R7b, 27-Sep-2026: `narration` masked, the other 30 columns verbatim; before that `division_payment_migration.sql`) | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway`. Re-running `division_payment_migration.sql` after R7b **silently unmasks** the narration (same 31 columns) — never do it |
+| `v_sales` | `r10_long_number_mask_migration.sql` (release r10, 22-Oct-2026: the narration mask widened to every run of 10 or more digits, the other 30 columns verbatim; before that `r7_narration_mask_migration.sql` (R7b: `narration` masked) → `division_payment_migration.sql`) | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway`. Re-running `r7_narration_mask_migration.sql` after r10 **silently narrows** the mask (runs of 10 to 14 digits show again) and re-running `division_payment_migration.sql` **silently unmasks** the narration (same 31 columns) — never do either |
 | `v_receivables` | `receivables_consolidation_migration.sql` | **STALE, different source table** — baseline is ledger-based, canonical reads `ar_ageing`. Lacks the 15 ageing columns; also carries 4 the canonical does *not* have (`last_entry_date`, `salesman`, `last_narration`, `days_outstanding`). Only `account` overlaps cleanly — `outstanding_bhd` changes meaning |
 | `v_low_stock` | `lowstock_unification_migration.sql` | **STALE, diverges both ways** — lacks `sold_90d`, `days_cover`, `suggested_reorder_qty`, `status`; carries `product_name`, `sku_code`, `category_name`, `warehouse_name`, `balance_value_bhd`, `as_of_date` which the canonical drops |
 | `v_sales_by_payment`, `v_sales_by_division` | `division_payment_migration.sql` | not present in the baseline at all |
@@ -59,9 +59,9 @@ copy one view's block out of the file and run just that. For `v_sales`, `v_recei
 `v_product_margin` **nothing stops you** — the statement succeeds and the numbers quietly go
 wrong. If you need one view refreshed, take it from its canonical migration file, never from here.
 
-`v_sales` has been redefined four times: `channel_migration.sql` → `revenue_channel_migration.sql`
-→ `division_payment_migration.sql` → `r7_narration_mask_migration.sql` (R7b). Only the last one matters; the
-earlier three are history.
+`v_sales` has been redefined five times: `channel_migration.sql` → `revenue_channel_migration.sql`
+→ `division_payment_migration.sql` → `r7_narration_mask_migration.sql` (R7b) → `r10_long_number_mask_migration.sql`
+(release r10). Only the last one matters; the earlier four are history.
 
 ### Revenue basis — do not "reconcile" these
 
@@ -879,3 +879,42 @@ apply / audit sequence and the rollback order, as text. `python -m tests.test_r9
 CI as text; the replay of each file and its reverse, twice, on a scratch PostgreSQL only with `YQ_LOCAL_PG_R9`, a
 loopback address). `python -m tests.test_r9_transfers` holds the API's pairing over `v_transfer_lines` equal to
 `/yq-moves`', and `python -m scripts.ops moves portal` is the proof on production after the deploy (`-Part verify`).
+
+## Release r10 (built 22-Oct-2026, not applied): `r10_long_number_mask_migration.sql` — the long-number mask
+
+R7b and 2b masked a run of exactly 9 digits (a CPR) and a run of 15 or more (a card), keeping the last 3; a run of 10
+to 14 digits (a phone number with its country code, a bank account number) stayed in clear: 15 order lines on the
+masked copy of production, readable through `v_sales`. One file with its reverse; the runbook is `docs/RELEASE.md`
+§ Release r10 (backup, migration, API deploy: `scripts/text_mask.py` and `scripts/ingest.py` are engine files).
+
+- **`v_sales`**: `r7_narration_mask_migration.sql`'s statement verbatim but the long pattern, `[0-9]{12,}` →
+  `[0-9]{7,}` (a run of 10 or more digits keeps its last 3 behind 12 stars; a 9-digit run, as before, behind 6). This
+  file owns `v_sales` now (table above); `CREATE OR REPLACE` keeps the 31 columns, `v_sales_agent`, the views on
+  `v_sales` and every grant.
+- **The data step** where the r7 and r9 steps ran: `order_lines.narration`, `stock_movements.narration` and the batch
+  importer's copies of both targets in `ingest_stage` / `ingest_replaced`, each statement r7's or r9's verbatim but
+  the pattern. `row_hash` is not touched (it is made from the raw cells), and no import key holds the narration
+  (order lines upsert on invoice + line; the ledger replaces its date span and upserts on voucher + item + row_hash;
+  the batch importer compares the narration only to call a line updated or unchanged), so the next load matches every
+  stored row: the data step's text is the parser's text, a re-load of those dates reads unchanged. **It cannot be
+  undone from SQL**: the release backup (`yq_backup release r10`, encrypted) is the only copy of the old text.
+- **The self-check** proves on the database that the SQL mask gives what `scripts/text_mask.py` gives on a fixed list of
+  invented samples (runs of 8, 9, 10, 11, 14, 15 and 20 digits, digits glued to letters, several runs, masked text),
+  then the 31 columns, the r10 pattern in `v_sales`, the grants, and no narration left with a run of 9 digits or more
+  (stored, in the copies, in `v_sales` and `v_sales_agent`).
+- **Reverse**: `r10_long_number_mask_reverse.sql` puts `r7_narration_mask_migration.sql`'s `v_sales` and column
+  comment back; the stored narrations stay masked.
+- **Known limits** (Python and SQL alike): digits written in groups (`4111 1111 1111 1111`, `1234-5678-9012`: runs of
+  4) and Arabic-Indic digits (`[0-9]` is ASCII only) are not masked, nor is a run of 8 digits or fewer (the order
+  numbers are 8-digit runs), so a local phone number typed without its country code stays as typed. Not covered by
+  any step: `ledger_entries.narration` and `selling_prices.narration`, which the parser never masked.
+- Not changed: `ai_agent_mask` (`r7b_ai_head_migration.sql`) is another rule, every run of 8 or more digits with single
+  spaces allowed → `[number]`, over the `v_agent_*` views; it already hid these runs.
+
+Rehearsed on a local copy of production with 2b applied (PostgreSQL 17.6): applied twice (the second run updates no
+row), the reverse twice, applied again; the narrations with a run of 10 to 14 digits went from 15 order lines (one
+12-digit run, two 14-digit runs, as distinct texts) to none, in the table and in `v_sales` / `v_sales_agent`; each
+refusal of the self-check provoked once (a wrong sample, the old view, a run stored after the step). Tests:
+`python -m tests.test_r10_long_number_mask` (in CI as text and Python; its replay on a scratch PostgreSQL only with
+`YQ_LOCAL_PG_R10`, a loopback address); `tests/test_r7b_security.py` holds the three earlier files to R7b's rule
+(history).

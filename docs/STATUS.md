@@ -98,10 +98,12 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- r10, the long-number mask (the owner's decision of 21-Oct-2026: its own small release after 2b): every run of
-  ten or more digits in the stored narrations masked, the last three kept, in `scripts/text_mask.py` and every SQL
-  copy of the mask (a new migration and its reverse); built in a worktree, then rehearsed on the local masked copy.
-  `scripts/text_mask.py` is an engine file: from its push until the API deploy `/yq-load` refuses.
+- Release r10, the long-number mask (the owner's decision of 21-Oct-2026: its own small release after 2b; built and
+  rehearsed on the local copy 22-Oct-2026, not applied): every run of 10 or more digits in a narration is masked,
+  its last 3 digits kept, by the parser (`scripts/text_mask.py`) and in `v_sales` and the stored narrations
+  (`scripts/r10_long_number_mask_migration.sql` and its reverse); `row_hash` unchanged. The owner's run:
+  `docs/RELEASE.md`, Release r10 (backup, migration, API deploy). `scripts/text_mask.py` is an engine file:
+  `/yq-load` refuses from the pull until the deploy.
 - The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
 
 ## Not built (the engine prints "not built yet")

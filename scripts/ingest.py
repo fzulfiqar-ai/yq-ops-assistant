@@ -191,17 +191,20 @@ def txt(v) -> str | None:
     return s
 
 
-# ── personal ID numbers in the Sales Day Book narration (release R7b, plan §25 P1 / §28) ──────
-# Staff type customers' CPR numbers (Bahrain personal ID: 9 digits) and card / account numbers
-# (15 digits and more) into the invoice Narration; 646 of them reached v_sales and, through it,
-# the AI. Masked at parse time, keeping the last 3 digits so a person can still tell two apart:
+# ── personal ID numbers in the Sales Day Book narration (release R7b, plan §25 P1 / §28; r10) ──
+# Staff type customers' CPR numbers (Bahrain personal ID: 9 digits), phone numbers with the country
+# code and card / account numbers into the invoice Narration; 646 of them reached v_sales and,
+# through it, the AI. Masked at parse time, keeping the last 3 digits so a person can still tell
+# two apart:
 #     850512345         -> ******345        (a 9-digit run keeps its length)
-#     4111111111111111  -> ************111  (15+ digits: always 12 stars + 3, the length is not kept)
+#     4111111111111111  -> ************111  (10+ digits: always 12 stars + 3, the length is not kept)
+# Until release r10 the long rule began at 15 digits (a run of 10 to 14 stayed in clear).
 # A "run" is digits with no digit on either side, so the order number the storekeeper types
 # (YQ-2609-0019, YQ 2609 0019, YQ26090019: 4- and 8-digit runs) and invoice / voucher numbers pass
-# untouched, and masked text never matches again (masking twice changes nothing). The SQL twin of
-# these two patterns lives in scripts/r7_narration_mask_migration.sql (v_sales.narration) and
-# scripts/r7_narration_mask_data_migration.sql; tests/test_r7b_security.py holds them equal.
+# untouched, and masked text never matches again (masking twice changes nothing). Grouped digits
+# and Arabic-Indic digits are not masked (scripts/text_mask.py says why). The SQL twin of these
+# two patterns lives in scripts/r10_long_number_mask_migration.sql (v_sales.narration and the
+# stored narrations); tests/test_r10_long_number_mask.py holds them equal.
 # [0-9], never \d: Python's \d also matches Arabic-Indic digits, Postgres's [0-9] does not.
 # The patterns and the mask live in scripts/text_mask.py (standard library only, release 2b: the API
 # masks with them without importing pandas) and are re-exported here unchanged.

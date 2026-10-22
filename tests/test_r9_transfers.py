@@ -37,7 +37,7 @@ Covered (app/transfer_audit.py, GET /stock/flow, GET /stock/recon, GET /command/
     nor the pairing, and building a snapshot loads the pairing and the mask, never pandas; the background build on the
     API only (RENDER), after boot and after each load noticed;
   * the mask (scripts/text_mask.py): standard library only, re-exported by scripts/ingest.py as the very same objects
-    (the SQL twin checks read them there), its rule unchanged, and the loader still runs as `python scripts/ingest.py`;
+    (the SQL twin checks read them there), its rule (r10), and the loader still runs as `python scripts/ingest.py`;
   * GET /command/team-message: admin and management 200 with {run, data_date, text, created_at}, 204 with no body
     when none is stored, 403 for every other login, 401 without one, 503 without a word of the message or the error
     when the read fails; the read = the row of team_messages on the latest data date, the latest posted of that date,
@@ -862,7 +862,7 @@ def _():
 
 # ── the mask ──────────────────────────────────────────────────────────────────
 
-@test("text_mask: standard library only; scripts/ingest.py re-exports the very same objects; the rule is unchanged")
+@test("text_mask: standard library only; scripts/ingest.py re-exports the very same objects; the rule (r10: 9 digits, or 10 and more)")
 def _():
     from scripts import ingest, text_mask
     for name in ("PERSONAL_ID_LONG", "PERSONAL_ID_CPR", "MASK_LONG", "MASK_CPR", "mask_personal_ids"):
@@ -875,6 +875,7 @@ def _():
     card = "4" + "0" * 14 + "2"                         # invented digit runs, built at run time
     assert mask("CPR " + ID_A) == "CPR ******789" and mask("card " + card) == "card ************002"
     assert mask(ID_A + card) == "************002", "one run of 25 digits"
+    assert mask("ph " + ID_A[:5] + ID_B[:6]) == "ph ************654", "11 digits: masked since r10"
     for kept in ("order YQ-2610-0019", "YQ 2610 0019", "YQ26100019", "SIO:T-26-10-123", "12345678", ""):
         assert mask(kept) == kept, kept
     assert mask(None) is None and mask(mask("x " + ID_B)) == mask("x " + ID_B), "masking twice changes nothing"

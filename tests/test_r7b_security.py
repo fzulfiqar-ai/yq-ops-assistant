@@ -548,18 +548,22 @@ NARRATION_SAMPLES = {
     "acct 400000000000000000009": "acct ************009",
     "900000123": "******123",
     "a900000123b": "a******123b",
-    "ten 1234567890 fourteen 12345678901234": "ten 1234567890 fourteen 12345678901234",
+    "ten 1234567890 fourteen 12345678901234": "ten ************890 fourteen ************234",   # r10 (R7b: in clear)
     "SI-YQ-26-09-119 inv 00012345": "SI-YQ-26-09-119 inv 00012345",
     "YQ-2609-0019, YQ 2609 0020, YQ26090021": "YQ-2609-0019, YQ 2609 0020, YQ26090021",
     "cpr٩٠٠٠٠٠١٢٣": "cpr٩٠٠٠٠٠١٢٣",          # Arabic-Indic digits: Postgres [0-9] would not mask them either
 }
-# Every file that spells the mask in SQL: the v_sales view, and the data steps that mask stored narration (the Sales
-# Day Book in r7, the stock ledger in r9 release 2b).
+# Every file that spelt the mask in SQL in R7b and release 2b: the v_sales view, and the data steps that mask stored
+# narration (the Sales Day Book in r7, the stock ledger in r9). History since release r10, which widened the long rule
+# to 10 digits and more: scripts/r10_long_number_mask_migration.sql owns v_sales now and masks the stored narrations
+# again; tests/test_r10_long_number_mask.py holds it equal to the parser. These files keep R7b's long pattern.
 MASK_SQL_FILES = ("r7_narration_mask_migration.sql", "r7_narration_mask_data_migration.sql",
                   "r9_stock_moves_migration.sql")
+R7B_LONG = r"(?<![0-9])[0-9]{12,}([0-9]{3})(?![0-9])"     # R7b's long pattern: 15 digits and more
+R7B_KEPT = {"ten 1234567890 fourteen 12345678901234"}      # the sample R7b leaves in clear and r10 masks
 
 
-@test("narration: 9-digit and 15+-digit runs keep their last 3; idempotent; other numbers and order numbers untouched")
+@test("narration: a 9-digit run and every run of 10 or more digits keep their last 3 (r10); idempotent; other numbers and order numbers untouched")
 def _():
     from scripts.ingest import mask_personal_ids as mask
     cases = NARRATION_SAMPLES
@@ -624,13 +628,13 @@ def _():
     assert _select_list(rev) == old, "the reverse is division_payment's v_sales verbatim"
     tail = lambda s: re.search(r"\bfrom order_lines ol.*?;", s, re.S).group(0)  # noqa: E731
     assert " ".join(tail(mig).split()) == " ".join(tail(base).split()) == " ".join(tail(rev).split())
-    # the SQL spelling of the two patterns is the parser's, replacement stars included
+    # the SQL spelling of the two patterns is R7b's (the 9-digit one is still the parser's; the long one is history
+    # since r10), replacement stars included
     for f in MASK_SQL_FILES:
         s = _sql(f)
-        assert f"'{ingest.PERSONAL_ID_LONG.pattern}', '{ingest.MASK_LONG}\\1', 'g'" in s, f
+        assert f"'{R7B_LONG}', '{ingest.MASK_LONG}\\1', 'g'" in s, f
         assert f"'{ingest.PERSONAL_ID_CPR.pattern}', '{ingest.MASK_CPR}\\1', 'g'" in s, f
-        assert s.index(ingest.PERSONAL_ID_LONG.pattern) < s.index(ingest.PERSONAL_ID_CPR.pattern), \
-            "15+ first, then 9 (the parser's order)"
+        assert s.index(R7B_LONG) < s.index(ingest.PERSONAL_ID_CPR.pattern), "15+ first, then 9 (the parser's order)"
     for f in ("r7_narration_mask_migration.sql", "r7_narration_mask_reverse.sql", "r7_narration_mask_data_migration.sql",
               "r7_narration_mask_data_reverse.sql", "r7_salesmen_login_unique_migration.sql",
               "r7_salesmen_login_unique_reverse.sql", "user_roles_must_reset_migration.sql"):
@@ -650,7 +654,7 @@ _SQL_TWIN = re.compile(
     r"'(?P<p2>[^']*)',\s*'(?P<r2>[^']*)',\s*'g'\s*\)")
 
 
-@test("narration twin: every SQL spelling of the mask (v_sales, the r7 and r9 data steps) equals mask_personal_ids on the sample set")
+@test("narration twin: every R7b spelling of the mask (v_sales, the r7 and r9 data steps; history since r10) equals mask_personal_ids on the sample set but the run R7b left in clear")
 def _():
     from scripts.ingest import mask_personal_ids as mask
     for f in MASK_SQL_FILES:
@@ -667,7 +671,10 @@ def _():
                     return text
                 return re.sub(t["p2"], t["r2"], re.sub(t["p1"], t["r1"], text))
             for raw, want in NARRATION_SAMPLES.items():
-                assert twin(raw) == mask(raw) == want, (f, t["src"].strip(), raw, twin(raw))
+                if raw in R7B_KEPT:          # R7b's rule left these runs in clear; r10 masks them
+                    assert twin(raw) == raw != mask(raw) == want, (f, raw, twin(raw))
+                else:
+                    assert twin(raw) == mask(raw) == want, (f, t["src"].strip(), raw, twin(raw))
                 assert twin(twin(raw)) == twin(raw), (f, "idempotent", raw)
             assert twin(None) is None and twin("") == ""
 

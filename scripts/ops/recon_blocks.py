@@ -192,7 +192,7 @@ def _guarded(line: str) -> str:
 
 def _safe(name) -> str:
     """A name from the data as it may be printed: spaces collapsed, an ID-shaped run of digits masked (the loader's
-    own mask: nine digits, or fifteen and more; scripts/text_mask.py, standard library only)."""
+    own mask: nine digits, or ten and more; scripts/text_mask.py, standard library only)."""
     from scripts.text_mask import mask_personal_ids
     return mask_personal_ids(" ".join(str(name or "").split())) or ""
 

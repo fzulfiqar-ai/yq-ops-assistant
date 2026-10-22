@@ -191,6 +191,12 @@ jobs:
           python -m tests.test_r9_transfers
           python -m tests.test_r9_stock_moves
           python -m tests.test_r9_release_script
+      # r10, the long-number mask: scripts/text_mask.py and its SQL twin (r10_long_number_mask_migration.sql) on every
+      # run length, the next load's keys, the migration and its reverse as text (the local-Postgres replay SKIPs here)
+      - name: r10 suite - the long-number mask (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r10_long_number_mask
       # YQ Ops Skills, phase 1 (/yq-load, /yq-brief): the read-only engine `python -m scripts.ops` and
       # its one writer, scripts/yq_load_go.py. Every suite pins the Supabase and database addresses to
       # ci.invalid before any import: a write through any channel must raise, the load check reads
