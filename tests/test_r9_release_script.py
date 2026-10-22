@@ -915,8 +915,9 @@ def _():
         print("        note: moves portal is not in this checkout yet (E-OPS)")
 
 
-@test("no function shadows a script constant: PowerShell names ignore case and a called function sees its callers' "
-      "variables (the verify part's own $api, a commit, once stood in for the /health address)")
+@test("no line of a function starts by setting a local named like a script setting, and no command sets a variable: "
+      "PowerShell names ignore case and a called function sees its callers' variables (the verify part's own $api, a "
+      "commit, once stood in for the /health address); the PowerShell test below sees every other shape")
 def _():
     src = _src()
     head = src[:re.search(r"^function ", src, flags=re.M).start()]
@@ -925,8 +926,90 @@ def _():
     clashes = [(i, ln.strip()) for i, ln in _code(src)
                if (m := re.match(r"^\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)", ln)) and m.group(1).lower() in consts]
     assert not clashes, clashes
+    setters = [(i, ln.strip()) for i, ln in _code(src)
+               if re.search(r"(?i)\b(Set|New)-Variable\b|\s-(Out|Error|Warning|Information|Pipeline)Variable\b|\[ref\]", ln)]
+    assert not setters, setters
     health = _function(src, "Get-HealthCommit")
     assert "$script:API + '/health'" in health and "-UserAgent $script:UA" in health, health
+
+
+# every way a function makes a local, as PowerShell's parser sees it: assignments (anywhere on a line, typed, +=,
+# a, b =, $local:), parameters (both styles) and loop variables; script-level = outside every function, or $script:
+# ($env: and other drives are not variables a local can stand in for)
+_SHADOW_PS = r"""
+function FnOf($a) { for ($p = $a.Parent; $p; $p = $p.Parent) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name } }; return '' }
+function VarsOf($x) {
+  if ($x -is [System.Management.Automation.Language.VariableExpressionAst]) { $x }
+  elseif ($x -is [System.Management.Automation.Language.AttributedExpressionAst]) { VarsOf $x.Child }
+  elseif ($x -is [System.Management.Automation.Language.ArrayLiteralAst]) { foreach ($el in $x.Elements) { VarsOf $el } }
+}
+function Shadows($path) {
+  $tk = $null; $er = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tk, [ref]$er)
+  if ($er -and $er.Count -gt 0) { throw ('parse errors in ' + $path) }
+  $made = @()
+  foreach ($n in $ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+    foreach ($v in @(VarsOf $n.Left)) { $made += ,@((FnOf $n), $v, 'assignment') }
+  }
+  foreach ($n in $ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.ParameterAst] }, $true)) {
+    $made += ,@((FnOf $n), $n.Name, 'parameter')
+  }
+  foreach ($n in $ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) {
+    $made += ,@((FnOf $n), $n.Variable, 'foreach')
+  }
+  $consts = @{}
+  foreach ($m in $made) {
+    $vp = $m[1].VariablePath
+    if ((-not $m[0] -or $vp.IsScript) -and -not $vp.IsDriveQualified) { $consts[($vp.UserPath -split ':')[-1].ToLower()] = 1 }
+  }
+  $hits = foreach ($m in $made) {
+    $vp = $m[1].VariablePath
+    $name = ($vp.UserPath -split ':')[-1].ToLower()
+    if ($m[0] -and ($vp.IsUnqualified -or $vp.IsLocal) -and $consts.ContainsKey($name)) { $m[0] + ':' + $name + ':' + $m[2] }
+  }
+  return @((($consts.Keys | Sort-Object) -join ','), (($hits | Sort-Object -Unique) -join ','))
+}
+$real = Shadows $env:YQ_RELEASE_PS1
+$probe = Shadows $env:YQ_PROBE_PS1
+'REAL_CONSTS=' + $real[0]
+'REAL=' + $real[1]
+'PROBE=' + $probe[1]
+"""
+
+# each shape the reviewer of the fix confirmed to shadow in Windows PowerShell 5.1, and three that do not (H)
+_SHADOW_PROBE = r"""param([string]$Part)
+$API = 'https://example.invalid'
+$UA = 'probe'
+$ROOT = 'C:\probe'
+$LOG = 'C:\probe\log.txt'
+function A { if ($true) { $api = 'sha' }; B }
+function B { [string]$api = 'sha' }
+function C { $root += 'x' }
+function D { foreach ($ua in 1..2) { } }
+function E { $api, $z = 1, 2 }
+function F([string]$log) { }
+function G { param([string]$part) }
+function H { $script:API = 'ok'; $private:api = 'ok'; $apiSha = 'ok'; $local:root = 'x' }
+"""
+
+
+@test("PowerShell's parser finds no function making a local named like a script-level variable (an assignment anywhere "
+      "on a line, typed, +=, a, b =, $local:, a parameter, a loop variable); a probe script proves it sees each shape; "
+      "SKIP without PowerShell")
+def _():
+    exe = _powershell()
+    if not exe:
+        print("        SKIP: no PowerShell on this machine (the text pins above still apply)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe.ps1"
+        probe.write_text(_SHADOW_PROBE, encoding="ascii")
+        got = _run_ps(exe, _SHADOW_PS, {**os.environ, "YQ_RELEASE_PS1": str(SCRIPT), "YQ_PROBE_PS1": str(probe)})
+    assert got.get("PROBE") == ("A:api:assignment,B:api:assignment,C:root:assignment,D:ua:foreach,E:api:assignment,"
+                                "F:log:parameter,G:part:parameter,H:root:assignment"), got
+    consts = set(got["REAL_CONSTS"].split(","))
+    assert {"api", "ua", "root", "log", "part", "restoretables"} <= consts, consts
+    assert got.get("REAL") == "", got.get("REAL")
 
 
 def main() -> int:
