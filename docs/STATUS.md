@@ -79,6 +79,11 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
     the commit's hold;
   - X1: `scripts/yq_team_post.py` stores each load's team message in `team_messages` after the delivery step,
     and the Command Centre shows it with a Copy button (`GET /command/team-message`, admin and management).
+- Release r10, the long-number mask (22-Oct-2026, live on `main`, the API and the database): every run of 10 or
+  more digits in a narration is masked, its last 3 digits kept, by the parser (`scripts/text_mask.py`), in `v_sales`
+  and in the stored narrations (`scripts/r10_long_number_mask_migration.sql`, which on the owner's yes also masked
+  the 9-digit runs the optional R7b data step had left); `row_hash` unchanged. Read-only after the release: no run
+  of 9 digits or more left in clear in `order_lines` or `stock_movements`, `moves portal` PASS.
 - Release backups: `python -m scripts.yq_backup release <label>` seals an encrypted backup outside OneDrive, and
   `unpack` opens one for a rollback (R1, `docs/BACKUPS.md`).
 - The keep-alive Worker reads Supabase every ten minutes and alerts by Telegram once it is deployed (the code
@@ -98,12 +103,6 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- Release r10, the long-number mask (the owner's decision of 21-Oct-2026: its own small release after 2b; built and
-  rehearsed on the local copy 22-Oct-2026, not applied): every run of 10 or more digits in a narration is masked,
-  its last 3 digits kept, by the parser (`scripts/text_mask.py`) and in `v_sales` and the stored narrations
-  (`scripts/r10_long_number_mask_migration.sql` and its reverse); `row_hash` unchanged. The owner's run:
-  `docs/RELEASE.md`, Release r10 (backup, migration, API deploy). `scripts/text_mask.py` is an engine file:
-  `/yq-load` refuses from the pull until the deploy.
 - The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
 
 ## Not built (the engine prints "not built yet")
@@ -113,8 +112,7 @@ sections from /yq-week to /yq-kpi, and "Build order").
 
 ## Order of work (each step needs the owner's go)
 
-r10, the long-number mask (the owner runs the backup, the migration and the API deploy), then Market Intel
-phases 3 and 4 once the rep reports are enough.
+Market Intel phases 3 and 4 once the rep reports are enough (judged from about 11 to 25 November).
 
 ## Open items
 
@@ -129,6 +127,10 @@ phases 3 and 4 once the rep reports are enough.
 - The phase 2b release's last proof: the next load's team message in the Command Centre, with its Copy button
   (X1; the release's own checks cannot see it before a load). Not in 2b (the owner's decision): X3, the two staff addresses still in tracked files, and D11, the
   Market Intel grant. The portal's Data page upload still uses the older loader.
+- Not masked yet (the r10 review, for the owner's decision): `selling_prices.narration` (the read-only role reads
+  it) and `ledger_entries.narration` (service role only); AI replies from before r10 kept up to 7 days in
+  `query_cache`; a local 8-digit phone number typed without its country code (an 8-digit run, like the order
+  numbers).
 - Profitability is held back at every load until Focus posts the cost of sales again.
 - `/yq-stock`, answered by the owner on 20-Oct-2026: the measured lead time wins (per supplier once it can be
   measured); goods on order are logged when he says an order is placed; the order list counts the vans and
