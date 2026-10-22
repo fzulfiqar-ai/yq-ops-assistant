@@ -340,8 +340,10 @@ function Test-CfDeploySteps($run) {
 }
 
 function Get-HealthCommit {
+  # $script: on purpose: PowerShell names ignore case and a function sees its callers' variables, so a caller's own
+  # $api (a commit) would otherwise stand in for the address
   try {
-    $h = Invoke-RestMethod -UseBasicParsing -Uri ($API + '/health') -UserAgent $UA -TimeoutSec 70
+    $h = Invoke-RestMethod -UseBasicParsing -Uri ($script:API + '/health') -UserAgent $script:UA -TimeoutSec 70
     return [string]$h.commit
   } catch { return '' }
 }
@@ -735,14 +737,14 @@ function Invoke-PartVerify {
   # Reads only. About 3 minutes, then your checks in the portal.
   Assert-Ready -AfterApi
   $st = Get-State
-  $api = [string]$st.api_sha
-  if (-not $api -or -not (Test-SameCommit $api ([string]$st.release_sha))) { Stop-Part 2 'The API of this release is not live yet: run -Part api first.' }
+  $apiSha = [string]$st.api_sha
+  if (-not $apiSha -or -not (Test-SameCommit $apiSha ([string]$st.release_sha))) { Stop-Part 2 'The API of this release is not live yet: run -Part api first.' }
   if (-not [string]$st.web_live) { Say '  Note: -Part web has not passed yet. The comparison below reads the API, so it runs all the same.' Yellow }
 
   Step 'the API runs the release'
   $hc = Get-HealthCommit
   Say ('  API /health commit: ' + $hc)
-  if (-not (Test-SameCommit $hc $api)) { Fail 'the API does not run the release commit: run -Part api' }
+  if (-not (Test-SameCommit $hc $apiSha)) { Fail 'the API does not run the release commit: run -Part api' }
 
   Step 'the portal pairs the transfers as /yq-moves does (moves portal must print PASS)'
   $movesOk = $false
@@ -764,7 +766,7 @@ function Invoke-PartVerify {
     Fail 'gate compare: a pre-existing order, line or total changed without an explanation. Stop rule: tell Claude now (docs\RELEASE.md, Rollback)'
   }
   if (-not $movesOk) { Fail 'moves portal did not print PASS: the portal does not pair the transfers as /yq-moves does. Do not run -Part migrate2; tell Claude' }
-  Set-State 'verified' $api
+  Set-State 'verified' $apiSha
 
   Step 'your checks in the portal (about 5 minutes; nothing here is automatic)'
   $checks = @(
@@ -784,15 +786,15 @@ function Invoke-PartMigrate2 {
   # Only once -Part verify passed for the API that is live. About 2 minutes, two YES.
   Assert-Ready -AfterApi
   $st = Get-State
-  $api = [string]$st.api_sha
-  if (-not $api -or -not (Test-SameCommit $api ([string]$st.release_sha)) -or -not (Test-SameCommit ([string]$st.verified) $api)) {
+  $apiSha = [string]$st.api_sha
+  if (-not $apiSha -or -not (Test-SameCommit $apiSha ([string]$st.release_sha)) -or -not (Test-SameCommit ([string]$st.verified) $apiSha)) {
     Stop-Part 2 'The release is not verified yet: run -Part verify first (moves portal must print PASS and the gate compare must pass).'
   }
 
   Step 'the API runs the release (an older API reads v_transfer_flow; this one does not)'
   $hc = Get-HealthCommit
   Say ('  API /health commit: ' + $hc)
-  if (-not (Test-SameCommit $hc $api)) { Stop-Part 2 'The API does not run the release now, so v_transfer_flow stays (an older API reads it). Tell Claude.' }
+  if (-not (Test-SameCommit $hc $apiSha)) { Stop-Part 2 'The API does not run the release now, so v_transfer_flow stays (an older API reads it). Tell Claude.' }
   Invoke-Migration 'r9_transfer_flow_drop' $R9_DROP 'the old view v_transfer_flow is dropped (only an older API read it; its reverse puts it back).'
   Say 'v_transfer_flow is dropped and the grant audit is clean. The release is complete: the after-release list in docs\RELEASE.md (Release 2b).' Green
 }

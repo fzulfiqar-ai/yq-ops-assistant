@@ -403,7 +403,7 @@ def _():
     wait = _function(src, "Wait-Health")
     assert "Get-HealthCommit" in wait and "Start-Sleep -Seconds 10" in wait and "Test-SameCommit $c $want" in wait
     hc = _function(src, "Get-HealthCommit")
-    assert "($API + '/health')" in hc and "$h.commit" in hc
+    assert "($script:API + '/health')" in hc and "$h.commit" in hc
     assert re.search(r"^\$API\s*=\s*'https://api\.yqmarketplace\.com'", src, flags=re.M)
     assert '@app.get("/health")' in _read(ROOT / "app" / "main.py") and '"commit": commit' in _read(ROOT / "app" / "main.py")
     rd = _read(ROOT / "scripts" / "render_deploy.py")
@@ -449,12 +449,12 @@ def _():
 def _():
     src = _src()
     v = _region(src, "verify")
-    marks = [v.index(s) for s in ("Test-SameCommit $api ([string]$st.release_sha))) { Stop-Part 2 ",
-                                  "if (-not (Test-SameCommit $hc $api)) { Fail ",
+    marks = [v.index(s) for s in ("Test-SameCommit $apiSha ([string]$st.release_sha))) { Stop-Part 2 ",
+                                  "if (-not (Test-SameCommit $hc $apiSha)) { Fail ",
                                   "if ((Invoke-Py @('-m', 'scripts.ops', 'moves', 'portal')) -eq 0) { $movesOk = Test-MovesPass $script:LastOutput }",
                                   "'scripts.prod_gate', 'snapshot', '--label', 'post-r9'",
                                   "'scripts.prod_gate', 'compare', $pre",
-                                  "if (-not $movesOk) { Fail ", "Set-State 'verified' $api")]
+                                  "if (-not $movesOk) { Fail ", "Set-State 'verified' $apiSha")]
     assert marks == sorted(marks), marks
     assert src.count("Set-State 'verified'") == 1, "only verify marks the release verified"
     assert "$pre = [string]$st.gate_pre" in v and "'*_pre-r9.json'" in v and "'*_post-r9.json'" in v
@@ -466,12 +466,12 @@ def _():
 def _():
     src = _src()
     m2 = _region(src, "migrate2")
-    marks = [m2.index(s) for s in ("Test-SameCommit ([string]$st.verified) $api)",
+    marks = [m2.index(s) for s in ("Test-SameCommit ([string]$st.verified) $apiSha)",
                                    "Stop-Part 2 'The release is not verified yet", "$hc = Get-HealthCommit",
-                                   "if (-not (Test-SameCommit $hc $api)) { Stop-Part 2 ",
+                                   "if (-not (Test-SameCommit $hc $apiSha)) { Stop-Part 2 ",
                                    "Invoke-Migration 'r9_transfer_flow_drop' $R9_DROP ")]
     assert marks == sorted(marks), marks
-    assert "Test-SameCommit $api ([string]$st.release_sha)" in m2
+    assert "Test-SameCommit $apiSha ([string]$st.release_sha)" in m2
 
 
 @test("rollback: v_transfer_flow back, the API, the two reverses (held while the release API answers or /health is silent), a restore only with -RestoreTables, the gate, the load note")
@@ -913,6 +913,20 @@ def _():
             "moves portal prints the words the script reads"
     else:
         print("        note: moves portal is not in this checkout yet (E-OPS)")
+
+
+@test("no function shadows a script constant: PowerShell names ignore case and a called function sees its callers' "
+      "variables (the verify part's own $api, a commit, once stood in for the /health address)")
+def _():
+    src = _src()
+    head = src[:re.search(r"^function ", src, flags=re.M).start()]
+    consts = {m.group(1).lower() for m in re.finditer(r"^\$([A-Za-z_][A-Za-z0-9_]*)\s*=", head, flags=re.M)}
+    assert {"api", "ua", "portal", "market", "root"} <= consts, consts
+    clashes = [(i, ln.strip()) for i, ln in _code(src)
+               if (m := re.match(r"^\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)", ln)) and m.group(1).lower() in consts]
+    assert not clashes, clashes
+    health = _function(src, "Get-HealthCommit")
+    assert "$script:API + '/health'" in health and "-UserAgent $script:UA" in health, health
 
 
 def main() -> int:
