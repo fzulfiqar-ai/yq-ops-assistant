@@ -13,11 +13,13 @@ export interface ProductRowProps {
   allowBackorder: boolean
   highlighted?: boolean
   eagerImage?: boolean
-  onOpen: () => void
+  /** The handlers take the row's code: the page passes the same three functions to every row, so
+   *  the memo holds and a keystroke or one line's change redraws only the rows it touched. */
+  onOpen: (code: string) => void
   /** set the line's quantity (0 removes it) */
-  onSetQty: (qty: number) => void
+  onSetQty: (code: string, qty: number) => void
   /** the keypad sheet (phone / tablet) */
-  onQtyClick: () => void
+  onQtyClick: (code: string) => void
 }
 
 /** The desktop quantity cell: type a number, Enter (or leaving the field) sets it; empty or 0 removes. */
@@ -82,7 +84,9 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
   const min = minQtyOf(item)
   const name = item.display_name && item.display_name !== item.item_code ? item.display_name : (item.spec || '').split('\n')[0]
   const drop = priceDropOf(item)
-  const plus = () => onSetQty(qty > 0 ? Math.min(9999, qty + step) : min)
+  const code = item.item_code
+  const plus = () => onSetQty(code, qty > 0 ? Math.min(9999, qty + step) : min)
+  const open = () => onOpen(code)
   return (
     <div
       data-code={item.item_code}
@@ -93,7 +97,7 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
         highlighted && 'xl:bg-[#EEE8F4] xl:shadow-[inset_3px_0_0_#6D4091]',
       )}
     >
-      <button type="button" onClick={onOpen} tabIndex={-1} aria-hidden="true" className="h-14 w-14 shrink-0 overflow-hidden rounded-xl border border-[#E9E4EF] bg-white xl:h-10 xl:w-10 xl:rounded-lg">
+      <button type="button" onClick={open} tabIndex={-1} aria-hidden="true" className="h-14 w-14 shrink-0 overflow-hidden rounded-xl border border-[#E9E4EF] bg-white xl:h-10 xl:w-10 xl:rounded-lg">
         <ProductImage
           srcs={[item.thumb_urls?.['160'], item.thumb_url, item.product_image_url]}
           alt=""
@@ -107,7 +111,7 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
         />
       </button>
 
-      <button type="button" onClick={onOpen} className={cn('min-w-0 flex-1 rounded-lg text-left', RING)} aria-label={`${item.item_code}${drop ? `, price drop ${drop.pct}%` : ''} — details`}>
+      <button type="button" onClick={open} className={cn('min-w-0 flex-1 rounded-lg text-left', RING)} aria-label={`${item.item_code}${drop ? `, price drop ${drop.pct}%` : ''} — details`}>
         <span className="flex items-center gap-1.5">
           <span className={cn('truncate font-display text-[13.5px] font-bold leading-tight tracking-[-0.01em]', out ? 'text-[#8d86a0]' : 'text-[#1A1428]')}>{item.item_code}</span>
           <Badge tone={band.tone} dot className="shrink-0 xl:hidden">
@@ -142,7 +146,7 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
       {/* phone / tablet: the quantity is a keypad button */}
       <button
         type="button"
-        onClick={onQtyClick}
+        onClick={() => onQtyClick(code)}
         disabled={!canOrder && qty === 0}
         aria-label={qty > 0 ? `${qty} of ${item.item_code} — change quantity` : `Type a quantity of ${item.item_code}`}
         className={cn(
@@ -156,7 +160,7 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
       </button>
       {/* desktop: a typed quantity */}
       <span className="hidden xl:block">
-        <QtyInput item={item} qty={qty} disabled={!canOrder && qty === 0} onSetQty={onSetQty} />
+        <QtyInput item={item} qty={qty} disabled={!canOrder && qty === 0} onSetQty={(n) => onSetQty(code, n)} />
       </span>
 
       <button

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { flushSync } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LayoutGrid, List, MessageCircle, RotateCcw, Search, ShoppingBag, SlidersHorizontal, X } from 'lucide-react'
@@ -8,7 +9,7 @@ import { cn } from '@/lib/utils'
 import { peekCart, useCart, writeCart } from '@/lib/cart'
 import { useSeo } from '@/lib/seo'
 import { getStaffCatalog, postStaffQuote, type OrderResponse, type ShopItem, type StaffCustomer } from '@/lib/shopApi'
-import { buildIndex, searchItems } from '@/market/lib/search'
+import { buildIndex, searchItems, type SearchIndex } from '@/market/lib/search'
 import { parseToken, resolveQuick, splitList } from '@/market/lib/quickParse'
 import { codeKey } from '@/market/lib/format'
 import {
@@ -29,6 +30,7 @@ import { mergeUsual, replaceLines, restoreLine, usualText } from './cartEdits'
 import { FiltersSheet } from './FiltersSheet'
 import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
+import { plainSearch, whenIdle } from './staffBrowse'
 import { FILTER_CHIPS, isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
 import { afterOrderKeys, carryCart } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
@@ -68,7 +70,8 @@ import { useQuote, type QuoteFetcher } from './useQuote'
 
 const TOPBAR = 'var(--yq-topbar, 56px)'
 const TABBAR = 'calc(var(--yq-tabbar, 64px) + env(safe-area-inset-bottom, 0px))'
-const GRID_CHUNK = 48
+/** Lines drawn at a time, in the list and in the grid (the next 48 come as the end nears). */
+const CHUNK = 48
 const VIEW_KEY = 'yq-staff-view'
 
 type View = 'list' | 'grid'
@@ -149,7 +152,14 @@ export function StaffCatalog() {
   const data = catalogQ.data || null
   const items = useMemo(() => data?.items || [], [data])
   const itemsByCode = useMemo(() => new Map(items.map((i) => [i.item_code, i])), [items])
-  const index = useMemo(() => (items.length ? buildIndex(items) : null), [items])
+  // the search index (MiniSearch) is built when the phone is idle, not in the first paint after the
+  // catalog lands; a search typed before it is ready is a plain filter (staffBrowse.plainSearch)
+  const [built, setBuilt] = useState<{ items: ShopItem[]; index: SearchIndex } | null>(null)
+  useEffect(() => {
+    if (!items.length) return
+    return whenIdle(() => setBuilt({ items, index: buildIndex(items) }))
+  }, [items])
+  const index = built && built.items === items ? built.index : null
   const settings = data?.settings || {}
   const allowBackorder = settings.allow_backorder !== false
   const minBhd = Number(settings.min_order_bhd) || 0
@@ -191,6 +201,8 @@ export function StaffCatalog() {
     },
     [removeCartLine, offerUndo, cartEdit],
   )
+  // a list row's quantity (0 takes the line out): one handler for every row, so the rows stay memo'd
+  const setRowQty = useCallback((code: string, n: number) => (n > 0 ? setCartQty(code, n) : removeLine(code)), [setCartQty, removeLine])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [shopSheetOpen, setShopSheetOpen] = useState(false)
   const [returnToCart, setReturnToCart] = useState(false)
@@ -201,13 +213,26 @@ export function StaffCatalog() {
 
   /* ── browse state ── */
   const [cat, setCat] = useState('All')
+  // what is typed (the field), and what the list is searched for: the typing 150 ms after the last
+  // key, so a word typed fast runs the search and the filters once, not on every letter
+  const [qRaw, setQRaw] = useState('')
   const [q, setQ] = useState('')
+  useEffect(() => {
+    if (qRaw === q) return
+    const t = setTimeout(() => setQ(qRaw), 150)
+    return () => clearTimeout(t)
+  }, [qRaw, q])
+  /** Set the search now, without the wait (clear, Escape, what a quick add leaves in the field). */
+  const setSearch = useCallback((text: string) => {
+    setQRaw(text)
+    setQ(text)
+  }, [])
   // Today's "See all" price drops lands here as /shop?f=drops
   const [filters, setFilters] = useState<StaffFilters>(() => (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
   const [sort, setSort] = useState<StaffSort>('featured')
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [view, setViewState] = useState<View>(readView)
-  const [gridN, setGridN] = useState({ key: '', n: GRID_CHUNK })
+  const [pageN, setPageN] = useState({ key: '', n: CHUNK })
   const [highlight, setHighlight] = useState(0)
   const [sheetCode, setSheetCode] = useState<string | null>(null)
   const [qtyCode, setQtyCode] = useState<string | null>(null)
@@ -296,7 +321,8 @@ export function StaffCatalog() {
   const codeKeys = useMemo(() => new Set(items.map((i) => codeKey(i.item_code))), [items])
   const quick = isQuickList(q, (word) => codeKeys.has(codeKey(word)))
   const quickRows = useMemo<QuickRow[]>(() => {
-    if (!quick || !index) return []
+    // exact codes need no index (resolveQuick reads the codes); the index only adds near matches
+    if (!quick) return []
     return splitList(q).map((raw) => {
       const { query, qty } = parseToken(raw)
       const r = resolveQuick(query, items, index)
@@ -312,24 +338,23 @@ export function StaffCatalog() {
       // matches, so the rep picks one with "+" instead of retyping it
       const out = quickRows.map((r) => r.item || r.soldOut).filter((x): x is ShopItem => Boolean(x))
       const seen = new Set(out.map((i) => i.item_code))
-      if (index) {
-        for (const r of quickRows) {
-          if (r.item || r.soldOut) continue
-          for (const hit of searchItems(index, items, parseToken(r.raw).query, 6)) {
-            if (!seen.has(hit.item_code)) {
-              seen.add(hit.item_code)
-              out.push(hit)
-            }
+      for (const r of quickRows) {
+        if (r.item || r.soldOut) continue
+        const query = parseToken(r.raw).query
+        for (const hit of index ? searchItems(index, items, query, 6) : plainSearch(items, query).slice(0, 6)) {
+          if (!seen.has(hit.item_code)) {
+            seen.add(hit.item_code)
+            out.push(hit)
           }
         }
       }
       return out
     }
-    if (!index) return items
     // an exact code (or its start) first — "x05 uc" and "X05UC" both find X05 UC-1Mtr — then the index
+    // (or, while the index is still being built, the plain filter: never the whole catalog)
     const key = codeKey(s)
     const exact = key.length >= 2 ? items.filter((i) => codeKey(i.item_code).startsWith(key)) : []
-    const hits = searchItems(index, items, s, 500)
+    const hits = index ? searchItems(index, items, s, 500) : plainSearch(items, s)
     const seen = new Set(exact.map((i) => i.item_code))
     return [...exact, ...hits.filter((i) => !seen.has(i.item_code))]
   }, [items, index, q, quick, quickRows])
@@ -367,7 +392,18 @@ export function StaffCatalog() {
   const firstOut = shown.findIndex((i) => isSoldOut(i))
   const soldCount = firstOut < 0 ? 0 : shown.length - firstOut
   const filterKey = `${cat}|${q}|${JSON.stringify(filters)}|${sort}`
-  const gridLimit = gridN.key === filterKey ? gridN.n : GRID_CHUNK
+  // the list and the grid both draw 48 lines at a time (all ~180 at once was the slow part); the next
+  // 48 come as the end nears (the sentinel below), and a new search starts again at 48
+  const limit = pageN.key === filterKey ? pageN.n : CHUNK
+  const showMore = useCallback(() => setPageN((p) => ({ key: filterKey, n: (p.key === filterKey ? p.n : CHUNK) + CHUNK })), [filterKey])
+  const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!sentinel || typeof IntersectionObserver === 'undefined') return
+    // watched again after each page (limit), so a sentinel still in view asks for the next one
+    const io = new IntersectionObserver((entries) => entries.some((x) => x.isIntersecting) && showMore(), { rootMargin: '0px 0px 800px 0px' })
+    io.observe(sentinel)
+    return () => io.disconnect()
+  }, [sentinel, showMore, limit])
   // the highlighted row follows the search: a new query starts on its best line
   const [hlKey, setHlKey] = useState(filterKey)
   if (hlKey !== filterKey) {
@@ -375,6 +411,12 @@ export function StaffCatalog() {
     setHighlight(0)
   }
   const activeFilters = Number(filters.inStock) + Number(filters.drops) + Number(filters.clearance) + Number(filters.best) + Number(sort !== 'featured')
+  // a key that acts on the list acts on what is typed: the handler reads the list as it is after a
+  // search still in its 150 ms wait has been run (onSearchKey flushes it first)
+  const latest = useRef({ shown, quick, quickRows, highlight })
+  useLayoutEffect(() => {
+    latest.current = { shown, quick, quickRows, highlight }
+  })
 
   /* ── the live quote (the bar, the slip and the checkout all show the server's total) ── */
   const [coupon, setCoupon] = useState('')
@@ -386,18 +428,18 @@ export function StaffCatalog() {
   /* ── actions ── */
   const addLine = useCallback((it: ShopItem, qty?: number | null) => cart.set(it.item_code, Math.max(minQtyOf(it), qty || 0)), [cart])
 
-  const runQuickAdd = () => {
+  const runQuickAdd = (rows: QuickRow[]) => {
     const added: string[] = []
     const soldOut: string[] = []
     const left: string[] = []
-    for (const r of quickRows) {
+    for (const r of rows) {
       if (r.item) {
         addLine(r.item, r.qty)
         added.push(r.item.item_code)
       } else if (r.soldOut) soldOut.push(r.soldOut.item_code)
       else left.push(r.raw)
     }
-    setQ(left.join(', '))
+    setSearch(left.join(', '))
     setNotice({
       tone: soldOut.length || left.length ? 'warn' : 'ok',
       text: [
@@ -411,33 +453,38 @@ export function StaffCatalog() {
   }
 
   const onSearchKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    const acts = e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'ArrowUp'
+    // typed faster than the 150 ms wait: run the search now, so Enter adds what is on screen for it
+    if (acts && qRaw !== q) flushSync(() => setQ(qRaw))
+    const { shown: list, quick: isQuick, quickRows: rows, highlight: at } = latest.current
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
-      const max = view === 'list' ? shown.length - 1 : -1
+      const max = view === 'list' ? list.length - 1 : -1
       if (max < 0) return
-      const next = Math.max(0, Math.min(max, highlight + (e.key === 'ArrowDown' ? 1 : -1)))
+      const next = Math.max(0, Math.min(max, at + (e.key === 'ArrowDown' ? 1 : -1)))
       setHighlight(next)
-      document.querySelector(`[data-code="${CSS.escape(shown[next].item_code)}"]`)?.scrollIntoView({ block: 'nearest' })
+      if (next >= limit) showMore() // the line is on a page not drawn yet
+      requestAnimationFrame(() => document.querySelector(`[data-code="${CSS.escape(list[next].item_code)}"]`)?.scrollIntoView({ block: 'nearest' }))
       return
     }
     if (e.key === 'Escape') {
-      setQ('')
+      setSearch('')
       return
     }
     if (e.key !== 'Enter') return
     e.preventDefault()
-    if (quick) {
-      runQuickAdd()
+    if (isQuick) {
+      runQuickAdd(rows)
       return
     }
-    if (!q.trim()) return
+    if (!qRaw.trim()) return
     // Enter adds the highlighted line only at the desk (the table, where the highlight is drawn). On a
     // phone the keyboard's Go / Search key is how the keyboard is put away — it must not add anything.
     if (!window.matchMedia('(min-width: 1280px)').matches) {
       e.currentTarget.blur()
       return
     }
-    const it = shown[highlight]
+    const it = list[at]
     if (!it) return
     if (isSoldOut(it)) {
       setNotice({ tone: 'warn', text: `${it.item_code} is sold out — not added. Open it to take a backorder.` })
@@ -448,7 +495,7 @@ export function StaffCatalog() {
     const next = cur > 0 ? Math.min(9999, cur + stepOf(it)) : minQtyOf(it)
     cart.set(it.item_code, next)
     setNotice({ tone: 'ok', text: `${cur > 0 ? 'Now' : 'Added'} ${it.item_code} × ${next}` })
-    setQ('')
+    setSearch('')
   }
 
   // "/" anywhere on the page (not while typing) jumps to the search — the desk's first key
@@ -574,8 +621,8 @@ export function StaffCatalog() {
               <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#a8a2bb]" aria-hidden="true" />
               <input
                 ref={searchRef}
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
+                value={qRaw}
+                onChange={(e) => setQRaw(e.target.value)}
                 onKeyDown={onSearchKey}
                 placeholder="Search, or add a list: C18 3, UK15 6"
                 aria-label="Search the catalog, or type codes and quantities to add them"
@@ -586,8 +633,8 @@ export function StaffCatalog() {
                 // 16 px under a finger (an iPhone zooms into a field under 16 px on focus), 15 px with a mouse
                 className="h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[16px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [&::-webkit-search-cancel-button]:hidden [@media(pointer:fine)]:text-[15px]"
               />
-              {q ? (
-                <button type="button" onClick={() => setQ('')} aria-label="Clear search" className={cn('absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-xl text-[#6b6480] hover:bg-[#F3F0F6]', RING)}>
+              {qRaw ? (
+                <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className={cn('absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-xl text-[#6b6480] hover:bg-[#F3F0F6]', RING)}>
                   <X size={15} />
                 </button>
               ) : (
@@ -715,7 +762,7 @@ export function StaffCatalog() {
                 <button
                   type="button"
                   onClick={() => {
-                    setQ('')
+                    setSearch('')
                     setCat('All')
                     setFilters(NO_FILTERS)
                     setSort('featured')
@@ -735,8 +782,10 @@ export function StaffCatalog() {
                   <span className="text-center">Qty</span>
                   <span />
                 </div>
+                {/* the rows are memo'd: one stable handler each (by code), so a keystroke or one line's
+                    change redraws only the rows whose own props changed */}
                 <div className="divide-y divide-[#F3F0F6]">
-                  {shown.map((it, i) => (
+                  {shown.slice(0, limit).map((it, i) => (
                     <div key={it.item_code}>
                       {i === firstOut && <SoldOutDivider count={soldCount} className="bg-[#FBFAF7] px-4" />}
                       <ProductRow
@@ -745,9 +794,9 @@ export function StaffCatalog() {
                         allowBackorder={allowBackorder}
                         highlighted={Boolean(q.trim()) && !quick && i === highlight}
                         eagerImage={i < 8}
-                        onOpen={() => setSheetCode(it.item_code)}
-                        onSetQty={(n) => (n > 0 ? cart.set(it.item_code, n) : removeLine(it.item_code))}
-                        onQtyClick={() => setQtyCode(it.item_code)}
+                        onOpen={setSheetCode}
+                        onSetQty={setRowQty}
+                        onQtyClick={setQtyCode}
                       />
                     </div>
                   ))}
@@ -756,7 +805,7 @@ export function StaffCatalog() {
             ) : (
               <>
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-5 min-[1800px]:grid-cols-6">
-                  {shown.slice(0, gridLimit).flatMap((it, i) => {
+                  {shown.slice(0, limit).flatMap((it, i) => {
                     const card = (
                       <ProductCard
                         key={it.item_code}
@@ -775,14 +824,15 @@ export function StaffCatalog() {
                     return i === firstOut ? [<SoldOutDivider key="sold-out" count={soldCount} grid />, card] : [card]
                   })}
                 </div>
-                {gridLimit < shown.length && (
-                  <div className="mt-6 text-center">
-                    <button type="button" onClick={() => setGridN({ key: filterKey, n: gridLimit + GRID_CHUNK })} className={cn('h-11 rounded-xl border border-[#E2DCEA] bg-white px-6 text-[13px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb]', RING)}>
-                      Show more ({shown.length - gridLimit} left)
-                    </button>
-                  </div>
-                )}
               </>
+            )}
+            {/* the next 48 load as this comes within 800 px; the button is there for a keyboard */}
+            {data && limit < shown.length && (
+              <div ref={setSentinel} className="mt-6 text-center">
+                <button type="button" onClick={showMore} className={cn('h-11 rounded-xl border border-[#E2DCEA] bg-white px-6 text-[13px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb]', RING)}>
+                  Show more ({shown.length - limit} left)
+                </button>
+              </div>
             )}
             <p className="py-8 text-center text-[11px] text-[#6b6480]">Trade prices · the exact free-to-sell number is in each product&apos;s sheet</p>
           </main>

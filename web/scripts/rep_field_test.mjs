@@ -82,6 +82,16 @@ function check(name, fn) {
     console.log(`  FAIL  ${name}\n        ${e && e.message ? e.message : e}`)
   }
 }
+async function checkAsync(name, fn) {
+  try {
+    await fn()
+    passed += 1
+    console.log(`  PASS  ${name}`)
+  } catch (e) {
+    failed += 1
+    console.log(`  FAIL  ${name}\n        ${e && e.message ? e.message : e}`)
+  }
+}
 function eq(a, b, what = '') {
   const A = JSON.stringify(a)
   const B = JSON.stringify(b)
@@ -363,6 +373,52 @@ check("the tabs' features are the routes' own (App.tsx <Gate feature>): a rename
   }
   if (!app.includes('path="account" element={<SalesAccount />}')) throw new Error('Me (/account) is no longer open to every login')
   eq(Object.keys(map).sort(), ['/customers', '/shop', '/shop-orders', '/today'])
+})
+
+/* ── 11–13. the catalog keeps up with typing: the index at idle, a plain filter until then ── */
+const B = await load('pages/shop/staffBrowse.ts')
+const CAT = [
+  { item_code: 'C18', display_name: 'Car charger 18W', spec: 'Dual USB', category: 'CAR CHARGER' },
+  { item_code: 'X05 UC-1Mtr', display_name: 'Type-C cable 1 m', spec: 'Braided', category: 'CABLE' },
+  { item_code: 'UK15', display_name: 'Wall charger', spec: '15W', category: 'CHARGER' },
+]
+
+check('before the search index is built, a search is a plain filter — never the whole catalog', () => {
+  const plain = need(B, 'plainSearch')
+  const codes = (t) => plain(CAT, t).map((i) => i.item_code)
+  eq(codes('x05uc'), ['X05 UC-1Mtr'], 'a code typed without its spaces and dash')
+  eq(codes('X05 uc'), ['X05 UC-1Mtr'], 'or with them, in any case')
+  eq(codes('charger'), ['C18', 'UK15'], 'a word of the name or the category')
+  eq(codes('car 18w'), ['C18'], 'every word must hit')
+  eq(codes('braided cable'), ['X05 UC-1Mtr'], 'the spec counts')
+  eq(codes('nothing like it'), [])
+  eq(codes('   '), ['C18', 'X05 UC-1Mtr', 'UK15'], 'no words: the whole list')
+})
+
+await checkAsync('the index is built when the phone is idle; a timer where there is no requestIdleCallback; cancel stops it', async () => {
+  const idle = need(B, 'whenIdle')
+  const tick = () => new Promise((r) => setTimeout(r, 25))
+  let ran = 0
+  idle(() => { ran += 1 })
+  await tick()
+  eq(ran, 1, 'no requestIdleCallback (Safari, node): it runs on a timer')
+  idle(() => { ran += 10 })()
+  await tick()
+  eq(ran, 1, 'cancelled before it ran')
+  const asked = []
+  let cancelled = null
+  globalThis.requestIdleCallback = (cb, opts) => { asked.push(opts); setTimeout(cb, 0); return 7 }
+  globalThis.cancelIdleCallback = (id) => { cancelled = id }
+  try {
+    idle(() => { ran += 100 }, 900)
+    await tick()
+    eq([ran, asked], [101, [{ timeout: 900 }]], 'requestIdleCallback with a deadline')
+    idle(() => {})()
+    eq(cancelled, 7, 'its cancel')
+  } finally {
+    delete globalThis.requestIdleCallback
+    delete globalThis.cancelIdleCallback
+  }
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
