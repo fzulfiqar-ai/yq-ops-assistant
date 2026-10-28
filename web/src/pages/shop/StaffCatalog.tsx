@@ -25,6 +25,7 @@ import {
   type TodayData,
 } from '@/pages/sales/lib'
 import { CartDrawer } from './CartDrawer'
+import { mergeUsual, replaceLines, restoreLine, usualText } from './cartEdits'
 import { FiltersSheet } from './FiltersSheet'
 import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
@@ -40,6 +41,7 @@ import { ShopPickerSheet, ShopPill } from './ShopPicker'
 import { ShopSheet } from './ShopSheet'
 import { SoldOutDivider } from './SoldOut'
 import { bhd, hasBadge, isSoldOut, minQtyOf, RING, stepOf } from './shared'
+import { UndoToast, type UndoOffer } from './UndoToast'
 import { useQuote, type QuoteFetcher } from './useQuote'
 
 /**
@@ -157,6 +159,38 @@ export function StaffCatalog() {
   const shopKey = shopKeyOf(sel)
   const cartKey = shopKey ? `staff:${shopKey}` : 'staff'
   const cart = useCart(cartKey)
+  const { set: setCartQty, remove: removeCartLine, clear: clearCart } = cart
+  const cartEdit = useMemo(() => ({ set: setCartQty, clear: clearCart }), [setCartQty, clearCart])
+  // the cart as it is now: an Undo can be taken up after later edits (cartEdits.restoreLine)
+  const linesRef = useRef(cart.lines)
+  useEffect(() => {
+    linesRef.current = cart.lines
+  })
+
+  /* ── Undo (UndoToast): the last edit that can be taken back, for the cart it was made in ── */
+  const [undo, setUndo] = useState<(UndoOffer & { cartKey: string }) | null>(null)
+  const undoSeq = useRef(0)
+  const offerUndo = useCallback(
+    (text: string, fn: () => void) => {
+      undoSeq.current += 1
+      setUndo({ id: undoSeq.current, text, undo: fn, cartKey })
+    },
+    [cartKey],
+  )
+  const dropUndo = useCallback((id: number) => setUndo((u) => (u && u.id === id ? null : u)), [])
+  // every way a line leaves the cart (the keypad's Remove, the steppers' bin, a typed 0, the slip's ×,
+  // the checkout) comes through here, so each one can be put back where it was
+  const removeLine = useCallback(
+    (code: string) => {
+      const before = linesRef.current
+      const at = before.findIndex((l) => l.item_code === code)
+      removeCartLine(code)
+      if (at < 0) return
+      const line = before[at]
+      offerUndo(`Removed ${code} × ${line.qty}`, () => replaceLines(cartEdit, restoreLine(linesRef.current, line, at)))
+    },
+    [removeCartLine, offerUndo, cartEdit],
+  )
   const [pickerOpen, setPickerOpen] = useState(false)
   const [shopSheetOpen, setShopSheetOpen] = useState(false)
   const [returnToCart, setReturnToCart] = useState(false)
@@ -218,28 +252,26 @@ export function StaffCatalog() {
     [cart, cartKey, returnToCart, toast],
   )
 
-  /* ── Order again: the shop's suggested repeat into its cart; sold-out lines left out and named ── */
+  /* ── Order again: the shop's suggested repeat MERGED into its cart (cartEdits.mergeUsual) — every
+     quantity already typed stays, only the missing usual lines are added; sold-out lines are left
+     out and named. The toast takes it back (the whole cart as it was). ── */
   const preload = useCallback(
     (b: ShopBasket) => {
-      let added = 0
-      const soldOut: string[] = []
-      for (const ln of b.suggested) {
-        const it = itemsByCode.get(ln.item_code)
-        if (!it) continue
-        if (isSoldOut(it)) {
-          soldOut.push(ln.item_code)
-          continue
-        }
-        cart.set(it.item_code, Math.max(minQtyOf(it), ln.qty))
-        added += 1
-      }
+      const before = linesRef.current
+      const m = mergeUsual(before, b.suggested, (code) => itemsByCode.get(code))
+      for (const l of m.lines.slice(before.length)) setCartQty(l.item_code, l.qty)
+      const text = usualText(m, b.suggested_from)
+      if (text) offerUndo(text, () => replaceLines(cartEdit, before))
+      // what the toast does not say: the sold-out lines (named, to tell the shop), or nothing to add
       setNotice(
-        added
-          ? { tone: soldOut.length ? 'warn' : 'ok', text: `Added ${added} ${added === 1 ? 'line' : 'lines'} from ${b.suggested_from === 'last_order' ? 'their last order' : 'their usual order'} — check the quantities, then Review.`, soldOut }
-          : { tone: 'warn', text: 'Nothing to add — every line of their usual order is sold out right now.', soldOut },
+        m.soldOut.length
+          ? { tone: 'warn', text: m.added.length || m.kept.length ? 'Part of their usual order is sold out right now.' : 'Nothing to add — every line of their usual order is sold out right now.', soldOut: m.soldOut }
+          : !m.added.length
+            ? { tone: 'ok', text: m.kept.length ? 'Their usual lines are already in this order — your quantities are kept.' : 'Nothing to add from their usual order.' }
+            : null,
       )
     },
-    [cart, itemsByCode],
+    [itemsByCode, setCartQty, offerUndo, cartEdit],
   )
 
   // "Order again" from Today or Customers lands here with the shop picked and { again: key } in the state
@@ -707,7 +739,7 @@ export function StaffCatalog() {
                         highlighted={Boolean(q.trim()) && !quick && i === highlight}
                         eagerImage={i < 8}
                         onOpen={() => setSheetCode(it.item_code)}
-                        onSetQty={(n) => (n > 0 ? cart.set(it.item_code, n) : cart.remove(it.item_code))}
+                        onSetQty={(n) => (n > 0 ? cart.set(it.item_code, n) : removeLine(it.item_code))}
                         onQtyClick={() => setQtyCode(it.item_code)}
                       />
                     </div>
@@ -729,7 +761,7 @@ export function StaffCatalog() {
                         onOpen={() => setSheetCode(it.item_code)}
                         onAdd={() => addLine(it)}
                         onSetQty={(n) => cart.set(it.item_code, n)}
-                        onRemove={() => cart.remove(it.item_code)}
+                        onRemove={() => removeLine(it.item_code)}
                         onQtyClick={() => setQtyCode(it.item_code)}
                       />
                     )
@@ -762,6 +794,7 @@ export function StaffCatalog() {
             minBhd={minBhd}
             onPickShop={() => (sel ? setShopSheetOpen(true) : setPickerOpen(true))}
             onPlace={() => setCartOpen(true)}
+            onRemove={removeLine}
           />
         </div>
       </div>
@@ -810,7 +843,7 @@ export function StaffCatalog() {
         pairs={sheetPairs}
         onAdd={(it) => addLine(it)}
         onSetQty={(it, n) => cart.set(it.item_code, n)}
-        onRemove={(it) => cart.remove(it.item_code)}
+        onRemove={(it) => removeLine(it.item_code)}
         onOpenItem={setSheetCode}
         onClose={() => setSheetCode(null)}
         onQtyClick={(it) => setQtyCode(it.item_code)}
@@ -820,7 +853,7 @@ export function StaffCatalog() {
           item={qtyItem}
           value={cart.qtyOf(qtyItem.item_code)}
           onApply={(n) => cart.set(qtyItem.item_code, n)}
-          onRemove={() => cart.remove(qtyItem.item_code)}
+          onRemove={() => removeLine(qtyItem.item_code)}
           onClose={() => setQtyCode(null)}
         />
       )}
@@ -839,6 +872,7 @@ export function StaffCatalog() {
           quoteError={quoteError}
           quoteFresh={quoteFresh}
           onRetryQuote={retryQuote}
+          onRemoveLine={removeLine}
           coupon={coupon}
           onCouponChange={setCoupon}
           src="salesman"
@@ -854,6 +888,7 @@ export function StaffCatalog() {
             cart.clear()
             setCoupon('')
             setNotice(null)
+            setUndo(null) // the order is placed: nothing on screen to take back
             // the Orders list, Today, the book, the stock shown here and this shop's usual basket
             for (const queryKey of afterOrderKeys(basketKey)) void qc.invalidateQueries({ queryKey })
             if (o.duplicate) toast('This order had already been placed — here it is.', 'success')
@@ -861,6 +896,9 @@ export function StaffCatalog() {
           }}
         />
       )}
+
+      {/* an offer made for another shop's cart is not this one's to take back */}
+      <UndoToast offer={undo && undo.cartKey === cartKey ? undo : null} onDone={dropUndo} />
     </div>
   )
 }

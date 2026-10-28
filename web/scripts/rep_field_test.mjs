@@ -13,7 +13,10 @@
  *   • signing out takes this phone's rep carts, the shop picked and the catalog's remembered search
  *     with it, and nothing else of the device;
  *   • the checkout never shows BHD 0.000 / Free or lets an order go before the server has priced
- *     this very cart; a failed check says so and offers Retry.
+ *     this very cart; a failed check says so and offers Retry;
+ *   • after an order the Orders list, the stock and the shop's usual basket are read again;
+ *   • "Order again" keeps every quantity the rep typed and adds only the usual lines missing; Undo
+ *     restores the cart before it, and a removed line comes back where it was.
  */
 import { registerHooks } from 'node:module'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -65,6 +68,7 @@ function need(mod, name) {
 
 const D = await load('pages/sales/repDevice.ts')
 const C = await load('pages/shop/checkout.ts')
+const E = await load('pages/shop/cartEdits.ts')
 
 let passed = 0
 let failed = 0
@@ -267,6 +271,61 @@ check('after an order: every key it drops is one a screen reads (no key that qui
     const head = `queryKey: ['${key[0]}'`
     if (!text.includes(head)) throw new Error(`no screen reads ${head}…`)
   }
+})
+
+/* ── 4. Order again merges; 5. Undo puts things back ── */
+const ITEMS = new Map([
+  ['C18', { item_code: 'C18', stock_qty: 40 }],
+  ['UK15', { item_code: 'UK15', stock_qty: 12, moq: 6, pack_size: 6 }],
+  ['PD20', { item_code: 'PD20', stock_qty: 0 }],              // sold out
+  ['X05', { item_code: 'X05', stock_qty: 9 }],
+])
+const itemOf = (code) => ITEMS.get(code)
+const L = (item_code, qty) => ({ item_code, qty })
+
+check('Order again keeps every quantity already typed and adds only the usual lines that are missing', () => {
+  const merge = need(E, 'mergeUsual')
+  const typed = [L('C18', 7), L('ZZ9', 2)]
+  const usual = [L('C18', 3), L('UK15', 4), L('PD20', 2), L('X05', 5), L('GONE', 1)]
+  const m = merge(typed, usual, itemOf)
+  eq(m.lines, [L('C18', 7), L('ZZ9', 2), L('UK15', 6), L('X05', 5)], 'typed lines first and as typed; the missing usual lines after, at least their minimum')
+  eq([m.added, m.kept, m.soldOut], [['UK15', 'X05'], ['C18'], ['PD20']])
+  eq(typed, [L('C18', 7), L('ZZ9', 2)], 'the cart it was given is not changed (Undo restores it)')
+})
+
+check('Order again into an empty cart fills every usual line that can be sold today', () => {
+  const merge = need(E, 'mergeUsual')
+  const m = merge([], [L('UK15', 12), L('PD20', 2), L('C18', 1)], itemOf)
+  eq([m.lines, m.added, m.kept, m.soldOut], [[L('UK15', 12), L('C18', 1)], ['UK15', 'C18'], [], ['PD20']])
+  eq(merge([], [], itemOf).lines, [])
+})
+
+check('the Order again toast says what happened: "Added N usual lines · kept your quantities"', () => {
+  const text = need(E, 'usualText')
+  eq(text({ added: ['A', 'B', 'C'], kept: ['D'] }, 'regulars'), 'Added 3 usual lines · kept your quantities')
+  eq(text({ added: ['A'], kept: [] }, 'due_regulars'), 'Added 1 usual line')
+  eq(text({ added: ['A', 'B'], kept: [] }, 'last_order'), 'Added 2 lines from their last order')
+  eq(text({ added: [], kept: ['D'] }, 'regulars'), '', 'nothing added: nothing to undo')
+})
+
+check('Undo puts a removed line back where it was, with its quantity', () => {
+  const restore = need(E, 'restoreLine')
+  const now = [L('A', 1), L('C', 3)]
+  eq(restore(now, L('B', 2), 1), [L('A', 1), L('B', 2), L('C', 3)])
+  eq(restore(now, L('B', 2), 9), [L('A', 1), L('C', 3), L('B', 2)], 'past the end: last')
+  eq(restore([L('A', 1), L('B', 1)], L('B', 5), 0), [L('B', 5), L('A', 1)], 'added again since: the removed quantity comes back, once')
+  eq(restore([], L('B', 2), 3), [L('B', 2)])
+  eq(now, [L('A', 1), L('C', 3)], 'the lines it was given are not changed')
+})
+
+check('replaceLines makes the cart exactly these lines, in this order, through clear + set', () => {
+  const replace = need(E, 'replaceLines')
+  let lines = [L('X', 9)]
+  const cart = { clear: () => { lines = [] }, set: (c, q) => { lines = [...lines.filter((l) => l.item_code !== c), L(c, q)] } }
+  replace(cart, [L('B', 2), L('A', 1)])
+  eq(lines, [L('B', 2), L('A', 1)])
+  replace(cart, [])
+  eq(lines, [])
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

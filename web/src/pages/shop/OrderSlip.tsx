@@ -54,6 +54,7 @@ export function OrderSlip({
   minBhd,
   onPickShop,
   onPlace,
+  onRemove,
 }: {
   selected: StaffCustomer | null
   row: BookShop | null
@@ -65,6 +66,8 @@ export function OrderSlip({
   minBhd: number
   onPickShop: () => void
   onPlace: () => void
+  /** take a line out (the catalog offers Undo) */
+  onRemove: (code: string) => void
 }) {
   const quoteLines = new Map((quote?.lines || []).map((l) => [l.item_code, l]))
   return (
@@ -102,7 +105,7 @@ export function OrderSlip({
                     </span>
                   </span>
                   <span className="shrink-0 font-display text-[12.5px] font-bold tabular-nums text-[#1A1428]">{q?.unavailable ? '—' : money(q?.line_total_bhd ?? (Number(it?.price_bhd) || 0) * l.qty)}</span>
-                  <button type="button" onClick={() => cart.remove(l.item_code)} aria-label={`Remove ${l.item_code}`} className={cn('grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#a8a2bb] hover:bg-[#fdecef] hover:text-[#9f1239]', RING)}>
+                  <button type="button" onClick={() => onRemove(l.item_code)} aria-label={`Remove ${l.item_code}`} className={cn('grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#a8a2bb] hover:bg-[#fdecef] hover:text-[#9f1239]', RING)}>
                     <X size={14} aria-hidden="true" />
                   </button>
                 </li>

@@ -92,6 +92,8 @@ export interface CartDrawerProps {
   quoteFresh: boolean
   /** ask the price server again (the Retry beside a failed check) */
   onRetryQuote: () => void
+  /** take a line out (the salesman catalog's offers Undo); default: straight out of the cart */
+  onRemoveLine?: (code: string) => void
   coupon: string
   onCouponChange: (code: string) => void
   src: string
@@ -124,6 +126,7 @@ export function CartDrawer({
   quoteError,
   quoteFresh,
   onRetryQuote,
+  onRemoveLine,
   coupon,
   onCouponChange,
   src,
@@ -132,6 +135,7 @@ export function CartDrawer({
   onChangeShop,
 }: CartDrawerProps) {
   const staff = mode === 'salesman'
+  const removeLine = onRemoveLine ?? cart.remove
   const qc = useQueryClient()
   const [customer, setCustomer] = useState<CustomerDraft>(() => (staff ? fromSelected(getSelectedCustomer()) : readCustomer()))
   const [note, setNote] = useState('')
@@ -522,7 +526,7 @@ export function CartDrawer({
                         {blocked && !fixableByQty ? (
                           <button
                             type="button"
-                            onClick={() => cart.remove(line.item_code)}
+                            onClick={() => removeLine(line.item_code)}
                             className={cn(
                               'inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#f3c9d2] bg-[#fdecef] px-3.5 text-[12px] font-semibold text-[#9f1239] transition duration-150 ease-out hover:bg-[#fbdde3]',
                               RING,
@@ -538,7 +542,7 @@ export function CartDrawer({
                             size="sm"
                             label={line.item_code}
                             onChange={(n) => cart.set(line.item_code, n)}
-                            onRemove={() => cart.remove(line.item_code)}
+                            onRemove={() => removeLine(line.item_code)}
                           />
                         )}
                         {q?.backorder && <Badge tone="amber">Backorder</Badge>}
