@@ -440,5 +440,32 @@ await checkAsync('the index is built when the phone is idle; a timer where there
   }
 })
 
+/* ── 17. the catalog remembers this tab's search, category, filters and sort ── */
+check('the catalog\'s browse state is kept for this tab and read back field by field', () => {
+  const record = need(B, 'browseRecord')
+  const read = need(B, 'readBrowse')
+  const state = { q: 'c18', cat: 'CHARGER', filters: { inStock: true, drops: false, clearance: false, best: true }, sort: 'price_asc' }
+  eq(read(record(state)), state, 'what was written comes back')
+  eq(read(null), null, 'nothing kept: nothing remembered')
+  eq(read('{oops'), null, 'unreadable')
+  eq(read(JSON.stringify([1, 2])), null, 'not a record')
+})
+
+check('a remembered browse state that went stale or odd falls back field by field, never breaks the catalog', () => {
+  const read = need(B, 'readBrowse')
+  eq(read(JSON.stringify({ q: 7, cat: '', filters: { inStock: 'yes', drops: true, sneaky: true }, sort: 'cheapest' })),
+    { q: '', cat: 'All', filters: { inStock: false, drops: true, clearance: false, best: false }, sort: 'featured' })
+  eq(read(JSON.stringify({ q: 'x'.repeat(500) })).q.length, 200, 'a long search is cut, not kept whole')
+  eq(read(JSON.stringify({})), { q: '', cat: 'All', filters: { inStock: false, drops: false, clearance: false, best: false }, sort: 'featured' })
+})
+
+check('a deep link starts clean: Today\'s price drops (/shop?f=drops) is not covered by a remembered search', () => {
+  const remembered = need(B, 'rememberedFor')
+  const kept = JSON.stringify({ q: 'c18', cat: 'CABLE', filters: { inStock: true }, sort: 'best' })
+  eq(remembered('?f=drops', kept), null, 'the link says what to show')
+  eq(remembered('', kept), { q: 'c18', cat: 'CABLE', filters: { inStock: true, drops: false, clearance: false, best: false }, sort: 'best' }, 'back on the tab: as it was left')
+  eq(remembered('', null), null, 'first visit')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

@@ -1,14 +1,56 @@
 import type { ShopItem } from '@/lib/shopApi'
 import { codeKey } from '@/market/lib/format'
+import { NO_FILTERS, STAFF_SORTS, type StaffFilters, type StaffSort } from './staffFilters'
 
 /**
- * The salesman catalog before its search index is built — pure, so web/scripts/rep_field_test.mjs
- * runs it in plain node.
+ * The salesman catalog between visits and before its search index is built — pure, so
+ * web/scripts/rep_field_test.mjs runs it in plain node.
  *
- * The index (MiniSearch) used to be built in the first render after the catalog arrived, holding up
- * the first paint. It is now built when the phone is idle (whenIdle); a search typed before it is
- * ready is a plain filter (plainSearch), so the list never ignores what was typed.
+ *  • Its search, category, filters and sort are remembered for this browser tab (sessionStorage,
+ *    pages/sales/repDevice.BROWSE_KEY): Catalog → Orders → Catalog comes back to the same list
+ *    instead of the whole catalog. A link that says what to show (Today's price drops,
+ *    /shop?f=drops) starts clean, and sign-out clears it with the rest of the rep's things.
+ *  • The index (MiniSearch) used to be built in the first render after the catalog arrived, holding
+ *    up the first paint. It is now built when the phone is idle (whenIdle); a search typed before it
+ *    is ready is a plain filter (plainSearch), so the list never ignores what was typed.
  */
+
+export interface StaffBrowse {
+  q: string
+  cat: string
+  filters: StaffFilters
+  sort: StaffSort
+}
+
+export function browseRecord(b: StaffBrowse): string {
+  return JSON.stringify({ q: b.q, cat: b.cat, filters: b.filters, sort: b.sort })
+}
+
+/** What was kept, each field checked on its own: an odd or stale field falls back, the rest stays. */
+export function readBrowse(raw: string | null | undefined): StaffBrowse | null {
+  let v: unknown
+  try {
+    v = raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const o = v as Record<string, unknown>
+  const f = o.filters && typeof o.filters === 'object' ? (o.filters as Record<string, unknown>) : {}
+  const filters = { ...NO_FILTERS }
+  for (const k of Object.keys(NO_FILTERS) as (keyof StaffFilters)[]) filters[k] = f[k] === true
+  return {
+    q: typeof o.q === 'string' ? o.q.slice(0, 200) : '',
+    cat: typeof o.cat === 'string' && o.cat ? o.cat : 'All',
+    filters,
+    sort: STAFF_SORTS.some((s) => s.value === o.sort) ? (o.sort as StaffSort) : 'featured',
+  }
+}
+
+/** What the catalog opens on: this tab's last browse state — unless the link says what to show. */
+export function rememberedFor(search: string, raw: string | null | undefined): StaffBrowse | null {
+  return new URLSearchParams(search).get('f') ? null : readBrowse(raw)
+}
 
 type IdleWindow = typeof globalThis & {
   requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number

@@ -31,7 +31,8 @@ import { mergeUsual, replaceLines, restoreLine, usualText } from './cartEdits'
 import { FiltersSheet } from './FiltersSheet'
 import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
-import { plainSearch, whenIdle } from './staffBrowse'
+import { BROWSE_KEY } from '@/pages/sales/repDevice'
+import { browseRecord, plainSearch, rememberedFor, whenIdle } from './staffBrowse'
 import { FILTER_CHIPS, isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
 import { afterOrderKeys, carryCart, minimumOf, orderBarLine } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
@@ -76,6 +77,15 @@ const CHUNK = 48
 const VIEW_KEY = 'yq-staff-view'
 
 type View = 'list' | 'grid'
+
+/** A sessionStorage value, or null where the browser has storage switched off. */
+function readSession(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
 
 function readView(): View {
   try {
@@ -212,12 +222,14 @@ export function StaffCatalog() {
   const basketKey = shopKey && !shopKey.startsWith('n:') ? shopKey : null
   const basketQ = useShopBasket(basketKey)
 
-  /* ── browse state ── */
-  const [cat, setCat] = useState('All')
+  /* ── browse state: this tab's last search, category, filters and sort come back (staffBrowse);
+     a link that says what to show (Today's price drops) starts clean ── */
+  const [remembered] = useState(() => rememberedFor(location.search, readSession(BROWSE_KEY)))
+  const [cat, setCat] = useState(remembered?.cat ?? 'All')
   // what is typed (the field), and what the list is searched for: the typing 150 ms after the last
   // key, so a word typed fast runs the search and the filters once, not on every letter
-  const [qRaw, setQRaw] = useState('')
-  const [q, setQ] = useState('')
+  const [qRaw, setQRaw] = useState(remembered?.q ?? '')
+  const [q, setQ] = useState(remembered?.q ?? '')
   useEffect(() => {
     if (qRaw === q) return
     const t = setTimeout(() => setQ(qRaw), 150)
@@ -229,8 +241,15 @@ export function StaffCatalog() {
     setQ(text)
   }, [])
   // Today's "See all" price drops lands here as /shop?f=drops
-  const [filters, setFilters] = useState<StaffFilters>(() => (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
-  const [sort, setSort] = useState<StaffSort>('featured')
+  const [filters, setFilters] = useState<StaffFilters>(() => remembered?.filters ?? (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
+  const [sort, setSort] = useState<StaffSort>(remembered?.sort ?? 'featured')
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(BROWSE_KEY, browseRecord({ q, cat, filters, sort }))
+    } catch {
+      /* private mode: the catalog opens fresh next time */
+    }
+  }, [q, cat, filters, sort])
   const [filtersOpen, setFiltersOpen] = useState(false)
   // the tools step out of the way while the list scrolls down — never while the field has the keyboard
   const scrollDir = useScrollDirection()
