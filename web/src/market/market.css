@@ -165,8 +165,9 @@
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
-    /* a sheet's scroll lock hides the scrollbar: keep its gutter, so the page never jumps sideways
-     * (classic Windows scrollbars shifted everything 10 px on every open and close) */
+    /* keep the scrollbar's gutter, so a short page and a long one line up (classic Windows
+     * scrollbars shifted everything 10 px). While a sheet is open lib/sheet's lock trades the gutter
+     * for body padding, so the overlay covers the whole window and still nothing moves. */
     scrollbar-gutter: stable;
   }
   html,

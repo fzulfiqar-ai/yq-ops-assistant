@@ -97,7 +97,9 @@ stay equal: `web/src/MarketApp.tsx` (`RESERVED`), `web/public/catalog-prefetch.j
   (hold-to-repeat, tick animation, keypad on the number), `Sheet` (bottom sheet / dialog / side
   drawer on the shared `web/src/lib/sheet.ts`: the drag follows the finger with no re-render, a
   flick or a pull past min(120 px, 25 %) closes it, the sheet curve settles without overshoot, an
-  exit animation, a nested scroll lock (the page keeps its width: `html { scrollbar-gutter: stable }`), a layer stack so Escape
+  exit animation, a nested scroll lock (the page never moves; with a classic Windows scrollbar the
+  lock trades `html`'s stable gutter for body padding, so the dim covers the whole window), a layer
+  stack so Escape
   closes only the top layer, first focus that keeps an `autoFocus` field, footers lifted above the
   on-screen keyboard via `visualViewport`), `ProductImage` (srcset from `thumb_urls`, reserved
   aspect ratio, fallback chain, the photo fade-in: a tint until the photo decodes, then a 200 ms

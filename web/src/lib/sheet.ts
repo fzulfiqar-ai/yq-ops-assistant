@@ -5,7 +5,7 @@ import { useEffect, useState, type PointerEvent as ReactPointerEvent, type RefOb
  * ui/Sheet now, the portal's components/ui/sheet next. Behaviour only — each build keeps its look.
  *
  *  - lockScroll(): a body scroll lock that nests (a sheet over a sheet). The page never shifts
- *    sideways: html carries `scrollbar-gutter: stable` (market.css / index.css).
+ *    sideways, and the overlay covers the scrollbar's place too (see lockScroll).
  *  - pushLayer(): one stack of open layers, so Escape closes only the top one (a keypad over the
  *    product panel used to close both).
  *  - initialFocus(): keeps a focus React's autoFocus already put inside the panel (the keypad, the
@@ -26,19 +26,38 @@ export const OUT_MS = 200
 /* ── scroll lock ─────────────────────────────────────────────────────────────────────────────── */
 
 let locks = 0
-let savedOverflow = ''
+let saved = { overflow: '', paddingRight: '', gutter: '' }
 
+/**
+ * Between pages the html keeps a stable scrollbar gutter, so a short page and a long one line up. A
+ * fixed overlay cannot paint into that gutter, though: with a classic (Windows) scrollbar a 10 px
+ * strip of the page stayed bright beside every open sheet (final review, 28-Oct-2026). So while
+ * locked the page drops the gutter and pads the body by the scrollbar's width instead: the overlay
+ * covers the whole window and nothing under it moves. Physical right: Chromium draws the page's
+ * scrollbar there in Arabic too. Phones (overlay scrollbars, width 0) change nothing.
+ */
 export function lockScroll(): () => void {
   const body = document.body
+  const html = document.documentElement
   if (locks++ === 0) {
-    savedOverflow = body.style.overflow
+    const bar = Math.max(0, window.innerWidth - html.clientWidth)
+    saved = { overflow: body.style.overflow, paddingRight: body.style.paddingRight, gutter: html.style.scrollbarGutter }
+    if (bar > 0) {
+      const pad = parseFloat(getComputedStyle(body).paddingRight) || 0
+      html.style.scrollbarGutter = 'auto'
+      body.style.paddingRight = `${pad + bar}px`
+    }
     body.style.overflow = 'hidden'
   }
   let released = false
   return () => {
     if (released) return
     released = true
-    if (--locks === 0) body.style.overflow = savedOverflow
+    if (--locks === 0) {
+      body.style.overflow = saved.overflow
+      body.style.paddingRight = saved.paddingRight
+      html.style.scrollbarGutter = saved.gutter
+    }
   }
 }
 
