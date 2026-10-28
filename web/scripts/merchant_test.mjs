@@ -401,5 +401,127 @@ check('price drop wins: a line with a REAL drop is never a clearing line — the
   eq([codes(sets.drops), codes(sets.lastChance)], [['T-DROP'], ['T-CLR']], 'deal sets')
 })
 
+check('a display box written as its contents list reads as a name, and its detail lists the contents (L12)', () => {
+  // the export's shape for a mixed box: its code, then CODE:QTY pairs joined by "|" (one with a full-width colon)
+  const box = { item_code: 'T-BOX1', display_name: 'T-BOX1 - AA1:6|BB2:6|CC3CC：6|DD4:6 (VFAN)', spec: 'T-BOX1 - AA1:6|BB2:6|CC3CC：6|DD4:6 (VFAN)' }
+  eq(F.productName(box), en.card.mixedBox(4, 24), 'name: "Mixed box · 4 lines, 24 pcs"')
+  ok(!/[|:：]/.test(F.productName(box)), 'no pipes or colons in the name')
+  eq(F.productDetail(box), 'AA1 ×6 · BB2 ×6 · CC3CC ×6 · DD4 ×6', 'detail: the contents, one "CODE ×qty" each')
+  ok(/[؀-ۿ]/.test(ar.card.mixedBox(4, 24)), 'Arabic mixedBox')
+  // a real name with a "|" in its spec is left alone (one pair is not a list)
+  const plain = { item_code: 'T-CAB', display_name: 'T-CAB 1mtr Mix Cables + HFs + AUX (VFAN)', spec: '' }
+  ok(!F.productName(plain).startsWith(en.card.mixedBox(1, 1).split('·')[0]), 'an ordinary name is untouched')
+})
+
+check('a short list never shows two lines that read the same: a colliding name carries its code (L7)', () => {
+  const a = { item_code: 'T-EAR1', display_name: '3.5mm Jack Flat In-Ear Phones', spec: '' }
+  const b = { item_code: 'T-EAR2', display_name: '3.5mm Jack Flat In-Ear Phones', spec: '' }
+  const c = { item_code: 'T-PB', display_name: 'Power bank 10000mAh', spec: '' }
+  const names = F.distinctNames([a, b, c])
+  ok(names.get('T-EAR1') !== names.get('T-EAR2'), 'the two earphones differ')
+  ok(names.get('T-EAR1').includes('T-EAR1') && names.get('T-EAR2').includes('T-EAR2'), 'each carries its own code')
+  eq(names.get('T-PB'), F.productName(c), 'a unique name is untouched')
+})
+
+const G = await mod('market/lib/cartGate.ts').catch((e) => ({ missing: e }))
+check('the cart never offers a wholesale order on an unchecked price, and shows the minimum from the payload meanwhile (L9)', () => {
+  if (G.missing) throw new Error('market/lib/cartGate.ts did not load: ' + (G.missing.message || G.missing))
+  const settings = { min_order_bhd: 20, small_order_mode: 'request' }
+  // the price check has not answered yet: the gap comes from the payload, nothing can be placed
+  const waiting = G.cartGate({ lines: 1, quote: null, quoting: true, quoteError: '', settings, estimate: 5 })
+  eq([waiting.checking, waiting.failed, waiting.canCheckout], [true, false, false], 'waiting: checking, not orderable')
+  eq([waiting.minimum && waiting.minimum.remaining_bhd, waiting.minimum && waiting.minimum.mode, waiting.estimated], [15, 'request', true], 'waiting: BHD 15 away, request mode, an estimate')
+  // the price check failed: still the minimum from the payload, a retry, never "Place wholesale order"
+  const failed = G.cartGate({ lines: 1, quote: null, quoting: false, quoteError: 'Network error', settings, estimate: 5 })
+  eq([failed.checking, failed.failed, failed.canCheckout, failed.minimum && failed.minimum.met], [false, true, false, false], 'failed: retry, not orderable, under the minimum')
+  // a priced cart: the server's own minimum wins
+  const quote = { total_bhd: 5, can_submit: true, minimum: { value_bhd: 20, remaining_bhd: 15, met: false, mode: 'request', kind: 'small' } }
+  const priced = G.cartGate({ lines: 1, quote, quoting: false, quoteError: '', settings, estimate: 5 })
+  eq([priced.canCheckout, priced.estimated, priced.minimum.kind], [true, false, 'small'], 'priced: orderable as the server says')
+  // over the payload's minimum while waiting: the estimate says ready, but nothing goes before the price check
+  const over = G.cartGate({ lines: 2, quote: null, quoting: true, quoteError: '', settings, estimate: 24 })
+  eq([over.minimum.met, over.canCheckout], [true, false], 'over the minimum, still waiting: not orderable yet')
+  // no minimum configured: no gap at all
+  eq(G.cartGate({ lines: 1, quote: null, quoting: true, quoteError: '', settings: {}, estimate: 5 }).minimum, null, 'no minimum set')
+})
+
+check('a failed re-price never leaves an older cart\'s quote orderable (final review #1)', () => {
+  if (G.missing) throw new Error('market/lib/cartGate.ts did not load: ' + (G.missing.message || G.missing))
+  const settings = { min_order_bhd: 20, small_order_mode: 'request' }
+  // priced at BHD 24 (met); the merchant cuts the cart to BHD 5 and the re-price fails: useQuote keeps
+  // the OLD quote on screen with quoting false and the error set
+  const old = { total_bhd: 24, can_submit: true, minimum: { value_bhd: 20, remaining_bhd: 0, met: true, mode: 'request', kind: 'standard' } }
+  const stale = G.cartGate({ lines: 1, quote: old, quoting: false, quoteError: 'Could not reach the price server.', settings, estimate: 5 })
+  eq([stale.priced, stale.failed, stale.canCheckout], [false, true, false], 'stale after a failure: not priced, Try again, not orderable')
+  eq([stale.estimated, stale.minimum && stale.minimum.remaining_bhd, stale.minimum && stale.minimum.met], [true, 15, false], 'the gap is THIS cart\'s estimate, not the old quote\'s "ready"')
+  // the same quote, freshly answered: priced and orderable
+  const fresh = G.cartGate({ lines: 1, quote: old, quoting: false, quoteError: '', settings, estimate: 24 })
+  eq([fresh.priced, fresh.failed, fresh.canCheckout], [true, false, true], 'fresh: priced and orderable')
+  // a re-price in flight with the old quote still on screen: not orderable until it answers
+  const flying = G.cartGate({ lines: 1, quote: old, quoting: true, quoteError: '', settings, estimate: 5 })
+  eq([flying.priced, flying.failed, flying.canCheckout], [false, false, false], 'in flight: not orderable, not failed')
+})
+
+// loaded here, not inside the check: check() is synchronous, and a missing module must FAIL its check
+const R = await mod('lib/preloadReload.ts').catch((e) => ({ missing: e }))
+check('a tab outlives two deploys: one reload per BUILD, never a loop on a broken one (T11)', () => {
+  if (R.missing) throw new Error('lib/preloadReload.ts did not load: ' + (R.missing.message || R.missing))
+  const tab = new Map()
+  const s = { getItem: (k) => (tab.has(k) ? tab.get(k) : null), setItem: (k, v) => tab.set(k, String(v)) }
+  eq(R.shouldReload('build-a', s), true, 'the first missing chunk of build A reloads')
+  eq(R.shouldReload('build-a', s), false, 'build A again (a broken build): no loop')
+  eq(R.shouldReload('build-b', s), true, 'the NEXT deploy in the same tab reloads again (it used to stay stuck)')
+  const blocked = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+  eq(R.shouldReload('build-c', blocked), false, 'storage blocked: never reload (it could not stop a loop)')
+})
+
+// a DOM stand-in: tag, scrollTop and parent are all the rule reads
+const FIELD = /^(TEXTAREA|INPUT|SELECT)$/
+const node = (tag, scrollTop = 0, parent = null, editable = false) => ({
+  tagName: tag, scrollTop, parentElement: parent,
+  matches: (sel) => (FIELD.test(tag) || (editable && sel.includes('contenteditable'))),
+})
+const SH = await mod('lib/sheet.ts').catch((e) => ({ missing: e }))
+check('a pull inside a pasted list or a field scrolls it, never the sheet (final review #4)', () => {
+  if (SH.missing) throw new Error('lib/sheet.ts did not load: ' + (SH.missing.message || SH.missing))
+  if (typeof SH.pullAllowed !== 'function') throw new Error('lib/sheet.ts has no pullAllowed()')
+  const body = node('DIV', 0)
+  const row = node('DIV', 0, body)
+  eq(SH.pullAllowed(row, body), true, 'plain content, body at its top: the sheet follows')
+  eq(SH.pullAllowed(node('TEXTAREA', 0, body), body), false, 'the paste box (even at its top): its own scroll and caret')
+  eq(SH.pullAllowed(node('INPUT', 0, row), body), false, 'a field: the caret')
+  eq(SH.pullAllowed(node('SPAN', 0, node('DIV', 0, body, true)), body), false, 'inside contenteditable')
+  const list = node('DIV', 240, body)
+  eq(SH.pullAllowed(node('SPAN', 0, list), body), false, 'an inner list scrolled down: it scrolls back up first')
+  eq(SH.pullAllowed(node('SPAN', 0, node('DIV', 0, body)), node('DIV', 30)), false, 'the body itself scrolled down')
+  eq(SH.pullAllowed(null, body), true, 'no target (synthetic): the body rule alone')
+})
+
+const HI = await mod('market/lib/history.ts').catch((e) => ({ missing: e }))
+check('Back goes Home when this tab has no shop page behind it, even after a filter replaced the entry (final review #6)', () => {
+  if (HI.missing) throw new Error('market/lib/history.ts did not load: ' + (HI.missing.message || HI.missing))
+  // react-router's history.state: { usr, key, idx }; a push adds 1 to idx, a replace keeps it
+  eq(HI.canGoBack({ usr: null, key: 'default', idx: 0 }), false, 'the landing page from WhatsApp')
+  eq(HI.canGoBack({ usr: null, key: 'k2x9', idx: 0 }), false, 'the landing page after a filter chip replaced it (new key, same idx)')
+  eq(HI.canGoBack({ usr: null, key: 'k3', idx: 2 }), true, 'two pages in')
+  eq([HI.canGoBack(null), HI.canGoBack(undefined), HI.canGoBack({}), HI.canGoBack({ idx: '1' })], [false, false, false, false], 'no or odd state: Home, never out of the shop')
+})
+
+const LP = await mod('lib/lazyPage.ts').catch((e) => ({ missing: e }))
+const { createElement } = await import('react')
+const { renderToString } = await import('react-dom/server')
+// loaded here: check() is synchronous
+const lp = { calls: 0 }
+const Hello = (p) => createElement('b', null, 'hi ' + p.n)
+const warmed = LP.missing ? null : LP.lazyPage(() => { lp.calls += 1; return lp.calls === 1 ? Promise.reject(new Error('signal dropped')) : Promise.resolve({ default: Hello }) })
+const firstTry = warmed ? await warmed.preload().then(() => lp.calls) : 0
+const secondTry = warmed ? await warmed.preload().then(() => lp.calls) : 0
+check('a warmed page renders at once, and a failed fetch is asked again, not replayed (final review #7, #9)', () => {
+  if (LP.missing) throw new Error('lib/lazyPage.ts did not load: ' + (LP.missing.message || LP.missing))
+  eq([firstTry, secondTry], [1, 2], 'preload after a failure fetches again')
+  // after the code is here the component renders synchronously: no Suspense, no fallback
+  eq(renderToString(createElement(warmed, { n: 7 })), '<b>hi 7</b>', 'renders without suspending')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

@@ -53,14 +53,22 @@ export default function TrackingPage() {
   const adopted = useRef(false)
   usePageTitle(data?.order_no ? S.track.order(data.order_no) : S.track.title, true, data?.order_no ? `${S.track.order(data.order_no)} · ${S.brand}` : `${S.track.title} · ${S.brand}`)
 
+  // only the newest read may land: a poll that returns after a newer one, or a reply for the
+  // previous link after the merchant opened another order, is dropped (it could show the wrong order)
+  const latest = useRef(0)
   const load = useCallback(() => {
     if (!token) return
+    const ask = ++latest.current
     getOrder(token)
       .then((d) => {
+        if (ask !== latest.current) return
         setData(d)
         setErr(false)
       })
-      .catch(() => setData((cur) => (cur ? cur : (setErr(true), null))))
+      .catch(() => {
+        if (ask !== latest.current) return
+        setData((cur) => (cur ? cur : (setErr(true), null)))
+      })
   }, [token])
 
   useEffect(() => {

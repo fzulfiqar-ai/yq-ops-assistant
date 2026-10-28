@@ -19,23 +19,38 @@ export function useEdgeFade(ref: RefObject<HTMLElement | null>, enabled = true, 
       off()
       return
     }
+    let rtl = getComputedStyle(el).direction === 'rtl'
     const measure = () => {
       const max = el.scrollWidth - el.clientWidth
       // scrollLeft runs negative in RTL (as components/Rail.tsx already reads it): the distance
       // from the INLINE-START edge is its magnitude, so start/end below are logical, not left/right
       const x = Math.abs(el.scrollLeft)
-      const rtl = getComputedStyle(el).direction === 'rtl'
       setFade((f) => {
         const next = { start: x > 8, end: max > 8 && x < max - 8, rtl }
         return f.start === next.start && f.end === next.end && f.rtl === next.rtl ? f : next
       })
     }
+    // a swipe fires many scroll events per frame: measure once per frame, and read the direction
+    // (a style read) only when the size changes, never mid-swipe
+    let frame = 0
+    const onScroll = () => {
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0
+          measure()
+        })
+    }
+    const onResize = () => {
+      rtl = getComputedStyle(el).direction === 'rtl'
+      measure()
+    }
     measure()
-    el.addEventListener('scroll', measure, { passive: true })
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    el.addEventListener('scroll', onScroll, { passive: true })
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(onResize)
     ro?.observe(el)
     return () => {
-      el.removeEventListener('scroll', measure)
+      el.removeEventListener('scroll', onScroll)
+      if (frame) cancelAnimationFrame(frame)
       ro?.disconnect()
     }
     // `deps` is the caller's list, forwarded as-is (the hook's contract); `ref` is a stable ref object

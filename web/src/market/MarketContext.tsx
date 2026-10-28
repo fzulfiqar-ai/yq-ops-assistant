@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ShopApiError, type Campaign, type CatalogPayload, type MyOrderSummary, type Quote, type RepCard, type ShopItem, type ShopSettings } from '@/lib/shopApi'
 import { useQuote, type QuoteFetcher } from '@/pages/shop/useQuote'
 import { currentRef, forgetRef, isRecognized, lastQty, readNote, rememberQty, rememberedOrders, writeNote } from './lib/device'
+import { cartGate, type CartGate } from './lib/cartGate'
 import { track } from './lib/events'
 import { fmtDateShort, isOut, minQtyOf, normalizeQty } from './lib/format'
 import { getMarket, postMarketQuote, postMyOrders } from './lib/marketApi'
@@ -11,12 +12,16 @@ import { S } from './strings'
 import { useToast } from './ui/Toast'
 
 /**
- * Two contexts, one provider:
+ * Three contexts, one provider:
  *
  *  • `useMarket()` — the catalog (painted from the copy this phone saved last time, replaced by
- *    the live payload), who the merchant is attributed to, the search index (loaded lazily, off
- *    the critical path), and the cart ACTIONS (add / setQty / remove with quantity memory and
- *    analytics). This value changes rarely, so product cards stay cheap.
+ *    the live payload), who the merchant is attributed to, and the cart ACTIONS (add / setQty /
+ *    remove with quantity memory and analytics). This value changes rarely, so product cards stay
+ *    cheap.
+ *  • `useMarketSearch()` — the search index (loaded lazily, off the critical path). Its own context
+ *    since 28-Oct-2026: the index lands at idle a second or two after the first paint, and while it
+ *    lived in useMarket() its arrival re-rendered every product card at once, right as the merchant
+ *    began to scroll. Only the three search surfaces subscribe.
  *  • `useOrder()` — the server-priced quote, coupon, note, and the orders this device placed.
  *    Changes on every cart edit; only cart surfaces subscribe.
  *
@@ -47,9 +52,6 @@ export interface MarketValue {
   ref: string | null
   setRef: (slug: string | null) => void
   recognized: boolean
-  index: SearchIndex | null
-  /** ask for the search index now (search intent) — resolves when built */
-  ensureIndex: () => Promise<SearchIndex | null>
   /** remembered quantity for this SKU, rounded to its rules — what one tap of Add sets */
   defaultQty: (item: ShopItem) => number
   add: (item: ShopItem, qty?: number, from?: string) => number
@@ -61,10 +63,24 @@ export interface MarketValue {
   reload: () => void
 }
 
+export interface SearchValue {
+  index: SearchIndex | null
+  /** ask for the search index now (search intent) — resolves when built */
+  ensureIndex: () => Promise<SearchIndex | null>
+}
+
 export interface OrderValue {
   quote: Quote | null
   quoting: boolean
   quoteError: string
+  /** the minimum and whether the cart may be placed — from the quote, else from the payload */
+  gate: CartGate
+  /** this cart at shelf prices: what a page shows, marked ≈, while no checked quote is on screen */
+  estimate: number
+  /** ask the price server again (after a failed check) */
+  retryQuote: () => void
+  /** a retry is on its way */
+  retrying: boolean
   coupon: string
   setCoupon: (c: string) => void
   note: string
@@ -74,6 +90,7 @@ export interface OrderValue {
 }
 
 const MarketCtx = createContext<MarketValue | null>(null)
+const SearchCtx = createContext<SearchValue | null>(null)
 const OrderCtx = createContext<OrderValue | null>(null)
 
 const cacheKey = (ref: string | null) => `yq-market-catalog:${(ref || '').toLowerCase()}`
@@ -266,8 +283,35 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
 
   /* ── quote (subscribes to the lines here, not in every card) ── */
   const lines = useCartLines()
-  const fetchQuote = useCallback<QuoteFetcher>((body, signal) => postMarketQuote(body, signal), [])
-  const { quote, quoting, error: quoteError } = useQuote(Boolean(data), lines, coupon, ref || '', fetchQuote)
+  // Retry after a failed price check: a new fetcher identity re-runs the shared hook's effect, so
+  // the hook (pages/shop/useQuote, shared with the portal) is not changed here
+  const [attempt, setAttempt] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+  const fetchQuote = useCallback<QuoteFetcher>(
+    (body, signal) => {
+      void attempt
+      return postMarketQuote(body, signal)
+    },
+    [attempt],
+  )
+  const { quote: lastQuote, quoting, error: quoteError } = useQuote(Boolean(data), lines, coupon, ref || '', fetchQuote)
+  // After a failed re-price the shared hook keeps the last good quote on screen (the portal wants
+  // that). Here it is an OLDER cart's price — "ready" and orderable on a cart that has since dropped
+  // under the minimum — so a failed check leaves no quote at all: the pages show this cart's
+  // estimate, marked ≈, and Try again (final review, 28-Oct-2026).
+  const quote = !quoting && quoteError ? null : lastQuote
+  const retryQuote = useCallback(() => {
+    setAttempt((n) => n + 1)
+    setRetrying(true)
+    window.setTimeout(() => setRetrying(false), 1600) // the debounce (400 ms) and a slow answer
+  }, [])
+  // what the cart may offer: the minimum from the quote, else from the payload; nothing placed on
+  // an unchecked price (lib/cartGate, finding L9)
+  const estimate = useMemo(() => lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0), [lines, itemsByCode])
+  const gate = useMemo(
+    () => cartGate({ lines: lines.length, quote, quoting, quoteError, settings, estimate }),
+    [lines.length, quote, quoting, quoteError, settings, estimate],
+  )
 
   /* ── my orders (tokens this device holds) ──────────────────── */
   const refreshMyOrders = useCallback(() => {
@@ -310,8 +354,6 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       ref,
       setRef,
       recognized,
-      index,
-      ensureIndex,
       defaultQty,
       add,
       setQty,
@@ -320,19 +362,30 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       pairsFor,
       reload,
     }),
-    [data, status, items, itemsByCode, categories, settings, campaigns, allowBackorder, stockAsOf, stockStale, soldOutLabel, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
+    [data, status, items, itemsByCode, categories, settings, campaigns, allowBackorder, stockAsOf, stockStale, soldOutLabel, ref, setRef, recognized, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
   )
 
+  const search = useMemo<SearchValue>(() => ({ index, ensureIndex }), [index, ensureIndex])
+
   const order = useMemo<OrderValue>(
-    () => ({ quote, quoting, quoteError, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
-    [quote, quoting, quoteError, coupon, note, setNote, myOrders, refreshMyOrders],
+    () => ({ quote, quoting, quoteError, gate, estimate, retryQuote, retrying, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
+    [quote, quoting, quoteError, gate, estimate, retryQuote, retrying, coupon, note, setNote, myOrders, refreshMyOrders],
   )
 
   return (
     <MarketCtx.Provider value={market}>
-      <OrderCtx.Provider value={order}>{children}</OrderCtx.Provider>
+      <SearchCtx.Provider value={search}>
+        <OrderCtx.Provider value={order}>{children}</OrderCtx.Provider>
+      </SearchCtx.Provider>
     </MarketCtx.Provider>
   )
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function useMarketSearch(): SearchValue {
+  const v = useContext(SearchCtx)
+  if (!v) throw new Error('useMarketSearch must be used inside MarketProvider')
+  return v
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

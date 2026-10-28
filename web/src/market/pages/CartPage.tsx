@@ -50,7 +50,7 @@ type QLine = NonNullable<Quote['lines']>[number]
 export default function CartPage() {
   const navigate = useNavigate()
   const m = useMarket()
-  const { quote, quoting, quoteError, coupon, setCoupon, note, setNote } = useOrder()
+  const { quote, quoting, quoteError, gate, retryQuote, retrying, coupon, setCoupon, note, setNote } = useOrder()
   const { itemsByCode, rep } = m
   const { viewport, openProduct } = useShell()
   const toast = useToast()
@@ -99,7 +99,9 @@ export default function CartPage() {
 
   /* ── the order ── */
   const quoteLines = useMemo(() => new Map<string, QLine>((quote?.lines || []).map((l) => [l.item_code, l])), [quote])
-  const minimum = quote?.minimum || null
+  // from the quote when the cart is priced, else from the payload (lib/cartGate): a slow or failed
+  // price check no longer drops the wholesale rule and offers "Place wholesale order" on BHD 5
+  const minimum = gate.minimum
   const under = Boolean(minimum && !minimum.met && Number(minimum.remaining_bhd) > 0)
   // under the minimum the primary is always "Keep restocking" — block mode too, where the old
   // disabled "Place wholesale order" left the page with no action at all (plan D2 / contract §7)
@@ -112,7 +114,10 @@ export default function CartPage() {
   // the server's sentences in the page's language (lib/serverWords.ts — English pages keep the server's own)
   const words = useServerWords()
   const blocked = quote?.can_submit === false ? blockText(words, quote) : ''
-  const canCheckout = lines.length > 0 && !quoting && quote?.can_submit !== false
+  // never on an unchecked price: a priced quote that the server lets through
+  const canCheckout = gate.canCheckout
+  // the label of the place button while the price check is out or failed
+  const placeLabel = gate.checking || retrying ? S.cart.checking : S.cart.place
   const first = rep?.first_name || ''
   const askUrl = useMemo(() => {
     if (!rep?.whatsapp_url) return null
@@ -203,7 +208,7 @@ export default function CartPage() {
       <dl className="space-y-2 text-sm">
         <div className="flex justify-between gap-3">
           <dt className="text-ink-2">{S.cart.subtotal}</dt>
-          <dd className="tnum">{bhd(quote?.subtotal_bhd ?? estimate)}</dd>
+          <dd className="tnum">{quote ? bhd(quote.subtotal_bhd ?? estimate) : `≈ ${bhd(estimate)}`}</dd>
         </div>
         {(quote?.discounts || []).map((d, i) => (
           <div key={d.rule_id ?? i} className="flex justify-between gap-3">
@@ -211,15 +216,19 @@ export default function CartPage() {
             <dd className="shrink-0 tnum text-ok">{bhdMinus(d.amount_bhd)}</dd>
           </div>
         ))}
-        <div className="flex justify-between gap-3">
-          <dt className="text-ink-2">{S.cart.delivery}</dt>
-          <dd className="tnum">{Number(quote?.delivery_bhd) > 0 ? bhd(quote?.delivery_bhd) : S.cart.free}</dd>
-        </div>
+        {/* delivery is the server's to say: no row until a checked quote is on screen (never "Free"
+            on an unchecked price, S14) */}
+        {quote && (
+          <div className="flex justify-between gap-3">
+            <dt className="text-ink-2">{S.cart.delivery}</dt>
+            <dd className="tnum">{Number(quote.delivery_bhd) > 0 ? bhd(quote.delivery_bhd) : S.cart.free}</dd>
+          </div>
+        )}
         <div className="flex items-baseline justify-between gap-3 border-t border-line-2 pt-2.5">
           <dt className="font-semibold">{S.cart.total}</dt>
           <dd>
             <span key={total} className="block font-display text-xl font-extrabold tnum anim-fade-in">
-              {bhd(total)}
+              {quote ? bhd(total) : `≈ ${bhd(total)}`}
             </span>
           </dd>
         </div>
@@ -386,7 +395,16 @@ export default function CartPage() {
               ))}
             </ul>
           )}
-          {quoteError && <p className="mt-4 rounded-sm bg-bad-soft px-3 py-2 text-xs text-bad">{errorText(words, quoteError, quote)}</p>}
+          {quoteError && (
+            <div className="mt-4 flex items-center gap-3 rounded-sm bg-bad-soft px-3 py-2 text-xs text-bad" role="alert">
+              <p className="min-w-0 flex-1">{errorText(words, quoteError, quote)}</p>
+              {gate.failed && (
+                <Button size="sm" variant="secondary" className="shrink-0" disabled={retrying} onClick={retryQuote}>
+                  {retrying ? S.cart.checking : S.states.retry}
+                </Button>
+              )}
+            </div>
+          )}
 
           {!desktop && <div className="mt-4 rounded-lg border border-line bg-surface p-4">{totals}</div>}
 
@@ -441,13 +459,13 @@ export default function CartPage() {
                   {requestSmall && <SmallRequestButton onClick={openSmall} className="mt-1" />}
                   {allowUnder && (
                     <Button variant="secondary" full className="mt-2" disabled={!canCheckout} onClick={() => navigate('/checkout')}>
-                      {S.cart.place}
+                      {placeLabel}
                     </Button>
                   )}
                 </>
               ) : (
                 <Button size="lg" full className="mt-4" disabled={!canCheckout} onClick={() => navigate('/checkout')} icon={<ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />}>
-                  {S.cart.place}
+                  {placeLabel}
                 </Button>
               )}
               <p className="mt-2 flex items-center gap-1.5 text-xs text-ink-2">
@@ -471,22 +489,27 @@ export default function CartPage() {
                 <div className="truncate text-xs text-ink-2">{S.cart.summary(items, units)}</div>
               )}
               <span key={total} className="block truncate font-display text-lg font-extrabold leading-tight tnum text-ink anim-fade-in sm:text-xl">
-                {bhd(total)}
+                {quote ? bhd(total) : `≈ ${bhd(total)}`}
               </span>
             </div>
             {keepMode ? (
               <Button size="lg" className="shrink-0 px-5" onClick={() => navigate('/shop')}>
                 {S.wholesale.keep}
               </Button>
+            ) : gate.failed ? (
+              // the price check did not come back: ask again, never a dead "Place" on an unchecked total
+              <Button size="lg" className="shrink-0 px-5" disabled={retrying} onClick={retryQuote}>
+                {retrying ? S.cart.checking : S.states.retry}
+              </Button>
             ) : (
               <Button size="lg" className="shrink-0 px-5" disabled={!canCheckout} onClick={() => navigate('/checkout')}>
-                {S.cart.place}
+                {placeLabel}
               </Button>
             )}
           </div>
           {allowUnder && (
             <Button variant="secondary" full className="mt-2" disabled={!canCheckout} onClick={() => navigate('/checkout')}>
-              {S.cart.place}
+              {placeLabel}
             </Button>
           )}
           <p className="mt-1 truncate text-2xs text-ink-2">{first ? S.cart.placeHint(first) : S.cart.placeHintGeneric}</p>

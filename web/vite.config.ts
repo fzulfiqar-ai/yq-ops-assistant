@@ -58,8 +58,34 @@ const BOOT_CSS = [
   "@media(min-width:1024px){#yq-boot span{padding-bottom:112px}#yq-boot i{width:96px;height:96px}}",
   "@media(max-height:520px){#yq-boot i{display:none}}",
   "@keyframes yq-boot-out{to{opacity:0;visibility:hidden}}",
-  // a load that will not play the opening (public/catalog-prefetch.js, lib/splashGate.ts) never paints it
-  "html[data-boot=off] #yq-boot{display:none}",
+  // the light frame's parts (see LIGHT below) are hidden in the night frame
+  "#yq-boot b{display:none}",
+  // A load that will not play the opening (public/catalog-prefetch.js, lib/splashGate.ts) never
+  // paints the night field. Since 28-Oct-2026 it paints the LIGHT frame instead of nothing: the
+  // shell's own outline (plum band, logo, search pill, the first blocks) straight from the HTML, so
+  // a phone on a slow network sees the shop's shape in the first second instead of a white page for
+  // six (measured: Slow 3G + 4x CPU painted nothing for 6 s). MarketApp removes it on its first
+  // commit, which paints the same outline. It takes no taps, so it needs no 8 s safety net: the slow
+  // networks it exists for take longer than that (the outline faded to white before the app came,
+  // final review) — 30 s only covers an app that never boots.
+  "html[data-boot=off] #yq-boot{background:#F9F7F3;pointer-events:none;animation-delay:30s}",
+  "html[data-boot=off] #yq-boot span{display:none}",
+  "html[data-boot=off] #yq-boot b{display:block;position:absolute}",
+  // phone: the plum band with the logo, two lines and the search pill; then a promo card and four discs
+  "#yq-boot .h{top:0;left:0;right:0;height:calc(env(safe-area-inset-top,0px) + 136px);background:linear-gradient(135deg,#6D4091,#824FAB);border-radius:0 0 24px 24px}",
+  "#yq-boot .h i{position:absolute;top:calc(env(safe-area-inset-top,0px) + 10px);inset-inline-start:16px;width:44px;height:44px;border-radius:12px;overflow:hidden;box-shadow:0 0 0 1px rgba(255,255,255,.18)}",
+  "#yq-boot .h img{display:block;width:100%;height:100%}",
+  "#yq-boot .h u,#yq-boot .h q{position:absolute;inset-inline-start:72px;border-radius:6px;background:rgba(255,255,255,.85)}",
+  "#yq-boot .h u{top:calc(env(safe-area-inset-top,0px) + 16px);width:132px;height:14px}",
+  "#yq-boot .h q{top:calc(env(safe-area-inset-top,0px) + 38px);width:108px;height:9px;background:rgba(255,255,255,.5)}",
+  "#yq-boot q::before,#yq-boot q::after{content:none}",
+  "#yq-boot .h s{position:absolute;top:calc(env(safe-area-inset-top,0px) + 72px);left:12px;right:12px;height:48px;border-radius:14px;background:#fff}",
+  "#yq-boot .c{top:calc(env(safe-area-inset-top,0px) + 186px);left:12px;right:12px;height:170px;border-radius:18px;background:#F3EEE8}",
+  "#yq-boot .r{top:calc(env(safe-area-inset-top,0px) + 376px);left:12px;right:12px;height:72px;justify-content:space-around}",
+  "html[data-boot=off] #yq-boot .r{display:flex}",
+  "#yq-boot .r em{display:block;width:72px;height:72px;border-radius:50%;background:#EFE8F6}",
+  // desktop: a white header bar with the logo and the pill, then two blocks in the container
+  "@media(min-width:1024px){#yq-boot .h{height:112px;background:#fff;border-radius:0;box-shadow:0 1px 0 #E6E1EA}#yq-boot .h i{top:24px;inset-inline-start:max(24px,calc((100vw - 1600px)/2 + 24px))}#yq-boot .h u{top:30px;inset-inline-start:max(80px,calc((100vw - 1600px)/2 + 80px));background:#E9E4EE}#yq-boot .h q{top:52px;inset-inline-start:max(80px,calc((100vw - 1600px)/2 + 80px));background:#F1EDF4}#yq-boot .h s{top:28px;left:50%;right:auto;width:min(640px,40vw);transform:translateX(-50%);height:44px;border-radius:14px;background:#F6F3F8}#yq-boot .c{top:136px;left:max(24px,calc((100vw - 1600px)/2 + 24px));right:max(380px,calc((100vw - 1600px)/2 + 380px));height:240px}#yq-boot .r{top:400px;left:max(24px,calc((100vw - 1600px)/2 + 24px));right:max(380px,calc((100vw - 1600px)/2 + 380px));height:96px;justify-content:space-between}#yq-boot .r em{width:88px;height:88px}}",
 ].join('')
 /**
  * The tile's mark travels IN the HTML, as a data: URI — one request fewer on the critical path, and
@@ -87,7 +113,8 @@ const BOOT_LOGO = (() => {
     return '/yq-logo-160.webp'
   }
 })()
-const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span></div>`
+// the night frame (span) and, hidden unless html[data-boot=off], the light frame (the b parts)
+const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span><b class="h"><i><img src="${BOOT_LOGO}" alt="" width="44" height="44" decoding="sync" /></i><u></u><q></q><s></s></b><b class="c"></b><b class="r"><em></em><em></em><em></em><em></em></b></div>`
 
 /**
  * The market build rewrites the shared index.html: its own entry (src/main.market.tsx — one

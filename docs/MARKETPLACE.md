@@ -95,9 +95,17 @@ stay equal: `web/src/MarketApp.tsx` (`RESERVED`), `web/public/catalog-prefetch.j
 - **Primitives** — `web/src/market/ui/`: `Button` (primary / secondary / ghost / danger / wa; 40–56px),
   `Chip` (v3 tones `deal` / `fresh`), `SectionHeader` (extracted from `Rail`), `Stepper`
   (hold-to-repeat, tick animation, keypad on the number), `Sheet` (bottom sheet / dialog / side
-  drawer, drag-to-dismiss, exit animation, focus trap), `ProductImage` (srcset from `thumb_urls`,
-  reserved aspect ratio, fallback chain), `Field`/`Select`, `Skeleton`, `Toast` (with Undo action),
-  `ErrorBoundary`. The market never imports portal UI — enforced by the `no-restricted-imports`
+  drawer on the shared `web/src/lib/sheet.ts`: the drag follows the finger with no re-render, a
+  flick or a pull past min(120 px, 25 %) closes it, the sheet curve settles without overshoot, an
+  exit animation, a nested scroll lock (the page never moves; with a classic Windows scrollbar the
+  lock trades `html`'s stable gutter for body padding, so the dim covers the whole window), a layer
+  stack so Escape
+  closes only the top layer, first focus that keeps an `autoFocus` field, footers lifted above the
+  on-screen keyboard via `visualViewport`), `ProductImage` (srcset from `thumb_urls`, reserved
+  aspect ratio, fallback chain, the photo fade-in: a tint until the photo decodes, then a 200 ms
+  fade, or at once when it decodes mid-scroll), `Field`/`Select`, `Skeleton` (plus `PageSkeleton`
+  and `DesktopShellSkeleton`), `Toast` (with Undo action), `ErrorBoundary` (`page` mode keeps the
+  shell). The market never imports portal UI — enforced by the `no-restricted-imports`
   block in `web/eslint.config.js`, which also bans `motion` and `recharts` inside `src/market/**`.
 - **v3 CSS blocks** — everything added in v3 lives in `market.css` between paired
   `/* v3: name */ … /* end v3: name */` comments, so each feature owns its rules: **reveal**
@@ -110,19 +118,34 @@ stay equal: `web/src/MarketApp.tsx` (`RESERVED`), `web/public/catalog-prefetch.j
   same element still wins.
 - **Motion** — CSS/WAAPI only, no animation library in the merchant bundle: nav pill slide, Add →
   "Added" → stepper morph, stepper tick, cart badge bump, total crossfade, sheet/drawer transitions,
-  skeleton shimmer, order-placed check draw, View Transition on the product photo, the promo slider
+  skeleton shimmer, order-placed check draw, the photo flight into the product sheet, the promo slider
   (scroll-snap + `scrollTo`), the arc rise, the reveal stagger. Everything that moves is
   gated on `prefers-reduced-motion: no-preference` or dies in the kill switch — and **nothing under
   reduced motion ever hides content**: the reveal double-gates (`html[data-reveal]` *and* the media
   query), the opening becomes a static frame, the slider never auto-advances.
+- **The motion language (28-Oct-2026)** — three curves in `market.css`: `--m-ease-out` (enter),
+  `--m-ease-in` (exit) and `--m-ease-sheet` (sheets; settles, never overshoots), and the durations
+  `--m-d-1` 120 ms (press) · `--m-d-2` 200 ms (fades, toasts, the page glide) · `--m-d-sheet` 280 ms
+  (sheets) · `--m-d-4` 420 ms (hero). Only `transform`
+  and `opacity` move; no `backdrop-filter` on touch screens (`.glass` blurs only under
+  `(hover: hover) and (pointer: fine)`, touch gets a solid surface); nothing waits for an exit.
+  Named effects: **photo fade-in** (`ProductImage`), **page glide** (`RouteOutlet`), **sheet slide**
+  (`lib/sheet.ts`), **photo flight** (`lib/flight.ts`: a FLIP clone of the tapped card's photo,
+  300 ms on the sheet curve, skipped when the photo is off-screen or not loaded), **scroll reveal**
+  (below). **Lite mode** (`lib/lite.ts`): with Save-Data or ≤ 2 GB of memory `html[data-lite]` is
+  set and there are no reveals, no sweeps and no flight, only fades.
 - **`useReveal`** (`hooks/useReveal.ts`) — one module-level `IntersectionObserver` for all `.reveal`
   nodes inside a ref. In a *layout* effect it marks nodes already in (or above) the viewport `.is-in`
   before the browser paints, so nothing fades in on first paint and the LCP element is never delayed;
-  only the rest are observed. Rules for consumers: every `.reveal` must sit inside an element passed
-  to the hook; put it on a section wrapper or a desktop grid card — never on compact rail cards
-  (horizontally off-screen), never inside a `.cv-*` (`content-visibility`) element, never on an
-  element with its own transition; keep the className stable; pass `deps` that change when new
-  `.reveal` nodes render. Stagger with `style={{ ['--i']: index }}` (capped at 6 × 45 ms).
+  only the rest are observed, and they start rising just before they enter (6 % below the fold):
+  12 px and 240 ms. A flick faster than 2000 px/s, or a jump past a node, shows it at once
+  (`.is-instant`). On a phone the section itself stays still and only its header
+  (`[data-section-head]`, set by `SectionHeader`) rises 8 px. Lite mode hides nothing. Rules for
+  consumers: every `.reveal` must sit inside an element passed to the hook; put it on a section
+  wrapper or a wrapper around a desktop grid card — never on compact rail cards (horizontally
+  off-screen), never inside a `.cv-*` (`content-visibility`) element, never on an element with its
+  own transition; keep the className stable; pass `deps` that change when new `.reveal` nodes
+  render. Stagger with `style={{ ['--i']: index }}` (capped at 4 × 40 ms).
 
 ## Shell (`web/src/market/shell/`)
 
@@ -130,7 +153,7 @@ stay equal: `web/src/MarketApp.tsx` (`RESERVED`), `web/public/catalog-prefetch.j
 wide ≥1280` synchronously from `matchMedia`.
 
 - **Phone** — `PhoneHeader`, the page, and the bottom stack: `[page bar] [CartDock] [FloatingNav]`.
-  `FloatingNav` is a glass pill with five tabs — **Home · Browse · Restock (live line badge) · Orders
+  `FloatingNav` is a pill (glass under a mouse, a solid surface on touch) with five tabs — **Home · Browse · Restock (live line badge) · Orders
   · My YQ** — and a sliding active pill; `activeIndex()` maps by the *first* path segment only, so a
   storefront slug that merely starts like a route is a storefront (`/search` → Browse; `/cart`,
   `/checkout`, `/quick` → Restock; `/orders`, `/o/…` → Orders; `/me`, `/about` → My YQ). Search is no
@@ -168,8 +191,18 @@ wide ≥1280` synchronously from `matchMedia`.
   container width below the column row. Grids run 4–5 columns (a fifth only from `3xl`, because past
   four a wholesale name clips).
 - **Overlays** — `ShellContext.openProduct(code)` pushes history state so the `ProductPanel`
-  (sheet / dialog / right drawer) opens over whichever page is showing and Back closes it;
-  `/p/{code}` deep links still work. `SearchPalette` opens with ⌘K / Ctrl+K / `/`.
+  (sheet / dialog / right drawer) opens over whichever page is showing and Back closes it, leaving
+  the page where it was; `/p/{code}` deep links still work. `SearchPalette` opens with ⌘K / Ctrl+K /
+  `/`. Both chunks are fetched at idle and on the first touch, so the first tap never waits.
+- **Pages and Back (28-Oct-2026)** — `RouteOutlet` (used by `Shell` and `DesktopShell`) gives every
+  page its own error boundary and Suspense: a page whose code is still downloading shows
+  `PageSkeleton` inside the shell (never a blank or frozen page), a page that crashes keeps the
+  header, nav and restock, and an in-app page change fades the next page up (`m-page-in`: 8 px and
+  200 ms, never on the first load). `web/src/lib/scrollKeeper.ts` (in `EntryParams`): a new page opens at the top;
+  Back and Forward land where that page was, following it while it grows (the restore holds until
+  the height has been steady for 300 ms, at most 2.5 s, and stops at the first wheel, touch or
+  key); a panel or a filter on the same page leaves the scroll alone. The header's Back on a page
+  the merchant arrived on from outside (WhatsApp, Google) goes Home instead of leaving the shop.
 - **Page bars** — pages hand their sticky action (`Place wholesale order`, `Keep restocking`,
   `Add all`) to the shell with `<PageBar>`; the shell stacks it above the nav and writes the measured
   height into `--m-bottom-stack`, so nothing is ever hidden under the nav.
@@ -237,7 +270,8 @@ Privacy, the price and stock dates).
 **Desktop** — the same list on a wider rhythm, with two differences: the top is a **hero
 composition** (`heroSplit()`) — a 21:9 `PromoSlider` stage that dissolves between slides, beside up
 to two stacked pastel `SlideCard` tiles taken from the same deck, never a tile that clones a heading
-further down — and sections rise in as they scroll (`.reveal`, desktop grid cards only). The CTA band
+further down — and sections and grid cards rise in as they scroll (`.reveal`; on a phone only the
+section titles move). The CTA band
 and footer are hosted by the shell below the aside column (`PageTail`).
 
 ## The wholesale order engine (what the merchant sees)
@@ -479,6 +513,13 @@ on a fresh device, never on a reload and never in a new tab within 7 days. **War
 fatal): tap targets between 36 and 44px, slider autoplay/hold timing, gap-filler mix, a repeated paste offer, `copy-drift` (a literal the
 harness checks is no longer in `strings.ts`), a missing rep slug.
 
+**Smoothness and motion (28-Oct-2026, `scripts/qa/smooth.py`)** — on the lead viewports: photos
+never blank on landing (S2), closing a product panel keeps the place (S3), Back lands on the same
+card (S4), a page whose code is still loading shows the shell and a skeleton (S5), a sheet follows
+the finger without overshoot (S6), the photo flight, Escape closing only the top layer, the flick
+and lite-mode reveals, the phone reveal, the palette's focus and Back from an outside entry. Scroll
+frame times at 4× CPU (S1) are measured, never fatal. The table is in `scripts/qa/README.md`.
+
 **Last full run against the local preview (20-Sep-2026): 200 pages, 264 screenshots, 0 hard
 failures, 266 advisory tap-target warnings** (controls between 36 and 44px — the standing backlog,
 not a regression).
@@ -583,6 +624,17 @@ truthful "Deal" badge · `moq` / `pack_size` on SKUs that ship in packs · photo
 
 ## Release log
 
+- **Polish, ship 1 (28-Oct-2026, branch `worktree-polish-market`, `6258a44` → `e15a774`, released on the
+  owner's go)** — smoothness and honesty. The photo fade-in, Back that lands where you were, the page
+  glide with page-shaped skeletons (`RouteOutlet`, `lib/lazyPage` with an idle warm-up of the main
+  pages), the sheet slide on the shared `lib/sheet.ts`, the photo flight, the lightbox gestures,
+  scroll reveal v2 and lite mode, the light boot frame for slow networks; the cart never offers an
+  order on an unchecked or older cart's price (`lib/cartGate`, "≈" estimates); Back never leaves the
+  shop; one reload per release; boundaries per page, overlay and optional section; the look fixes
+  (category discs, whole slide headlines, display-box names, 360 px rows, the one-row dock). A
+  fresh whole-branch review found 1 critical and 8 important issues, all fixed with a failing test
+  first; 11 minors are listed in the ledger for later. The QA harness gained the smoothness and
+  motion guards (`scripts/qa/smooth.py`). The ops portal and the salesman app are ship 2.
 - **v3 (17 → 20-Sep-2026, branch `market-v3`, commits `0834a7e` → `99fe741` → `5759d53`)** —
   wholesale-first. Round 1: the four promises with Arabic + validation, `small_order_mode` in the
   catalog settings, `order_kind` end to end, the clearance tie-break in gap fillers, the campaign

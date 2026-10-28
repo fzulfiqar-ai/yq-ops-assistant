@@ -111,7 +111,10 @@ export function CategoryTiles({ tiles, className }: { tiles: { category: string;
               onClick={() => track('rail_click', { meta: { rail: 'tile', pos: i } })}
               className="group flex flex-col items-center rounded-md px-0.5 pb-1 pt-1 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
             >
-              <span className={cn('relative isolate grid h-16 w-16 place-items-center rounded-full shadow-[0_1px_2px_hsl(268_30%_10%/0.06),0_8px_18px_-10px_hsl(268_30%_10%/0.22)] ring-2 transition duration-2 ease-m group-hover:-translate-y-0.5 group-hover:shadow-2 group-hover:ring-plum/25 group-active:scale-95 min-[360px]:h-[72px] min-[360px]:w-[72px] lg:h-[88px] lg:w-[88px]', TILE_WASH[i % TILE_WASH.length], TILE_RING[i % TILE_RING.length])}>
+              {/* no `isolate` here: inside an isolated group the photo's multiply met the disc's 60%
+                  wash over a transparent backdrop and LIGHTENED the photo's square (a pale box on
+                  the apricot disc); blended with the drawn page, white takes the disc's colour */}
+              <span className={cn('relative grid h-16 w-16 place-items-center rounded-full shadow-[0_1px_2px_hsl(268_30%_10%/0.06),0_8px_18px_-10px_hsl(268_30%_10%/0.22)] ring-2 transition duration-2 ease-m group-hover:-translate-y-0.5 group-hover:shadow-2 group-hover:ring-plum/25 group-active:scale-95 min-[360px]:h-[72px] min-[360px]:w-[72px] lg:h-[88px] lg:w-[88px]', TILE_WASH[i % TILE_WASH.length], TILE_RING[i % TILE_RING.length])}>
                 {/* the square inscribed in the disc (70.7%): no corner of the photo can fall outside the ring */}
                 <span className="block h-[70%] w-[70%]">
                   <ProductImage item={t.image} alt="" sizes="(min-width: 1024px) 88px, 72px" size={88} className="h-full w-full bg-transparent" imgClassName="mix-blend-multiply transition-transform duration-3 ease-m group-hover:scale-[1.07]" iconSize={20} showCaption={false} eager={i < 8} />

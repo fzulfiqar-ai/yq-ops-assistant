@@ -1,10 +1,11 @@
-import { lazy, StrictMode, Suspense, useEffect } from 'react'
+import { StrictMode, Suspense, useEffect, useLayoutEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams, useNavigate } from 'react-router-dom'
 import { UpdateToast } from '@/market/components/UpdateToast'
 import { isSlugShaped, rememberRef } from '@/market/lib/device'
 import { setSource } from '@/market/lib/events'
 import { watchInstallPrompt } from '@/market/lib/install'
 import { startErrorReporting } from '@/market/lib/errors'
+import { isLite } from '@/market/lib/lite'
 import { startVitals } from '@/market/lib/vitals'
 import { MarketProvider, useMarket } from '@/market/MarketContext'
 import Home from '@/market/pages/Home'
@@ -13,19 +14,52 @@ import { cartStore } from '@/market/store/cart'
 import { locale } from '@/market/strings'
 import { ErrorBoundary } from '@/market/ui/ErrorBoundary'
 import { ToastProvider } from '@/market/ui/Toast'
+import { lazyPage } from '@/lib/lazyPage'
+import { useScrollKeeper } from '@/lib/scrollKeeper'
 
-const ShopPage = lazy(() => import('@/market/pages/ShopPage'))
-const CategoryPage = lazy(() => import('@/market/pages/CategoryPage'))
-const SearchPage = lazy(() => import('@/market/pages/SearchPage'))
-const CartPage = lazy(() => import('@/market/pages/CartPage'))
-const CheckoutPage = lazy(() => import('@/market/pages/CheckoutPage'))
-const TrackingPage = lazy(() => import('@/market/pages/TrackingPage'))
-const MyOrdersPage = lazy(() => import('@/market/pages/MyOrdersPage'))
-const MyYQPage = lazy(() => import('@/market/pages/MyYQPage'))
-const QuickOrderPage = lazy(() => import('@/market/pages/QuickOrderPage'))
-const LegacyRedirect = lazy(() => import('@/market/pages/LegacyRedirect'))
-const AboutPage = lazy(() => import('@/market/pages/AboutPage'))
-const BrandPage = lazy(() => import('@/market/pages/BrandPage'))
+// lib/lazyPage: a page whose code is here renders at once; one that failed to load is asked again
+const ShopPage = lazyPage(() => import('@/market/pages/ShopPage'))
+const CategoryPage = lazyPage(() => import('@/market/pages/CategoryPage'))
+const SearchPage = lazyPage(() => import('@/market/pages/SearchPage'))
+const CartPage = lazyPage(() => import('@/market/pages/CartPage'))
+const CheckoutPage = lazyPage(() => import('@/market/pages/CheckoutPage'))
+const TrackingPage = lazyPage(() => import('@/market/pages/TrackingPage'))
+const MyOrdersPage = lazyPage(() => import('@/market/pages/MyOrdersPage'))
+const MyYQPage = lazyPage(() => import('@/market/pages/MyYQPage'))
+const QuickOrderPage = lazyPage(() => import('@/market/pages/QuickOrderPage'))
+const LegacyRedirect = lazyPage(() => import('@/market/pages/LegacyRedirect'))
+const AboutPage = lazyPage(() => import('@/market/pages/AboutPage'))
+const BrandPage = lazyPage(() => import('@/market/pages/BrandPage'))
+
+/**
+ * The pages a merchant opens most — the four tabs, a shelf, search, checkout, a pasted list — fetched
+ * one per idle moment once the first page has had its photos (~33 KB gzip in all). A tap then renders
+ * the page at once: a page whose code had never been imported committed its skeleton, and React
+ * holds a shown fallback for 300 ms, so every first visit flashed one (final review, 28-Oct-2026).
+ * A lite phone (Save-Data, ≤ 2 GB) keeps its data and memory for the page it is on.
+ */
+const WARM = [ShopPage, CartPage, CategoryPage, SearchPage, MyOrdersPage, MyYQPage, CheckoutPage, QuickOrderPage]
+
+function useWarmPages() {
+  useEffect(() => {
+    if (isLite()) return
+    let stopped = false
+    let idle = 0
+    const ric = typeof window.requestIdleCallback === 'function'
+    const next = (i: number) => {
+      if (stopped || i >= WARM.length) return
+      const run = () => void WARM[i].preload().then(() => next(i + 1))
+      idle = ric ? window.requestIdleCallback(run, { timeout: 6000 }) : window.setTimeout(run, 400)
+    }
+    const start = window.setTimeout(() => next(0), 3000)
+    return () => {
+      stopped = true
+      window.clearTimeout(start)
+      if (ric) window.cancelIdleCallback(idle)
+      else window.clearTimeout(idle)
+    }
+  }, [])
+}
 
 /**
  * YQ Marketplace — the merchant front door (built with VITE_APP=market, its own hostname, its own
@@ -45,8 +79,9 @@ const BrandPage = lazy(() => import('@/market/pages/BrandPage'))
 export const RESERVED = new Set(['search', 'cart', 'checkout', 'orders', 'p', 't', 'o', 'c', 'join', 'shop', 'me', 'quick', 'about', 'help', 'ask', 'saved', 'brands', 'wekome', 'coming-soon'])
 
 /**
- * Reads ?ref / ?src on any entry URL (shared product links and rep links carry them); scrolls to
- * top on page changes (not overlays). A valid ?ref is remembered for later visits AND becomes this
+ * Reads ?ref / ?src on any entry URL (shared product links and rep links carry them); a new page
+ * opens at the top and Back lands where the page was (lib/scrollKeeper; a panel or a filter on the
+ * same page leaves the scroll alone). A valid ?ref is remembered for later visits AND becomes this
  * session's ref at once (MarketApp seeds it on the first render; this covers a later in-app
  * navigation), so the rep's card, the WhatsApp asks and every notify / restock / order POST carry
  * it on the very first visit. A /{slug} storefront keeps its own slug: Home confirms it with the
@@ -80,11 +115,7 @@ function EntryParams() {
       }
     }
   }, [params, location.pathname, navigate, setRef])
-  useEffect(() => {
-    const st = location.state as { panel?: string } | null
-    if (st?.panel) return // product panel over the same page: keep the scroll position
-    window.scrollTo({ top: 0 })
-  }, [location.pathname, location.state])
+  useScrollKeeper()
   return null
 }
 
@@ -111,6 +142,12 @@ function initialRef(): string | null {
 }
 
 export default function MarketApp() {
+  // the served light boot frame (vite.config.ts BOOT_HTML, html[data-boot=off]) outlines this shell;
+  // it goes on the app's first commit, so the next painted frame is the app itself. (The night frame
+  // of a load that plays the opening is the Splash's to remove.)
+  useLayoutEffect(() => {
+    if (document.documentElement.getAttribute('data-boot') === 'off') document.getElementById('yq-boot')?.remove()
+  }, [])
   useEffect(() => {
     document.documentElement.lang = locale.lang
     document.documentElement.dir = locale.dir
@@ -119,6 +156,7 @@ export default function MarketApp() {
     watchInstallPrompt()
     return stopErrors
   }, [])
+  useWarmPages()
   return (
     <StrictMode>
       <ErrorBoundary>

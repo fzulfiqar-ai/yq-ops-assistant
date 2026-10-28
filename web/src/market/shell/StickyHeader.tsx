@@ -37,6 +37,9 @@ export function StickyHeader() {
   const navigate = useNavigate()
   const { pathname, search } = useLocation()
   const [mega, setMega] = useState(false)
+  // the menu stays mounted while it plays its exit; MegaNav's onGone unmounts it
+  const [megaMounted, setMegaMounted] = useState(false)
+  if (mega && !megaMounted) setMegaMounted(true)
   const [bump, setBump] = useState(false)
   const [tickSeen, setTickSeen] = useState(tick)
   const [pathSeen, setPathSeen] = useState(pathname)
@@ -162,7 +165,7 @@ export function StickyHeader() {
               >
                 {S.nav.browse} <ChevronDown size={15} className={cn('transition-transform duration-2', mega && 'rotate-180')} aria-hidden="true" />
               </button>
-              {mega && <MegaNav onClose={() => setMega(false)} onEnter={openMega} onLeave={closeMegaSoon} />}
+              {megaMounted && <MegaNav leaving={!mega} onGone={() => setMegaMounted(false)} onClose={() => setMega(false)} onEnter={openMega} onLeave={closeMegaSoon} />}
             </div>
           ) : (
             <NavLink to="/shop" className={linkCls}>

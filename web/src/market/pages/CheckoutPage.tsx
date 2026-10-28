@@ -41,7 +41,10 @@ const FORM_ID = 'yq-market-checkout'
 export default function CheckoutPage() {
   const navigate = useNavigate()
   const m = useMarket()
-  const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
+  const { quote, quoting, gate, estimate, retryQuote, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
+  // the total is the server's: until a checked quote is on screen it is this cart's estimate, marked
+  // (it read "BHD 0.000" with the price check out or failed, S14)
+  const totalText = quote ? bhd(quote.total_bhd) : `≈ ${bhd(estimate)}`
   const { rep, data, itemsByCode, recognized } = m
   const words = useServerWords()
   const { viewport } = useShell()
@@ -87,12 +90,13 @@ export default function CheckoutPage() {
   const phoneOk = Boolean(reuse) || isPhone(customer.phone)
   const emailOk = !customer.email.trim() || isEmail(customer.email)
   const formOk = nameOk && phoneOk && emailOk
-  const canSubmit = lines.length > 0 && formOk && !quoting && !submitting && quote?.can_submit !== false
+  // never on an unchecked price (lib/cartGate): a priced quote the server lets through
+  const canSubmit = lines.length > 0 && formOk && !submitting && gate.canCheckout
   // Why the send did not go through, once it has been attempted. The button stays solid plum and
   // takes the tap: a `disabled:opacity-50` plum slab is 2.5:1 against its own white label and reads
   // as a broken control, and nothing on the screen says what is missing.
   const invalid = tried && !formOk
-  const reason = invalid ? (!phoneOk && !nameOk ? S.checkout.missing : !phoneOk ? S.checkout.missingPhone : !nameOk ? S.checkout.missingName : S.checkout.emailBad) : tried && quoting ? S.cart.updating : ''
+  const reason = invalid ? (!phoneOk && !nameOk ? S.checkout.missing : !phoneOk ? S.checkout.missingPhone : !nameOk ? S.checkout.missingName : S.checkout.emailBad) : tried && quoting ? S.cart.updating : tried && gate.failed ? S.cart.checking : ''
   const set = (k: keyof CustomerDraft, v: string) => setCustomer((c) => ({ ...c, [k]: v }))
   const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }))
   const areas = data?.settings?.areas || []
@@ -156,6 +160,8 @@ export default function CheckoutPage() {
     setTouched({ name: true, phone: true, email: true })
     setTried(true)
     if (!canSubmit) {
+      // the price check did not come back: this tap asks again (the reason line says so)
+      if (formOk && gate.failed) retryQuote()
       focusMissing()
       return
     }
@@ -237,7 +243,7 @@ export default function CheckoutPage() {
           {/* the order, folded */}
           <Link to="/cart" className="hit relative mt-1 flex items-center justify-between gap-3 rounded-md border border-line bg-surface px-3.5 py-2.5 text-sm hover:bg-plum-wash lg:mt-4">
             <span className="text-ink-2">{S.cart.summary(items, units)}</span>
-            <span className="font-display font-bold tnum text-ink">{bhd(quote?.total_bhd)}</span>
+            <span className="font-display font-bold tnum text-ink">{totalText}</span>
             <span className="font-semibold text-plum">{S.cart.edit}</span>
           </Link>
           {small && minimum && (
@@ -432,7 +438,7 @@ export default function CheckoutPage() {
           <div className="rounded-lg border border-line bg-surface p-4">
             <div className="flex items-baseline justify-between">
               <span className="text-sm text-ink-2">{S.cart.summary(items, units)}</span>
-              <span className="font-display text-xl font-extrabold tnum text-ink">{bhd(quote?.total_bhd)}</span>
+              <span className="font-display text-xl font-extrabold tnum text-ink">{totalText}</span>
             </div>
             {error && (
               <p role="alert" className="mt-3 rounded-sm bg-bad-soft px-3 py-2 text-xs font-medium text-bad">
@@ -509,7 +515,7 @@ export default function CheckoutPage() {
               and the money column was the one that gave way (BHD / 21.000 on two lines at 390) */}
           <div className="flex items-baseline justify-between gap-3">
             <span className="min-w-0 truncate text-xs text-ink-2">{S.cart.summary(items, units)}</span>
-            <span className="shrink-0 whitespace-nowrap font-display text-xl font-extrabold leading-tight tnum text-ink">{bhd(quote?.total_bhd)}</span>
+            <span className="shrink-0 whitespace-nowrap font-display text-xl font-extrabold leading-tight tnum text-ink">{totalText}</span>
           </div>
           <div className="mt-2">{submitBtn}</div>
           {sendHint('mt-1.5 text-2xs')}
