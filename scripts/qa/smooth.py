@@ -366,6 +366,53 @@ def lite_mode(page: Page) -> list[Finding]:
     return [("note", "lite-mode", "M16: lite mode on, nothing hidden", r)]
 
 
+# ── layers and focus (T6: Escape stack, autoFocus kept) ───────────────────────────────────────────
+DIALOGS = "() => [...document.querySelectorAll('[role=\"dialog\"]')].filter((d) => d.getBoundingClientRect().height > 0).length"
+
+
+def escape_stack(page: Page, quick_view: str, zoom: str = "Zoom photo") -> list[Finding]:
+    """Escape in the photo viewer over a product panel closes the viewer only, never both."""
+    btn = _quick_view(page, quick_view, in_view=True) or _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "escape-stack", "no quick-view card, not measured", None)]
+    btn.scroll_into_view_if_needed()
+    btn.evaluate("(el) => el.click()")
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=8000)
+        page.wait_for_timeout(500)
+        z = page.locator(f'[role="dialog"] button[aria-label="{zoom}"]')
+        if not z.count():
+            return [("warn", "escape-stack", "the panel has no zoom button, not measured", None)]
+        z.first.evaluate("(el) => el.click()")
+        page.wait_for_timeout(500)
+        before = page.evaluate(DIALOGS)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(600)
+        after = page.evaluate(DIALOGS)
+    except PWError as exc:
+        return [("fail", "escape-stack", "Playwright error: " + str(exc)[:160], None)]
+    vals = {"open_before": before, "open_after": after}
+    if before >= 2 and after == before - 1:
+        return [("note", "escape-stack", "Escape closed the photo viewer and left the product panel open", vals)]
+    return [("fail", "escape-stack", f"Escape over the photo viewer left {after} of {before} layers open (expected {before - 1})", vals)]
+
+
+def palette_focus(page: Page) -> list[Finding]:
+    """Ctrl+K opens the search palette with the typing focus in its field (autoFocus kept)."""
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"] input', timeout=6000)
+    except PWError:
+        return [("warn", "palette-focus", "Ctrl+K opened no palette with a field, not measured", None)]
+    page.wait_for_timeout(400)
+    r = page.evaluate("() => { const a = document.activeElement; return { tag: a && a.tagName, inDialog: !!(a && a.closest('[role=\"dialog\"]')), label: a && (a.getAttribute('aria-label') || a.getAttribute('placeholder') || '') } }")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    if r["tag"] == "INPUT" and r["inDialog"]:
+        return [("note", "palette-focus", "the palette opened with the typing focus in its field", r)]
+    return [("fail", "palette-focus", f"the palette opened with the focus on {r['tag']} ({r['label'][:40]}), not its field", r)]
+
+
 # ── S6 ─────────────────────────────────────────────────────────────────────────────────────────
 TRACK_TOPS = r"""
 (ms) => {

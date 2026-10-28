@@ -165,6 +165,9 @@
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+    /* a sheet's scroll lock hides the scrollbar: keep its gutter, so the page never jumps sideways
+     * (classic Windows scrollbars shifted everything 10 px on every open and close) */
+    scrollbar-gutter: stable;
   }
   html,
   body,
