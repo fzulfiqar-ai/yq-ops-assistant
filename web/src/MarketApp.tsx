@@ -1,4 +1,4 @@
-import { lazy, StrictMode, Suspense, useEffect } from 'react'
+import { lazy, StrictMode, Suspense, useEffect, useLayoutEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams, useNavigate } from 'react-router-dom'
 import { UpdateToast } from '@/market/components/UpdateToast'
 import { isSlugShaped, rememberRef } from '@/market/lib/device'
@@ -109,6 +109,12 @@ function initialRef(): string | null {
 }
 
 export default function MarketApp() {
+  // the served light boot frame (vite.config.ts BOOT_HTML, html[data-boot=off]) outlines this shell;
+  // it goes on the app's first commit, so the next painted frame is the app itself. (The night frame
+  // of a load that plays the opening is the Splash's to remove.)
+  useLayoutEffect(() => {
+    if (document.documentElement.getAttribute('data-boot') === 'off') document.getElementById('yq-boot')?.remove()
+  }, [])
   useEffect(() => {
     document.documentElement.lang = locale.lang
     document.documentElement.dir = locale.dir

@@ -30,12 +30,14 @@ export class ErrorBoundary extends Component<{ children: ReactNode; page?: boole
   render() {
     if (this.state.error && this.props.page) {
       // one page broke: the shell, the nav and the cart stay; the merchant can go home or reload
-      // (a crash used to replace the whole app with the reload card)
+      // (a crash used to replace the whole app with the reload card). Offline, the page's code simply
+      // could not be fetched: say that, not "something went wrong".
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false
       return (
         <div className="grid min-h-[55vh] place-items-center px-4 py-10">
           <div className="max-w-sm text-center">
-            <h1 className="font-display text-xl font-bold text-ink">{S.states.errorTitle}</h1>
-            <p className="mt-2 text-sm text-ink-2">{S.states.errorHint}</p>
+            <h1 className="font-display text-xl font-bold text-ink">{offline ? S.states.couldNot : S.states.errorTitle}</h1>
+            <p className="mt-2 text-sm text-ink-2">{offline ? S.states.couldNotHint : S.states.errorHint}</p>
             <div className="mt-5 flex justify-center gap-2">
               <button type="button" onClick={() => window.location.reload()} className="h-11 rounded-sm bg-plum px-5 text-sm font-semibold text-white hover:bg-plum-deep">
                 {S.states.reload}

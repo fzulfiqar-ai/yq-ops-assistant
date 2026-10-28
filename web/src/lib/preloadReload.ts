@@ -40,6 +40,9 @@ function tabStore(): TabStore | null {
 
 export function installPreloadReload(): void {
   window.addEventListener('vite:preloadError', (event) => {
+    // offline the chunk is missing because there is no network, not because of a deploy: a reload
+    // would land on the browser's "No internet" page. Let the page's own error boundary say so.
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return
     if (!shouldReload(BUILD, tabStore())) return
     event.preventDefault()
     window.location.reload()
