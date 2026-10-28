@@ -1,5 +1,6 @@
 import { Suspense, useEffect, useState, type ReactNode } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
+import { ErrorBoundary } from '../ui/ErrorBoundary'
 import { PageSkeleton } from '../ui/Skeleton'
 
 /**
@@ -38,11 +39,14 @@ function Glide({ children }: { children: ReactNode }) {
 export function RouteOutlet() {
   const { pathname } = useLocation()
   const key = pageKey(pathname)
+  // a page that crashes is caught here, inside the shell (keyed: the next page starts clean)
   return (
-    <Suspense key={key} fallback={<PageSkeleton />}>
-      <Glide>
-        <Outlet />
-      </Glide>
-    </Suspense>
+    <ErrorBoundary key={key} page>
+      <Suspense fallback={<PageSkeleton />}>
+        <Glide>
+          <Outlet />
+        </Glide>
+      </Suspense>
+    </ErrorBoundary>
   )
 }

@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Search } from 'lucide-react'
 import { LangSwitch } from '../components/LangSwitch'
 import { SearchHints } from '../components/SearchField'
 import { useMarket } from '../MarketContext'
 import { readCustomer } from '../lib/device'
 import { initials } from '../lib/format'
+import { primeKeyboard } from '../lib/keyboard'
 import { NAV_ICONS } from '../lib/icons'
 import { S } from '../strings'
 import { IconButton } from '../ui/Button'
@@ -27,7 +28,10 @@ export function PhoneHeader() {
   const { title, searchBand } = useShell()
   const { rep } = useMarket()
   const navigate = useNavigate()
-  const back = () => (window.history.length > 1 ? navigate(-1) : navigate('/'))
+  const location = useLocation()
+  // the first page of this visit (key 'default'): Back goes Home, never out of the shop — the old
+  // history.length test counted the WhatsApp / Google page the merchant came from and left the site
+  const back = () => (location.key !== 'default' ? navigate(-1) : navigate('/'))
 
   if (searchBand) return <BandHeader title={title} onBack={back} />
 
@@ -149,6 +153,7 @@ function BandHeader({ title, onBack }: { title: PageTitle | null; onBack: () => 
       <div className="px-gutter pb-3 pt-2.5">
         <Link
           to="/search"
+          onClick={primeKeyboard}
           aria-label={S.search.band}
           className="flex h-12 items-center gap-2.5 rounded-[14px] bg-white pe-1.5 ps-3.5 text-ink shadow-[0_10px_24px_-12px_rgba(24,10,40,0.55)] transition duration-1 ease-m active:scale-[.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-plum"
         >

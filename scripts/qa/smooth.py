@@ -452,6 +452,26 @@ def photo_flight(page: Page, quick_view: str) -> list[Finding]:
     return [("note", "photo-flight", "M4: the card's photo flew into the sheet and handed over", vals)]
 
 
+def back_from_entry(page: Page, base: str, path: str = "/shop", back_label: str = "Back") -> list[Finding]:
+    """T9: a merchant who arrived from another site (WhatsApp, Google) and taps the header's Back on
+    the first page lands on the shop's Home — never back out of the shop."""
+    page.goto("about:blank")
+    page.goto(base + path, wait_until="domcontentloaded", timeout=40000)
+    page.wait_for_timeout(3500)
+    btn = page.locator(f'header button[aria-label="{back_label}"], button[aria-label="{back_label}"]').first
+    if not btn.count():
+        return [("warn", "back-entry", f"T9: no Back button on {path}, not measured", None)]
+    try:
+        btn.evaluate("(el) => el.click()")
+    except PWError:
+        pass  # the page navigated away during the click: that is the bug this check looks for
+    page.wait_for_timeout(1500)
+    url = page.url
+    if url.startswith(base) and url[len(base):].split("?")[0] in ("", "/"):
+        return [("note", "back-entry", f"T9: Back on the first page went Home ({url})", None)]
+    return [("fail", "back-entry", f"T9: Back on the first page left the shop for {url}", {"url": url})]
+
+
 # ── S6 ─────────────────────────────────────────────────────────────────────────────────────────
 TRACK_TOPS = r"""
 (ms) => {

@@ -25,6 +25,9 @@ export default function MyOrdersPage() {
   }, [refreshMyOrders])
 
   const rows: MyOrderSummary[] = myOrders.length ? myOrders : known.map((k) => ({ order_no: k.order_no, token: k.token, status: 'new', status_label: undefined, total_bhd: k.total ?? null, created_at: new Date(k.ts).toISOString(), salesman: null, expected_delivery: null, order_kind: null }))
+  // the phone's own list until the server answers: its status is not known yet, so no chip (a
+  // guessed "New" flashed on orders delivered days ago)
+  const statusKnown = myOrders.length > 0
 
   return (
     <div className="px-gutter lg:px-0">
@@ -56,7 +59,7 @@ export default function MyOrdersPage() {
                           <span className="font-display text-sm font-bold tnum text-ink">
                             <Ltr>{o.order_no}</Ltr>
                           </span>
-                          <Chip tone={tone}>{statusLabel(o.status, o.status_label)}</Chip>
+                          {statusKnown && <Chip tone={tone}>{statusLabel(o.status, o.status_label)}</Chip>}
                           {o.order_kind === 'small' && <Chip tone="grey">{S.small.badge}</Chip>}
                         </div>
                         <div className="mt-0.5 text-xs text-ink-2">
