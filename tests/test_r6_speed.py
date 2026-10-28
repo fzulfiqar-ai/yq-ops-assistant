@@ -467,14 +467,23 @@ def _():
     assert "instrument-sans-v1.woff2" in _read("web/vite.config.ts")
 
 
-@test("portal main.tsx: the vite:preloadError reload handler, once per session — same as the market's")
+@test("the vite:preloadError reload handler: the market once per BUILD (lib/preloadReload), the portal once per session until it moves too")
 def _():
+    # the portal's own handler, unchanged until the portal polish moves main.tsx onto the helper
     portal = _read("web/src/main.tsx")
+    assert "window.addEventListener('vite:preloadError'" in portal
+    assert "sessionStorage.getItem('yq-preload-reload') === '1'" in portal
+    assert "event.preventDefault()" in portal and "window.location.reload()" in portal
+    # the market (28-Oct-2026): one reload per build — the once-per-session flag was never cleared, so
+    # the second deploy a tab lived through left it with a dead tap; never offline (it would land on
+    # the browser's error page). The rule's behaviour is tested in web/scripts/merchant_test.mjs.
     market = _read("web/src/main.market.tsx")
-    for src in (portal, market):
-        assert "window.addEventListener('vite:preloadError'" in src
-        assert "sessionStorage.getItem('yq-preload-reload') === '1'" in src
-        assert "event.preventDefault()" in src and "window.location.reload()" in src
+    assert "import { installPreloadReload } from './lib/preloadReload'" in market and "installPreloadReload()" in market
+    helper = _read("web/src/lib/preloadReload.ts")
+    assert "window.addEventListener('vite:preloadError'" in helper
+    assert "const KEY = 'yq-preload-reload'" in helper and "store.getItem(KEY) === id" in helper
+    assert "navigator.onLine === false" in helper
+    assert "event.preventDefault()" in helper and "window.location.reload()" in helper
 
 
 @test("images: the Lightbox and the package view walk a 1024/512 WebP chain that ends with the original")

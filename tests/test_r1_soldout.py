@@ -343,7 +343,10 @@ def _():
     page = _read("web/src/market/pages/QuickOrderPage.tsx")
     assert "const pick = row.item || row.best" in page, "Enter takes the query's best match only"
     assert "row.suggestions.find(" not in page and "row.suggestions[0]" not in page and "row.candidates[0]" not in page
-    assert "const r = resolveQuick(value, m.items, m.index)" in page
+    # the search index has its own context since 28-Oct-2026 (useMarketSearch): its arrival no longer
+    # re-renders every card that reads useMarket
+    assert "const { index, ensureIndex } = useMarketSearch()" in page
+    assert "const r = resolveQuick(value, m.items, index)" in page
     assert "exactOut: r.exactOut" in page and "<TellBackButton item={exactOut} />" in page, "the typed sold-out SKU is shown with Tell me when back"
     assert "{!can && <TellBackButton item={s} />}" in page, "a greyed sold-out suggestion row offers Tell me when back"
     assert "if (!orderable(item)) return" in page, "lockRow must refuse a sold-out line where backorder is off"
