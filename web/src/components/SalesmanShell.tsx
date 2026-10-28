@@ -7,6 +7,7 @@ import { navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
 import { SignOutSheet } from '@/pages/sales/SignOutSheet'
+import { activeTab, tabAllowed } from '@/pages/sales/tabs'
 
 /**
  * The shell a salesman lives in — a phone in one hand in a shop, a laptop in the evening.
@@ -119,18 +120,20 @@ function TempPasswordBanner({ mustReset }: { mustReset: boolean }) {
   )
 }
 
+/** The tab the page is under; -1 (no tab lit) on any other page (pages/sales/tabs.ts). */
 function useActiveIndex(tabs: Tab[]): number {
   const { pathname } = useLocation()
-  const i = tabs.findIndex((t) => (t.end ? pathname === t.to : pathname === t.to || pathname.startsWith(t.to + '/') || pathname.startsWith(t.to + '?')))
-  return i < 0 ? 0 : i
+  return activeTab(pathname, tabs)
 }
 
 function FloatingTabs({ tabs }: { tabs: Tab[] }) {
   const active = useActiveIndex(tabs)
+  // as many columns as the rep has tabs; the lit pill hides on a page under none of them
+  const n = Math.max(1, tabs.length)
   return (
     <nav aria-label="Main" className="fixed inset-x-3 z-40 md:hidden" style={{ bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' }}>
-      <ul className="relative grid h-16 grid-cols-5 items-stretch rounded-3xl border border-border/80 bg-card/90 shadow-[0_12px_32px_-12px_rgba(25,20,36,.28)] backdrop-blur-xl" style={{ ['--i' as string]: active }}>
-        <li aria-hidden="true" className="pointer-events-none absolute inset-y-1.5 left-1.5 w-[calc((100%-0.75rem)/5)] rounded-2xl bg-accent transition-transform duration-300 ease-[cubic-bezier(.22,1.18,.36,1)] motion-reduce:transition-none" style={{ transform: 'translateX(calc(var(--i) * 100%))' }} />
+      <ul className="relative grid h-16 items-stretch rounded-3xl border border-border/80 bg-card/90 shadow-[0_12px_32px_-12px_rgba(25,20,36,.28)] backdrop-blur-xl" style={{ ['--i' as string]: Math.max(0, active), gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
+        <li aria-hidden="true" className={cn('pointer-events-none absolute inset-y-1.5 left-1.5 rounded-2xl bg-accent transition-transform duration-300 ease-[cubic-bezier(.22,1.18,.36,1)] motion-reduce:transition-none', active < 0 && 'opacity-0')} style={{ width: `calc((100% - 0.75rem) / ${n})`, transform: 'translateX(calc(var(--i) * 100%))' }} />
         {tabs.map((t, i) => {
           const Icon = t.icon
           const on = i === active
@@ -289,13 +292,16 @@ export function SalesmanShell() {
 
   const name = me?.full_name || me?.email?.split('@')[0] || ''
   const first = firstName(name)
-  const tabs: Tab[] = [
-    { to: '/today', label: 'Today', icon: House, end: true },
-    { to: '/shop', label: 'Catalog', icon: BookImage },
-    { to: '/shop-orders', label: 'Orders', icon: ClipboardList, badge: newCount },
-    { to: '/customers', label: 'Shops', icon: Users },
-    { to: '/account', label: 'Me', icon: CircleUserRound },
-  ]
+  // only the tabs whose page this login may open (the route's Gate in App.tsx; pages/sales/tabs.ts)
+  const tabs: Tab[] = (
+    [
+      { to: '/today', label: 'Today', icon: House, end: true },
+      { to: '/shop', label: 'Catalog', icon: BookImage },
+      { to: '/shop-orders', label: 'Orders', icon: ClipboardList, badge: newCount },
+      { to: '/customers', label: 'Shops', icon: Users },
+      { to: '/account', label: 'Me', icon: CircleUserRound },
+    ] satisfies Tab[]
+  ).filter((t) => tabAllowed(me, t.to))
   // everything else an admin granted this salesman (Finds, Leads, Field notes, Coach, Reports…)
   const more: Tab[] = navFor(me)
     .filter((n) => !CORE.has(n.to) && n.to !== '/')

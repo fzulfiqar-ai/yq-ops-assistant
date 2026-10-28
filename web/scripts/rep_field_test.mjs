@@ -328,5 +328,42 @@ check('replaceLines makes the cart exactly these lines, in this order, through c
   eq(lines, [])
 })
 
+/* ── 10. the shell's tabs: the page's own tab lit, and only tabs the rep may open ── */
+const T = await load('pages/sales/tabs.ts')
+const TABS = [{ to: '/today', end: true }, { to: '/shop' }, { to: '/shop-orders' }, { to: '/customers' }, { to: '/account' }]
+
+check('the tab bar lights the tab a page is under — and no tab on any other page (it used to light Today)', () => {
+  const active = need(T, 'activeTab')
+  eq(['/today', '/shop', '/shop-orders', '/customers', '/account'].map((p) => active(p, TABS)), [0, 1, 2, 3, 4])
+  eq(active('/shop/anything', TABS), 1, 'a page under Catalog')
+  eq(active('/shop-orders', TABS), 2, '"/shop-orders" is not a page under "/shop"')
+  eq(['/market-intel', '/market-intel/cases/7', '/finds', '/leads', '/settings', '/today/old', '/'].map((p) => active(p, TABS)),
+    [-1, -1, -1, -1, -1, -1, -1])
+})
+
+check('a tab shows only when the rep may open its page (the route\'s Gate); Me always', () => {
+  const allowed = need(T, 'tabAllowed')
+  const shown = (me) => TABS.filter((t) => allowed(me, t.to)).map((t) => t.to)
+  const rep = (features) => ({ role: 'salesman', features })
+  eq(shown(rep(['Catalog', 'Shop Orders'])), ['/today', '/shop', '/shop-orders', '/customers', '/account'])
+  eq(shown(rep(['Catalog'])), ['/shop', '/account'])
+  eq(shown(rep(['Shop Orders', 'Market Intel'])), ['/today', '/shop-orders', '/customers', '/account'])
+  eq(shown(rep([])), ['/account'])
+  eq(shown({ role: 'salesman' }), ['/account'], 'no features listed')
+  eq(shown({ role: 'admin', features: [] }), ['/today', '/shop', '/shop-orders', '/customers', '/account'], 'an admin passes every Gate')
+  eq(shown(null), [], 'no login, no tabs')
+})
+
+check("the tabs' features are the routes' own (App.tsx <Gate feature>): a renamed feature cannot drift", () => {
+  const map = need(T, 'TAB_FEATURE')
+  const app = readFileSync(path.join(SRC, 'App.tsx'), 'utf8')
+  for (const [to, feature] of Object.entries(map)) {
+    const route = `path="${to.slice(1)}" element={<Gate feature="${feature}">`
+    if (!app.includes(route)) throw new Error(`App.tsx has no ${route}`)
+  }
+  if (!app.includes('path="account" element={<SalesAccount />}')) throw new Error('Me (/account) is no longer open to every login')
+  eq(Object.keys(map).sort(), ['/customers', '/shop', '/shop-orders', '/today'])
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
