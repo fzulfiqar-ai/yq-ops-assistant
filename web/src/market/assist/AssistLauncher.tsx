@@ -45,6 +45,7 @@ export function AssistLauncher() {
   const { pathname } = useLocation()
   const [open, setOpen] = useState(wasOpen)
   const [itemCode, setItemCode] = useState<string | null>(null)
+  const [first, setFirst] = useState<{ id: number; text: string } | null>(null)
   const stackHidden = useStackHidden()
 
   useEffect(() => {
@@ -52,6 +53,7 @@ export function AssistLauncher() {
     const on = (e: Event) => {
       const d = (e as CustomEvent<OpenOptions>).detail
       setItemCode(d?.itemCode || null)
+      setFirst(d?.message ? { id: Date.now(), text: d.message } : null)
       setOpen(true)
     }
     window.addEventListener(OPEN_EVENT, on)
@@ -62,14 +64,21 @@ export function AssistLauncher() {
     rememberOpen(open)
   }, [open])
 
-  // a phone chat is a full screen: following a link out of it (cart, an order) leaves it
+  // a phone chat is a full screen: following a link out of it (cart, an order) leaves it.
+  // Every close also forgets the opening question, so reopening later never sends it again.
   const [pathSeen, setPathSeen] = useState(pathname)
   if (pathSeen !== pathname) {
     setPathSeen(pathname)
-    if (open && typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) setOpen(false)
+    if (open && typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
+      setOpen(false)
+      setFirst(null)
+    }
   }
 
-  const close = useCallback(() => setOpen(false), [])
+  const close = useCallback(() => {
+    setOpen(false)
+    setFirst(null)
+  }, [])
 
   const hiddenHere = pathname === '/checkout' || pathname === '/ask' || pathname.startsWith('/o/')
   if (!enabled || hiddenHere) return null
@@ -78,7 +87,7 @@ export function AssistLauncher() {
     <>
       {open ? (
         <Suspense fallback={null}>
-          <AssistPanel itemCode={itemCode} onClose={close} />
+          <AssistPanel itemCode={itemCode} first={first} onClose={close} />
         </Suspense>
       ) : null}
       <button
@@ -87,7 +96,7 @@ export function AssistLauncher() {
         aria-expanded={open}
         aria-haspopup="dialog"
         data-assist-launcher=""
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => (open ? close() : setOpen(true))}
         onPointerEnter={() => void loadPanel()}
         onFocus={() => void loadPanel()}
         style={{ bottom: stackHidden ? 'calc(var(--m-safe-b, 0px) + 12px)' : 'calc(var(--m-bottom-stack, 0px) + 12px)' }}

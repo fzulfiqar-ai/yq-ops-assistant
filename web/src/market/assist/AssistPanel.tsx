@@ -12,7 +12,7 @@ import { AssistChat } from './AssistChat'
 const FOCUSABLE = 'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
 const PHONE = '(max-width: 767px)'
 
-export default function AssistPanel({ itemCode, onClose }: { itemCode: string | null; onClose: () => void }) {
+export default function AssistPanel({ itemCode, first, onClose }: { itemCode: string | null; first: { id: number; text: string } | null; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const titleId = useId()
   const closeRef = useRef(onClose)
@@ -71,7 +71,7 @@ export default function AssistPanel({ itemCode, onClose }: { itemCode: string | 
       data-assist-panel=""
       className="fixed inset-0 z-sheet flex flex-col overflow-hidden bg-surface outline-none max-md:[animation:m-sheet-up_260ms_var(--m-ease-spring)_both] md:inset-auto md:bottom-[calc(var(--m-bottom-stack,0px)+84px)] md:end-5 md:h-[min(620px,calc(100dvh-7.5rem))] md:w-[400px] md:rounded-xl md:shadow-3 md:ring-1 md:ring-line md:[animation:m-pop_200ms_var(--m-ease-spring)_both]"
     >
-      <AssistChat itemCode={itemCode} onClose={onClose} titleId={titleId} />
+      <AssistChat itemCode={itemCode} first={first} onClose={onClose} titleId={titleId} />
     </div>,
     document.body,
   )

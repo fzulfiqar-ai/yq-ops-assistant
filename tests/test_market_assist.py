@@ -369,6 +369,20 @@ def _():
         assert r["add"] == [{"item_code": "C18", "qty": 20}] and r["reply"].startswith("I matched 2 of 2")
 
 
+@test("pasted list: a model that merges or skips lines cannot lose one (live bug 28-Oct: '20 C07 10 type c cable')")
+def _():
+    merged = {"lines": [{"n": 1, "query": "car charger", "code": "C07", "qty": 20}]}     # n=2, n=3 missing
+    with Rig(merged) as rig:
+        r = _ask(message="20 C18\n10 type c cable\n5 PB10")
+        assert [ln["text"] for ln in r["lines"]] == ["20 C18", "10 type c cable", "5 PB10"], r["lines"]
+        assert [ln["item_code"] for ln in r["lines"]] == ["C18", "CC1", "PB10"]        # own words / own code
+        assert [ln["qty"] for ln in r["lines"]] == [20, 10, 5] and len(rig.sent) == 1
+        assert "1: 20 C18" in _model_text(rig) and "2: 10 type c cable" in _model_text(rig)
+    from app.market_assist import pasted_list
+    assert pasted_list(_cat(), "Hi\nDo you have chargers?") == []          # a question over two lines
+    assert len(pasted_list(_cat(), "C18\nPB10")) == 2                      # codes, no quantities: a list
+
+
 @test("list without a model: a pasted list still matches codes and English words")
 def _():
     with Rig(understand_fails=True) as rig:

@@ -201,7 +201,7 @@ class State:
     classes: tuple[str, ...] = ALL_CLASSES
     reduced: bool = False
     lead_only: bool = False  # only the lead phone + lead desktop
-    assist: str | None = None  # YQ Assistant: 'launcher' (button only) | 'panel' (opened, one question asked)
+    assist: str | None = None  # YQ Assistant: 'launcher' (button only) | 'panel' (opened, one question asked) | 'list' (a pasted order list, reviewed)
 
 
 def states(slug: str | None) -> list[State]:
@@ -268,6 +268,7 @@ def states(slug: str | None) -> list[State]:
         State("opening", "/", "The opening moment", kind="opening", lead_only=True),
         State("assist_launcher", "/", "YQ Assistant · the Ask YQ button (settings.ai_enabled mocked on)", ready="main", assist="launcher"),
         State("assist_panel", "/", "YQ Assistant · panel open, one question answered with cards", ready="main", assist="panel"),
+        State("assist_list", "/", "YQ Assistant · a pasted order list: matched / pick / missing review", ready="main", assist="list"),
     ]
     if slug:
         out.insert(1, State("storefront", "/" + slug, "Rep storefront /" + slug, ready="main"))
@@ -724,7 +725,7 @@ def install_campaign(page: Page, campaign: dict) -> None:
     page.route("**/api/market*", on_catalog)
 
 
-def install_assist(page: Page) -> None:
+def install_assist(page: Page, variant: str = 'panel') -> None:
     """YQ Assistant: the catalog says ai_enabled, and /ask answers from the catalog's own first in-stock codes.
 
     Nothing reaches production: the ask and feedback POSTs are answered here. The catalog is fetched
@@ -746,16 +747,51 @@ def install_assist(page: Page) -> None:
         except Exception as exc:  # noqa: BLE001
             route.abort()
             raise RuntimeError("catalog fetch failed: " + str(exc)) from exc
-        body.setdefault("settings", {})["ai_enabled"] = True
+        body.setdefault("settings", {}).update({"ai_enabled": True, "ai_voice": True, "ai_photo": True})
         if not codes:
             for it in body.get("items") or []:
-                if len(codes) < 3 and it.get("item_code") and (it.get("stock_status") or "in_stock") not in ("out", "sold_out"):
+                if len(codes) < 6 and it.get("item_code") and (it.get("stock_status") or "in_stock") not in ("out", "sold_out"):
                     codes.append(it["item_code"])
         json_route(route, body)
+
+    def list_answer() -> dict:
+        c = codes + [None] * 6
+        lines = [
+            {"text": "20 " + str(c[0]), "qty": 20, "item_code": c[0], "alternatives": [], "status": "matched"},
+            {"text": "10 type c cables", "qty": 10, "item_code": c[1], "alternatives": [x for x in c[2:4] if x], "status": "pick"},
+            {"text": "3 hdmi cable", "qty": 3, "item_code": None, "alternatives": [x for x in c[4:5] if x], "status": "missing"},
+        ]
+        return {
+            "intent": "list",
+            "reply": "I matched 2 of 3 lines. Check each one and its quantity, then add them all.",
+            "items": [],
+            "add": [{"item_code": c[0], "qty": 20}, {"item_code": c[1], "qty": 10}] if c[0] and c[1] else [],
+            "lines": lines,
+            "orders": [],
+            "handoff": None,
+            "fallback": False,
+            "miss": False,
+            "turn_id": 2,
+        }
+
+    def on_voice(route: Route) -> None:
+        if route.request.method == "OPTIONS":
+            route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        json_route(route, {"text": "20 C18 and 10 type c cables", "busy": False})
+
+    def on_photo(route: Route) -> None:
+        if route.request.method == "OPTIONS":
+            route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        json_route(route, dict(list_answer(), intent="photo"))
 
     def on_ask(route: Route) -> None:
         if route.request.method == "OPTIONS":
             route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        if variant == "list":
+            json_route(route, list_answer())
             return
         reply = (
             "وجدت لك ثلاثة خيارات تناسب طلبك. أضفتها هنا لتختار منها."
@@ -780,16 +816,23 @@ def install_assist(page: Page) -> None:
     page.route("**/public/market*", on_catalog)
     page.route("**/api/market*", on_catalog)
     page.route("**/public/market/ask", on_ask)
+    page.route("**/public/market/voice", on_voice)
+    page.route("**/public/market/photo", on_photo)
 
 
-def assist_open_and_ask(page: Page) -> None:
+def assist_open_and_ask(page: Page, variant: str = 'panel') -> None:
     """Open the panel from the launcher and ask one question; wait for the cards."""
     page.click("[data-assist-launcher]", timeout=8000)
     page.wait_for_selector("[data-assist-panel] textarea", timeout=8000)
-    page.fill("[data-assist-panel] textarea", "ابحث لي عن شاحن لآيفون" if LANG == "ar" else "Find a charger for my iPhone")
+    listing = variant == "list"
+    if listing:
+        text = "20 C18\n10 type c cables\n3 hdmi cable"
+    else:
+        text = "ابحث لي عن شاحن لآيفون" if LANG == "ar" else "Find a charger for my iPhone"
+    page.fill("[data-assist-panel] textarea", text)
     page.keyboard.press("Enter")
     try:
-        page.wait_for_selector("[data-assist-panel] article", timeout=8000)
+        page.wait_for_selector("[data-assist-panel] " + ("section li" if listing else "article"), timeout=8000)
     except PWError:
         pass
     page.wait_for_timeout(600)
@@ -1679,7 +1722,7 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
     if st.kind == "campaign":
         install_campaign(page, QA_CAMPAIGN)
     if st.assist:
-        install_assist(page)
+        install_assist(page, 'list' if st.assist == 'list' else 'panel')
     try:
         page.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
         settle(page, st)
@@ -1688,8 +1731,8 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
                 page.wait_for_selector("[data-assist-launcher]", timeout=8000)
             except PWError:
                 finding(run, "fail", "assist-launcher-missing", "settings.ai_enabled is mocked true but the Ask YQ button did not render")
-        if st.assist == "panel":
-            assist_open_and_ask(page)
+        if st.assist in ("panel", "list"):
+            assist_open_and_ask(page, st.assist)
 
         p = probe_scan(page, vp, st.needles)
         common_checks(run, page, vp, st, net, p)

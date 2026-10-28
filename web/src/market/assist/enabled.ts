@@ -10,7 +10,7 @@ import { useMarket } from '../MarketContext'
 
 const DEV_KEY = 'yq-assist-dev'
 
-function devForced(): boolean {
+export function enabledDevForced(): boolean {
   if (!import.meta.env.DEV) return false
   try {
     const q = new URLSearchParams(window.location.search).get('assist')
@@ -24,5 +24,5 @@ function devForced(): boolean {
 
 export function useAssistEnabled(): boolean {
   const { settings } = useMarket()
-  return settings.ai_enabled === true || devForced()
+  return settings.ai_enabled === true || enabledDevForced()
 }

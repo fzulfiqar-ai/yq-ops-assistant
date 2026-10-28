@@ -1,6 +1,6 @@
 /**
  * The launcher's tiny, always-loaded half: whether the chat was open in this tab, and the one-line
- * way for any page to open it: openAssist({ itemCode }). Nothing here pulls in the chat.
+ * way for any page to open it: openAssist({ itemCode, message }). Nothing here pulls in the chat.
  */
 
 const OPEN_KEY = 'yq-assist-open'
@@ -29,6 +29,8 @@ export const OPEN_EVENT = 'yq-assist-open'
 export interface OpenOptions {
   /** the product the chat is about (sent as item_code) */
   itemCode?: string
+  /** sent as the first message as soon as the panel is open (once) */
+  message?: string
 }
 
 /** Open the assistant. A no-op when the assistant is off (nothing listens). */

@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Check, ChevronRight, Clock, Hash, MessageCircle } from 'lucide-react'
+import { Check, ChevronRight, Clock, Hash, MessageCircle, Sparkles } from 'lucide-react'
 import type { ShopItem } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
@@ -15,6 +15,9 @@ import { ProductImage } from '../ui/ProductImage'
 import { SectionHeader } from '../ui/SectionHeader'
 import { Skeleton } from '../ui/Skeleton'
 import { MarketCard } from './MarketCard'
+import { useAssistEnabled } from '../assist/enabled'
+import { openAssist } from '../assist/open'
+import { L } from '../assist/launcherStrings'
 import { soldOutSplit } from '../lib/facets'
 import { SoldOutDivider } from './SoldOut'
 
@@ -133,6 +136,7 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
   const { categories, items, rep } = useMarket()
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
   const [noted, setNoted] = useState('')
+  const assistOn = useAssistEnabled()
   const query = q.trim()
   const first = rep?.first_name || ''
   const askUrl = rep?.whatsapp_url && query ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.shop.askHave(first, query))}` : null
@@ -179,6 +183,11 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
           </Button>
         )
       )}
+      {assistOn && query ? (
+        <Button variant="secondary" className="mt-3" onClick={() => openAssist({ message: query })} icon={<Sparkles size={15} aria-hidden="true" />}>
+          {L.ask}
+        </Button>
+      ) : null}
       {tiles.length > 0 && (
         <div className="mt-6">
           <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h3>

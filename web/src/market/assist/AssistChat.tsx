@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronRight, Lightbulb, MessageCircle, PackageSearch, RotateCcw, Search, Send, ShoppingCart, ThumbsDown, ThumbsUp, Truck, X, Sparkles, Check, type LucideIcon } from 'lucide-react'
+import { Camera, ChevronRight, ClipboardPaste, ImagePlus, Lightbulb, Mic, Square, MessageCircle, PackageSearch, RotateCcw, Search, Send, ShoppingCart, ThumbsDown, ThumbsUp, Truck, X, Sparkles, Check, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { MarketCard } from '../components/MarketCard'
-import { ltrText, moneyText, withCurrency, ltr } from '../i18n'
+import { ltrText, moneyText, withCurrency } from '../i18n'
 import { fmtDateShort, productName } from '../lib/format'
 import { useMarket } from '../MarketContext'
 import { useReducedMotion } from '../shell/useViewport'
 import { Button, AnchorButton, IconButton } from '../ui/Button'
 import { useToast } from '../ui/Toast'
+import { enabledDevForced } from './enabled'
+import { whatsappWith } from './handoff'
+import { ListReview } from './ListReview'
+import { canRecord, downscale, photoOf } from './media'
 import { A } from './strings'
+import { useVoice } from './useVoice'
 import type { Msg } from './store'
 import { MAX_LEN, useAssistChat } from './useAssistChat'
 
@@ -20,6 +25,7 @@ import { MAX_LEN, useAssistChat } from './useAssistChat'
  */
 
 const CHIPS: { key: keyof typeof A.chips; icon: LucideIcon }[] = [
+  { key: 'paste', icon: ClipboardPaste },
   { key: 'find', icon: Search },
   { key: 'fit', icon: PackageSearch },
   { key: 'track', icon: Truck },
@@ -27,21 +33,6 @@ const CHIPS: { key: keyof typeof A.chips; icon: LucideIcon }[] = [
   { key: 'rep', icon: MessageCircle },
   { key: 'idea', icon: Lightbulb },
 ]
-
-/** The rep's WhatsApp link with its prefilled text replaced by the merchant's own question and the items discussed. */
-function whatsappWith(url: string, question: string, codes: string[]): string {
-  const bits = [`${A.handoffHi}: "${question.slice(0, 160)}"`]
-  if (codes.length) bits.push(`${A.handoffItems}: ${codes.slice(0, 3).map(ltr).join(', ')}`)
-  const text = bits.join('\n')
-  try {
-    const u = new URL(url)
-    u.searchParams.delete('text')
-    const base = u.toString()
-    return `${base}${base.includes('?') ? '&' : '?'}text=${encodeURIComponent(text)}`
-  } catch {
-    return url
-  }
-}
 
 /* ───────────────────────── one assistant turn ───────────────────────── */
 
@@ -79,24 +70,32 @@ function Turn({
   onRetry: (m: Msg) => void
   onVote: (m: Msg, v: 'up' | 'down') => void
   onPatch: (id: string, p: Partial<Msg>) => void
-  onStock: (m: Msg) => Promise<boolean>
+  onStock: (text: string, turnId: number | null) => Promise<boolean>
 }) {
   const { itemsByCode, addMany, rep } = useMarket()
   const toast = useToast()
   const navigate = useNavigate()
   const [stockFailed, setStockFailed] = useState(false)
 
-  if (m.role === 'user') return <Bubble mine>{m.text}</Bubble>
+  if (m.role === 'user') {
+    const pic = m.photo ? photoOf(m.id) : undefined
+    return (
+      <Bubble mine>
+        {pic ? <img src={pic} alt={A.photoAlt} className="mb-1.5 max-h-44 w-auto max-w-full rounded-md" /> : null}
+        {m.text}
+      </Bubble>
+    )
+  }
 
   const wa = rep?.whatsapp_url || null
 
   if (m.error) {
-    const line = m.error === 'off' ? A.errOff : m.error === 'slow' ? A.errSlow : m.error === 'busy' ? A.errBusy : A.errNet
+    const line = m.error === 'photo' ? A.errPhoto : m.error === 'off' ? A.errOff : m.error === 'slow' ? A.errSlow : m.error === 'busy' ? A.errBusy : A.errNet
     return (
       <div className="flex flex-col items-start gap-2">
         <Bubble>{line}</Bubble>
         <div className="flex flex-wrap gap-2">
-          {m.error !== 'off' && m.retryText ? (
+          {m.error !== 'off' && m.error !== 'photo' && (m.retryText || (m.retryPhoto && photoOf(m.retryPhoto))) ? (
             <Button size="sm" variant="secondary" icon={<RotateCcw size={15} aria-hidden="true" />} onClick={() => onRetry(m)}>
               {A.retry}
             </Button>
@@ -114,7 +113,8 @@ function Turn({
   const shown = (m.fallback ? m.searchCodes || [] : m.items || []).map((c) => itemsByCode.get(c)).filter((i): i is ShopItem => Boolean(i))
   const lines = (m.add || []).map((l) => ({ item: itemsByCode.get(l.item_code), qty: l.qty })).filter((l): l is { item: ShopItem; qty: number } => Boolean(l.item))
   const codes = Array.from(new Set([...(m.items || []), ...(m.add || []).map((l) => l.item_code), ...(m.searchCodes || [])]))
-  const wantsHandoff = Boolean(m.handoff) || m.intent === 'handoff' || Boolean(m.miss)
+  const hasRows = Boolean(m.rows?.length)
+  const wantsHandoff = !hasRows && (Boolean(m.handoff) || m.intent === 'handoff' || Boolean(m.miss))
   const waUrl = m.handoff?.whatsapp_url || wa
   const waName = m.handoff?.name || rep?.first_name || rep?.name || null
 
@@ -131,7 +131,7 @@ function Turn({
 
       {m.fallback ? <p className="px-1 text-xs font-semibold text-ink-2">{shown.length ? A.fallbackLine : A.fallbackNone}</p> : null}
 
-      {shown.length ? (
+      {shown.length && !hasRows ? (
         <div className="flex flex-col gap-2">
           {shown.map((it) => (
             <MarketCard key={it.item_code} item={it} variant="list" from="assist" />
@@ -139,7 +139,9 @@ function Turn({
         </div>
       ) : null}
 
-      {lines.length ? (
+      {hasRows ? <ListReview m={m} onPatch={onPatch} onStock={(t) => onStock(t, m.turnId ?? null)} /> : null}
+
+      {lines.length && !hasRows ? (
         <Button
           full
           variant={m.added ? 'secondary' : 'primary'}
@@ -181,7 +183,7 @@ function Turn({
         </div>
       ) : null}
 
-      {m.miss ? (
+      {m.miss && !hasRows ? (
         <div className="flex flex-wrap gap-2">
           {m.stocked ? (
             <p className="px-1 text-sm font-semibold text-ok">{A.askStockDone}</p>
@@ -192,7 +194,7 @@ function Turn({
               icon={<Lightbulb size={15} aria-hidden="true" />}
               onClick={async () => {
                 setStockFailed(false)
-                const ok = await onStock(m)
+                const ok = await onStock(m.question || '', m.turnId ?? null)
                 if (ok) onPatch(m.id, { stocked: true })
                 else setStockFailed(true)
               }}
@@ -326,12 +328,21 @@ function IdeaForm({ onSend, onBack }: { onSend: (kind: 'idea' | 'problem', text:
 
 /* ───────────────────────── the conversation ───────────────────────── */
 
-export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | null; onClose?: () => void; titleId?: string }) {
-  const { msgs, itemCode: subject, busy, send, reset, patch, feedback, vote } = useAssistChat(itemCode)
-  const { itemsByCode } = useMarket()
+export function AssistChat({ itemCode, first, onClose, titleId }: { itemCode: string | null; first?: { id: number; text: string } | null; onClose?: () => void; titleId?: string }) {
+  const { msgs, itemCode: subject, busy, send, sendPhoto, retryPhoto, reset, patch, feedback, vote } = useAssistChat(itemCode)
+  const { itemsByCode, settings } = useMarket()
+  const forced = enabledDevForced()
+  const voiceOn = (settings.ai_voice === true || forced) && canRecord()
+  const photoOn = settings.ai_photo === true || forced
   const reduced = useReducedMotion()
   const [draft, setDraft] = useState('')
   const [idea, setIdea] = useState(false)
+  const [hint, setHint] = useState(false)
+  const [menu, setMenu] = useState(false)
+  const [photoNote, setPhotoNote] = useState('')
+  const camRef = useRef<HTMLInputElement>(null)
+  const galRef = useRef<HTMLInputElement>(null)
+  const handled = useRef<number | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const inputId = useId()
@@ -349,11 +360,53 @@ export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | 
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`
   }, [])
 
+  const voice = useVoice((text) => {
+    setDraft((d) => (d.trim() ? `${d.trim()} ${text}` : text).slice(0, MAX_LEN))
+    requestAnimationFrame(() => {
+      resize()
+      taRef.current?.focus({ preventScroll: true })
+    })
+  })
+  // opened from somewhere with a first message (a search that found nothing): send it once. An
+  // unmount before the answer cancels that send (useAssistChat), so the next mount sends it again.
+  useEffect(() => {
+    if (first && handled.current !== first.id) {
+      handled.current = first.id
+      send(first.text)
+    }
+  }, [first, send])
+  useEffect(
+    () => () => {
+      handled.current = null
+    },
+    [],
+  )
+
+  // a click anywhere else closes the photo menu
+  useEffect(() => {
+    if (!menu) return
+    const off = () => setMenu(false)
+    document.addEventListener('pointerdown', off)
+    return () => document.removeEventListener('pointerdown', off)
+  }, [menu])
+
+  const onFile = async (file: File | undefined) => {
+    setMenu(false)
+    if (!file) return
+    setPhotoNote('')
+    try {
+      sendPhoto(await downscale(file))
+    } catch {
+      setPhotoNote(A.errPhoto)
+    }
+  }
+
   const submit = (text: string) => {
     if (!text.trim() || busy) return
     setDraft('')
+    setHint(false)
     requestAnimationFrame(resize)
-    void send(text)
+    send(text)
   }
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -365,6 +418,10 @@ export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | 
 
   const onChip = (key: keyof typeof A.chips) => {
     if (key === 'idea') setIdea(true)
+    else if (key === 'paste') {
+      setHint(true)
+      taRef.current?.focus()
+    }
     else submit(A.chips[key])
   }
 
@@ -428,10 +485,10 @@ export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | 
                   <Turn
                     key={m.id}
                     m={m}
-                    onRetry={(x) => void send(x.retryText || '', x.id)}
+                    onRetry={(x) => (x.retryPhoto ? retryPhoto(x) : send(x.retryText || '', x.id))}
                     onVote={vote}
                     onPatch={patch}
-                    onStock={(x) => feedback('idea', x.question || '', x.turnId ?? null)}
+                    onStock={(text, turnId) => feedback('idea', text, turnId)}
                   />
                 ))}
               </div>
@@ -453,7 +510,60 @@ export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | 
             }}
             className="border-t border-line-2 bg-surface px-3 pb-[max(0.625rem,var(--m-safe-b))] pt-2.5"
           >
-            <div className="flex items-end gap-2">
+            {voice.note || photoNote ? (
+              <p role="status" className="mb-2 rounded-md bg-bad-soft px-3 py-2 text-xs text-bad">
+                {voice.note || photoNote}
+              </p>
+            ) : null}
+            {voice.state !== 'idle' ? (
+              <div role="status" className="flex min-h-11 items-center gap-2 rounded-xl border border-plum/30 bg-plum-wash px-3">
+                <span aria-hidden="true" className="h-2.5 w-2.5 shrink-0 rounded-full bg-bad motion-safe:animate-pulse" />
+                <span className="tnum min-w-0 flex-1 truncate text-sm font-semibold text-plum-ink">
+                  {voice.state === 'recording' ? A.listening(`${Math.floor(voice.secs / 60)}:${String(voice.secs % 60).padStart(2, '0')}`) : A.transcribing}
+                </span>
+                {voice.state === 'recording' ? (
+                  <button
+                    type="button"
+                    onClick={voice.stop}
+                    aria-label={A.micStop}
+                    title={A.micStop}
+                    className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-plum text-white hover:bg-plum-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
+                  >
+                    <Square size={15} fill="currentColor" aria-hidden="true" />
+                  </button>
+                ) : null}
+                <Button size="md" variant="ghost" onClick={voice.cancel}>
+                  {A.cancel}
+                </Button>
+              </div>
+            ) : (
+            <div className="flex items-end gap-1.5">
+              {photoOn ? (
+                <div className="relative shrink-0" onPointerDown={(e) => e.stopPropagation()}>
+                  <IconButton label={A.photoLabel} aria-haspopup="menu" aria-expanded={menu} disabled={busy} onClick={() => setMenu((v) => !v)} className="rounded-full border border-line">
+                    <Camera size={18} aria-hidden="true" />
+                  </IconButton>
+                  {menu ? (
+                    <div role="menu" className="absolute bottom-full start-0 z-10 mb-2 w-52 overflow-hidden rounded-lg border border-line bg-surface shadow-3">
+                      <button type="button" role="menuitem" onClick={() => camRef.current?.click()} className="flex min-h-11 w-full items-center gap-2.5 px-3.5 text-start text-sm font-semibold text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70">
+                        <Camera size={16} className="text-plum" aria-hidden="true" />
+                        {A.takePhoto}
+                      </button>
+                      <button type="button" role="menuitem" onClick={() => galRef.current?.click()} className="flex min-h-11 w-full items-center gap-2.5 border-t border-line-2 px-3.5 text-start text-sm font-semibold text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70">
+                        <ImagePlus size={16} className="text-plum" aria-hidden="true" />
+                        {A.choosePhoto}
+                      </button>
+                    </div>
+                  ) : null}
+                  <input ref={camRef} type="file" accept="image/*" capture="environment" hidden tabIndex={-1} onChange={(e) => { void onFile(e.target.files?.[0]); e.target.value = '' }} />
+                  <input ref={galRef} type="file" accept="image/*" hidden tabIndex={-1} onChange={(e) => { void onFile(e.target.files?.[0]); e.target.value = '' }} />
+                </div>
+              ) : null}
+              {voiceOn ? (
+                <IconButton label={A.micLabel} disabled={busy} onClick={() => void voice.start()} className="rounded-full border border-line">
+                  <Mic size={18} aria-hidden="true" />
+                </IconButton>
+              ) : null}
               <label htmlFor={inputId} className="sr-only">
                 {A.messageLabel}
               </label>
@@ -464,9 +574,10 @@ export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | 
                 rows={1}
                 maxLength={MAX_LEN}
                 disabled={busy}
-                placeholder={A.placeholder}
+                placeholder={hint ? A.pasteHint : A.placeholder}
                 onChange={(e) => {
                   setDraft(e.target.value)
+                  if (e.target.value) setHint(false)
                   resize()
                 }}
                 onKeyDown={onKey}
@@ -483,6 +594,7 @@ export function AssistChat({ itemCode, onClose, titleId }: { itemCode: string | 
                 <Send size={17} className="rtl:-scale-x-100" aria-hidden="true" />
               </button>
             </div>
+            )}
             <div className="mt-1.5 flex items-center justify-between gap-3 px-1 text-2xs text-ink-3">
               <span>{A.privacy}</span>
               {draft.length >= 400 ? <span className="tnum shrink-0">{A.chars(draft.length, MAX_LEN)}</span> : null}

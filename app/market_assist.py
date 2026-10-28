@@ -354,6 +354,48 @@ def match_lines(cat: dict, lines: list[dict]) -> list[dict]:
     return out
 
 
+def pasted_list(cat: dict, message: str) -> list[dict]:
+    """The lines of a message that IS an order list: two or more lines, at least two of which carry a
+    quantity or a catalogue code. Anything else (a question over two lines) is not a list."""
+    if "\n" not in str(message or ""):
+        return []
+    lines = parse_list(message)
+    signals = sum(1 for ln in lines if ln["qty"] or _code_in(cat, ln["text"]))
+    return lines if len(lines) >= 2 and signals >= 2 else []
+
+
+_READ_LIST = """Each numbered line below is one item a shop owner wants to order from YQ Bahrain's wholesale \
+marketplace for mobile accessories. Lines can be in any language.
+Reply with ONE JSON object and nothing else: {"lines": [{"n": 1, "query": "", "code": "", "qty": null}]}
+Exactly one entry per numbered line, with the same n. Never merge or skip a line.
+query: the product in plain English catalogue words, for example "car charger", "usb-c cable", "power bank 10000mah", \
+"tws earbuds". iPhone 15 and newer and almost every Android phone charge by USB-C; iPhone 14 and older by Lightning.
+code: a product code written on the line (for example "C07", "UK20"), otherwise "".
+qty: the quantity written on the line, otherwise null."""
+
+
+def read_list(lines: list[dict]) -> tuple[list[dict], str]:
+    """A pasted list's lines in catalogue words. The line boundaries and quantities are the merchant's
+    own (parse_list): the model only reads each numbered line, so it cannot merge or drop one."""
+    numbered = "\n".join(f"{n}: {ln['text']}" for n, ln in enumerate(lines, 1))
+    msgs = [{"role": "system", "content": _READ_LIST + "\n" + FENCE_RULE},
+            {"role": "user", "content": fence(numbered, "order list", 4000)}]
+    data, prov = chat_json(msgs, validate=lambda d: isinstance(d.get("lines"), list), tier=1, task="assist",
+                           max_tokens=60 + 45 * len(lines), request_timeout=8.0, max_providers=3)
+    by_n = {}
+    for x in data["lines"]:
+        if isinstance(x, dict):
+            n = _int_or_none(x.get("n"))
+            if n:
+                by_n[n] = x
+    out = []
+    for n, ln in enumerate(lines, 1):
+        m = by_n.get(n) or {}
+        out.append({"text": ln["text"], "query": _clean_text(m.get("query"), 120) or ln["query"],
+                    "code": _clean_text(m.get("code"), 32), "qty": ln["qty"] or _int_or_none(m.get("qty"))})
+    return out, prov
+
+
 def _list_result(cat: dict, lines: list[dict], T: dict, intent: str = "list") -> dict:
     matched = match_lines(cat, lines)
     found = [ln for ln in matched if ln["item_code"]]
@@ -464,18 +506,30 @@ def ask(body: dict, ip: str | None = None) -> dict:
                "device_id": _clean_text(body.get("device_id"), 64) or None,
                "lang": ui_lang, "message": message, "ip": ip}
 
+    # the line breaks of a pasted list live in the raw text (`message` is folded onto one line)
+    pasted = pasted_list(cat, mask(str(body.get("message") or "")[:MAX_MESSAGE]))
     if not _take_budget():
+        if pasted:                # a pasted list needs no model: codes and English words still match
+            res = _list_result(cat, pasted, TEMPLATES[ui_lang])
+            return _finish(res, log_row, "miss" if res["miss"] else "answered", "", "", t0)
         res = _result("find", "", fallback=True)
         return _finish(res, log_row, "capped", "", "", t0)
+
+    if pasted:
+        try:
+            lines, prov = read_list(pasted)
+        except AllProvidersFailed as e:
+            log.info("assist: no model read the list, matching it as written: %s", e)
+            lines, prov = pasted, ""
+        lang = "ar" if re.search(r"[؀-ۿ]", message) else ui_lang
+        res = _list_result(cat, lines, TEMPLATES[lang])
+        return _finish(res, log_row, "miss" if res["miss"] else "answered", prov,
+                       "; ".join(ln["query"] for ln in lines)[:300], t0)
 
     try:
         understood, prov1 = understand(message, history, item)
     except AllProvidersFailed as e:
         log.info("assist: no model understood the message: %s", e)
-        pasted = parse_list(body.get("message"))
-        if len(pasted) >= 2:      # a pasted list still works without a model: codes and English words
-            res = _list_result(cat, pasted, TEMPLATES[ui_lang])
-            return _finish(res, log_row, "answered" if not res["miss"] else "miss", "", "", t0)
         res = _result("find", "", fallback=True)
         return _finish(res, log_row, "fallback", "", "", t0)
 

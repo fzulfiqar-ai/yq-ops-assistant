@@ -1,11 +1,24 @@
-import type { AskAddLine, AskHandoff, AskIntent, AskOrder } from './assistApi'
+import type { AskAddLine, AskHandoff, AskIntent, AskOrder, LineStatus } from './assistApi'
 
 /**
  * What the chat keeps for this tab (sessionStorage, key 'yq-assist'): the last 30 messages and the
  * session id. Nothing here is private data beyond what the merchant typed, and it dies with the tab.
  */
 
-export type ErrorKind = 'off' | 'busy' | 'slow' | 'net'
+export type ErrorKind = 'off' | 'busy' | 'slow' | 'net' | 'photo'
+
+/** One line of the order-list review, as the merchant has edited it. */
+export interface Row {
+  text: string
+  /** null = nothing chosen (not found, or removed) */
+  code: string | null
+  qty: number
+  alts: string[]
+  status: LineStatus
+  removed?: boolean
+  /** "Ask YQ to stock it" was sent for this line */
+  asked?: boolean
+}
 
 export interface Msg {
   id: string
@@ -23,6 +36,12 @@ export interface Msg {
   fallback?: boolean
   miss?: boolean
   turnId?: number | null
+  /** the order list review (lines, editable) */
+  rows?: Row[]
+  /** a photo bubble: only this flag is kept, the picture lives in memory (photos.ts) */
+  photo?: boolean
+  /** error: the user message whose photo is to be sent again */
+  retryPhoto?: string
   vote?: 'up' | 'down'
   added?: boolean
   stocked?: boolean
