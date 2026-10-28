@@ -221,5 +221,14 @@ await check('Sales picks the rep the link names, whatever its case or spaces; an
     [null, null, null, null])
 })
 
+await check('the palette routes through lib/searchRoute.ts; Sales reads ?rep= and names the rep it shows', () => {
+  const pal = text('components/CommandPalette.tsx')
+  ok(pal.includes("import { hitRoute, type SearchHit as DataHit } from '@/lib/searchRoute'"), 'the palette')
+  ok(!pal.includes("return '/sales'"), 'no unfiltered /sales for a salesman')
+  const sales = text('pages/Sales.tsx')
+  ok(sales.includes('sp.get(REP_PARAM)') && sales.includes('matchSalesman('), 'Sales reads the rep from the link')
+  ok(sales.includes('Clear the rep'), 'and says so, with a way back to everybody')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

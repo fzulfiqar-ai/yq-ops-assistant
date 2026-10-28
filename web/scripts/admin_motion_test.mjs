@@ -149,5 +149,18 @@ await check('Stock moves: its chart through ChartBox; the van cards fade in over
   ok(sm.includes('<FadeIn on={vanFade}'), 'a fade over the skeleton only when one was shown')
 })
 
+await check('Sales: its three charts through ChartBox', () => {
+  const s = text('pages/Sales.tsx')
+  ok(!s.includes('<ResponsiveContainer'), 'no bare ResponsiveContainer')
+  eq((s.match(/<ChartBox id="sales\./g) || []).length, 3, 'three charts:')
+  for (const x of ['<Bar {...m} dataKey="gross_bhd"', '<Area {...m}', '<Bar {...m} dataKey="rev"']) ok(s.includes(x), x)
+})
+
+await check('the command palette: the enter and exit curves, and still under reduced motion', () => {
+  const pal = text('components/CommandPalette.tsx')
+  ok(pal.includes('const still = useReducedMotion() ?? false'), 'reads the setting')
+  ok(pal.includes('ease: ENTER_EASE') && pal.includes('ease: EXIT_EASE'), 'the curves')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

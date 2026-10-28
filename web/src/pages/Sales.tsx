@@ -1,10 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Area, AreaChart, Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { CalendarDays, Store, Truck } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { Area, AreaChart, Bar, BarChart, Cell, Tooltip, XAxis, YAxis } from 'recharts'
+import { CalendarDays, Store, Truck, UserRound, X } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
+import { panelState } from '@/lib/dataState'
+import { useSkeletonFade } from '@/lib/motionOnce'
+import { ChartBox, FadeIn } from '@/lib/motionKit'
+import { REP_PARAM, matchSalesman } from '@/lib/searchRoute'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, type Column } from '@/components/DataTable'
@@ -25,12 +30,16 @@ interface Data {
 }
 
 /** Per-salesman daily gross this month. (Targets were retired 21-Sep-2026 until the owner's
- *  target file is loaded -- see scripts/import_targets.py.) */
-function DailyBySalesman({ data }: { data: Data }) {
+ *  target file is loaded -- see scripts/import_targets.py.) `rep` is the salesman a link names
+ *  (?rep=, the command palette's salesman result): he is the one shown until another is picked. */
+function DailyBySalesman({ data, rep }: { data: Data; rep: string | null }) {
   const daily = useMemo(() => data.daily_by_salesman || [], [data.daily_by_salesman])
   const names = useMemo(() => [...new Set(daily.map((r) => r.salesman))].sort((a, b) => a.localeCompare(b)), [daily])
-  const [sel, setSel] = useState<string | null>(null)
-  const who = sel && names.includes(sel) ? sel : names[0]
+  // a pick belongs to the link it was made under: a new ?rep= starts from the rep it names
+  const [pick, setPick] = useState<{ rep: string | null; name: string | null }>({ rep, name: null })
+  const sel = pick.rep === rep ? pick.name : null
+  const wanted = matchSalesman(names, rep)
+  const who = sel && names.includes(sel) ? sel : wanted ?? names[0]
   const days = useMemo(() => {
     const dates = [...new Set(daily.map((r) => r.day))].sort()
     const mine = new Map(daily.filter((r) => r.salesman === who).map((r) => [r.day, Number(r.gross_bhd)]))
@@ -50,16 +59,16 @@ function DailyBySalesman({ data }: { data: Data }) {
           MTD {bhd(mtd, 0)}
         </span>
       </div>
-      <div className="mb-3 flex flex-wrap gap-1.5">
+      <div role="group" aria-label="Salesman" className="mb-3 flex flex-wrap gap-1.5">
         {names.map((n) => (
-          <button key={n} onClick={() => setSel(n)}
+          <button key={n} type="button" onClick={() => setPick({ rep, name: n })} aria-pressed={n === who}
             className={cn('rounded-full border px-3 py-1 text-[12.5px] font-medium transition',
               n === who ? 'border-primary bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-accent/50')}>
             {n}
           </button>
         ))}
       </div>
-      <ResponsiveContainer width="100%" height={180}>
+      <ChartBox id="sales.daily" height={180}>{(m) => (
         <BarChart data={days} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
           <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
             tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -67,10 +76,36 @@ function DailyBySalesman({ data }: { data: Data }) {
             width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
           <Tooltip formatter={(v) => [bhd(Number(v)), 'Gross']} labelFormatter={(d) => fmtDate(String(d))}
             contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-          <Bar dataKey="gross_bhd" radius={[4, 4, 0, 0]} maxBarSize={24} fill="#7c3aed" />
+          <Bar {...m} dataKey="gross_bhd" radius={[4, 4, 0, 0]} maxBarSize={24} fill="#7c3aed" />
         </BarChart>
-      </ResponsiveContainer>
+      )}</ChartBox>
     </Card>
+  )
+}
+
+/** The page while its one read is under way: the cards in their places, at their heights (it was a 60vh block). */
+function SalesSkeleton() {
+  return (
+    <div className="space-y-4" aria-busy="true" aria-label="Loading sales">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <Card className="p-5 lg:col-span-2"><Skeleton className="h-5 w-48" /><Skeleton className="mt-4 h-[260px]" /></Card>
+        <Card className="p-5">
+          <Skeleton className="h-5 w-32" />
+          <div className="mt-4 space-y-5">
+            {[0, 1].map((i) => (
+              <div key={i}><Skeleton className="h-4" /><Skeleton className="mt-2 h-2" /><Skeleton className="mt-2 h-3 w-40" /></div>
+            ))}
+          </div>
+        </Card>
+      </div>
+      <Card className="p-5"><Skeleton className="h-5 w-48" /><Skeleton className="mt-3 h-7 w-80 max-w-full" /><Skeleton className="mt-3 h-[180px]" /></Card>
+      <Card className="p-5"><Skeleton className="h-5 w-64" /><Skeleton className="mt-4 h-[300px]" /></Card>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {[0, 1].map((i) => (
+          <Card key={i} className="p-5"><Skeleton className="h-5 w-48" /><Skeleton className="mt-4 h-9 w-40" /><Skeleton className="mt-3 h-56" /></Card>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -88,25 +123,41 @@ const sellerCols: Column<Seller>[] = [
 ]
 
 export default function Sales() {
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'sales'], queryFn: () => apiGet<Data>('/report/sales') })
+  const { data, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'sales'], queryFn: () => apiGet<Data>('/report/sales') })
+  const state = panelState({ data, isError })
+  const fade = useSkeletonFade(data !== undefined)
+  // ?rep=<name>: one salesman, as the command palette's salesman result opens the page
+  const [sp] = useSearchParams()
+  const rep = sp.get(REP_PARAM)
   const trend = (data?.trend || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
   const salesmen = (data?.by_salesman || []).slice(0, 12).map((s) => ({ ...s, name: s.salesman, rev: Number(s.revenue_bhd || 0) }))
+  const repName = rep ? matchSalesman([...(data?.by_salesman || []).map((s) => s.salesman), ...(data?.daily_by_salesman || []).map((r) => r.salesman)], rep) : null
   const channels = data?.by_channel || []
   const channelTotal = channels.reduce((s, c) => s + Number(c.revenue_bhd || 0), 0) || 1
 
   return (
     <div>
-      <PageHeader title="Sales" subtitle="Performance · salesmen · B2C/B2B channel — gross (VAT-incl)" />
-      {isError && !data ? (
+      <PageHeader title="Sales" subtitle="Performance · salesmen · B2C/B2B channel — gross (VAT-incl)"
+        actions={rep ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border bg-card py-1 pl-2.5 pr-1 text-[12px] font-semibold">
+            <UserRound size={13} className="shrink-0 text-primary" aria-hidden="true" />
+            {repName ?? rep}{state === 'ready' && !repName && <span className="font-normal text-muted-foreground"> · not in these figures</span>}
+            <Link to="/sales" aria-label="Clear the rep" title="Clear the rep"
+              className="grid h-6 w-6 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+              <X size={13} />
+            </Link>
+          </span>
+        ) : undefined} />
+      {state === 'error' ? (
         <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load sales." />
-      ) : isLoading || !data ? (
-        <Skeleton className="h-[60vh]" />
+      ) : state === 'loading' || !data ? (
+        <SalesSkeleton />
       ) : (
-        <div className="space-y-4">
+        <FadeIn on={fade} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Card className="p-5 lg:col-span-2">
               <div className="mb-4 font-display text-base font-semibold">Revenue by month (gross)</div>
-              <ResponsiveContainer width="100%" height={260}>
+              <ChartBox id="sales.trend" height={260}>{(m) => (
                 <AreaChart data={trend} margin={{ top: 6, right: 8, left: 8, bottom: 0 }}>
                   <defs>
                     <linearGradient id="sales" x1="0" y1="0" x2="0" y2="1">
@@ -119,9 +170,9 @@ export default function Sales() {
                     width={48} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
                   <Tooltip formatter={(value) => [bhd(Number(value), 0), 'Gross']}
                     contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-                  <Area type="monotone" dataKey="gross_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#sales)" />
+                  <Area {...m} type="monotone" dataKey="gross_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#sales)" />
                 </AreaChart>
-              </ResponsiveContainer>
+              )}</ChartBox>
             </Card>
             <Card className="p-5">
               <div className="mb-4 font-display text-base font-semibold">Channel mix</div>
@@ -149,21 +200,22 @@ export default function Sales() {
             </Card>
           </div>
 
-          <DailyBySalesman data={data} />
+          <DailyBySalesman data={data} rep={rep} />
 
           <Card className="p-5">
             <div className="mb-4 font-display text-base font-semibold">Salesman performance (gross revenue)</div>
-            <ResponsiveContainer width="100%" height={300}>
+            <ChartBox id="sales.salesmen" height={300}>{(m) => (
               <BarChart data={salesmen} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
                 <XAxis type="number" hide />
                 <YAxis type="category" dataKey="name" width={120} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
                 <Tooltip formatter={(value) => [bhd(Number(value), 0), 'Gross']} cursor={{ fill: 'hsl(var(--accent))' }}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-                <Bar dataKey="rev" radius={[0, 6, 6, 0]}>
-                  {salesmen.map((_, i) => <Cell key={i} fill={i === 0 ? '#7c3aed' : '#a78bfa'} />)}
+                <Bar {...m} dataKey="rev" radius={[0, 6, 6, 0]}>
+                  {/* the rep a link names stands out; otherwise the top seller does */}
+                  {salesmen.map((s, i) => <Cell key={i} fill={(repName ? s.salesman === repName : i === 0) ? '#7c3aed' : '#a78bfa'} />)}
                 </Bar>
               </BarChart>
-            </ResponsiveContainer>
+            )}</ChartBox>
           </Card>
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -176,7 +228,7 @@ export default function Sales() {
               <DataTable rows={data.top_customers} cols={custCols} exportName="top-customers" searchable={false} empty="No customers yet." />
             </Card>
           </div>
-        </div>
+        </FadeIn>
       )}
     </div>
   )
