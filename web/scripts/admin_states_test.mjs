@@ -243,5 +243,13 @@ await check('Inventory and Sales: a page-shaped skeleton, never a 60vh block', (
   }
 })
 
+await check('Settings: every card keeps its place while it loads and says when its read failed', () => {
+  const st = text('pages/Settings.tsx')
+  ok(!/if \(!data\) return null/.test(st) && !/if \(!settings\) return null/.test(st), 'no card that vanishes')
+  ok(st.includes('function PendingCard('), 'a pending card: the title and the shape of the fields, or the error')
+  ok((st.match(/return <PendingCard /g) || []).length >= 5, 'business, shop, area reps, promise bar, agent scope')
+  ok(!st.includes('>Loading…<') && st.includes('fallback="Could not load the audit."'), 'the audit: skeleton rows and Retry')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

@@ -11,12 +11,52 @@ import { useToast } from '@/components/Toast'
 import { changeOwnPassword } from '@/lib/password'
 import { apiGet, apiSend, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { InlineError } from '@/lib/inlineError'
+import { useSkeletonFade } from '@/lib/motionOnce'
+import { FadeIn } from '@/lib/motionKit'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 
 type Costing = Record<string, number>
+
+/**
+ * A settings card while its read is under way — its title and the shape of its fields, so the page does not grow
+ * card by card as the reads come back — or after the read failed: the error with Retry (a card whose read failed
+ * used to vanish, as if the setting did not exist). The real card's content then fades in over it (200 ms).
+ */
+function PendingCard({ icon: Icon, title, read, fields = 4, cols = 2, fallback }: {
+  icon: LucideIcon
+  title: string
+  read: { isError: boolean; error: unknown; isFetching: boolean; refetch: () => unknown }
+  /** how many field-shaped blocks, and in how many columns from sm: — the real card's layout */
+  fields?: number
+  cols?: 1 | 2
+  fallback: string
+}) {
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+        <Icon size={18} className="text-primary" /> {title}
+      </div>
+      {read.isError ? (
+        <div className="mt-3">
+          <InlineError error={read.error} onRetry={() => read.refetch()} isRetrying={read.isFetching} fallback={fallback} />
+        </div>
+      ) : (
+        <div aria-busy="true" aria-label={`Loading ${title.toLowerCase()}`}>
+          <Skeleton className="mb-4 mt-2 h-4 w-3/4" />
+          <div className={cn('grid grid-cols-1 gap-3', cols === 2 && 'sm:grid-cols-2')}>
+            {Array.from({ length: fields }).map((_, i) => <Skeleton key={i} className="h-[84px]" />)}
+          </div>
+          <Skeleton className="mt-4 h-10 w-40" />
+        </div>
+      )}
+    </Card>
+  )
+}
 
 /** The server's own `detail` line for a failed call (FastAPI 400s carry the reason there), never "API 400: {…}". */
 function apiErrorText(e: unknown, fallback: string): string {
@@ -47,7 +87,9 @@ const COSTING_FIELDS: { key: string; label: string; hint: string }[] = [
 function CostingCard() {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data } = useQuery({ queryKey: ['costing'], queryFn: () => apiGet<Costing>('/settings/costing') })
+  const read = useQuery({ queryKey: ['costing'], queryFn: () => apiGet<Costing>('/settings/costing') })
+  const data = read.data
+  const fade = useSkeletonFade(data !== undefined)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const save = useMutation({
     mutationFn: () => {
@@ -61,9 +103,10 @@ function CostingCard() {
     onSuccess: () => { setDraft({}); qc.invalidateQueries({ queryKey: ['costing'] }); toast('Business settings saved.', 'success') },
     onError: (e: Error) => toast(e.message, 'error'),
   })
-  if (!data) return null
+  if (!data) return <PendingCard icon={Calculator} title="Business settings" read={read} fields={6} fallback="Could not load the business settings." />
   return (
     <Card className="mb-4 p-6">
+      <FadeIn on={fade}>
       <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
         <Calculator size={18} className="text-primary" /> Business settings
       </div>
@@ -84,6 +127,7 @@ function CostingCard() {
       <Button className="mt-4" onClick={() => save.mutate()} disabled={save.isPending || Object.keys(draft).length === 0}>
         {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save settings
       </Button>
+      </FadeIn>
     </Card>
   )
 }
@@ -93,10 +137,12 @@ function CostingCard() {
 function AgentScopeCard() {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data } = useQuery({
+  const read = useQuery({
     queryKey: ['agent-scope'],
     queryFn: () => apiGet<{ exclude_sim: boolean }>('/settings/agents'),
   })
+  const data = read.data
+  const fade = useSkeletonFade(data !== undefined)
   const save = useMutation({
     mutationFn: (exclude_sim: boolean) => apiSend('PUT', '/settings/agents', { exclude_sim }),
     onSuccess: (_r, exclude_sim) => {
@@ -107,9 +153,10 @@ function AgentScopeCard() {
     },
     onError: (e: Error) => toast(e.message, 'error'),
   })
-  if (!data) return null
+  if (!data) return <PendingCard icon={Bot} title="AI agent scope" read={read} fields={1} cols={1} fallback="Could not load the AI agent scope." />
   return (
     <Card className="mb-4 p-6">
+      <FadeIn on={fade}>
       <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
         <Bot size={18} className="text-primary" /> AI agent scope
       </div>
@@ -126,6 +173,7 @@ function AgentScopeCard() {
           {data.exclude_sim ? 'SIM excluded' : 'SIM included'}
         </span>
       </label>
+      </FadeIn>
     </Card>
   )
 }
@@ -181,7 +229,9 @@ const SHOP_FIELDS: ShopField[] = [
 function ShopSettingsCard() {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data } = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const read = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const data = read.data
+  const fade = useSkeletonFade(data !== undefined)
   const { data: salesmenData } = useQuery({
     queryKey: ['shop-salesmen-names'],
     queryFn: () => apiGet<{ salesmen: { name: string }[] }>('/shop/salesmen'),
@@ -197,7 +247,7 @@ function ShopSettingsCard() {
     onError: (e: unknown) => toast(apiErrorText(e, 'Could not save the shop settings.'), 'error'),
   })
 
-  if (!settings) return null
+  if (!settings) return <PendingCard icon={Store} title="Shop settings" read={read} fields={SHOP_FIELDS.length} fallback="Could not load the shop settings." />
   const val = (k: string) => draft[k] ?? settings[k] ?? ''
   const setVal = (k: string, v: string) => setDraft((d) => ({ ...d, [k]: v }))
   const dirty = Object.keys(draft).length > 0
@@ -211,6 +261,7 @@ function ShopSettingsCard() {
 
   return (
     <Card className="mb-4 p-6">
+      <FadeIn on={fade}>
       <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
         <Store size={18} className="text-primary" /> Shop settings
       </div>
@@ -280,6 +331,7 @@ function ShopSettingsCard() {
       <Button className="mt-4" onClick={() => save.mutate()} disabled={save.isPending || !dirty}>
         {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save shop settings
       </Button>
+      </FadeIn>
     </Card>
   )
 }
@@ -310,7 +362,9 @@ function storedAreaReps(raw: string | undefined): AreaReps {
 function AreaRepsCard() {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data } = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const read = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const data = read.data
+  const fade = useSkeletonFade(data !== undefined)
   const { data: salesmenData } = useQuery({
     queryKey: ['shop-salesmen-names'],
     queryFn: () => apiGet<{ salesmen: { id: number; name: string; is_active?: boolean | null }[] }>('/shop/salesmen'),
@@ -332,7 +386,7 @@ function AreaRepsCard() {
     onError: (e: unknown) => toast(apiErrorText(e, 'Could not save the area representatives.'), 'error'),
   })
 
-  if (!settings) return null
+  if (!settings) return <PendingCard icon={Truck} title="Area representatives" read={read} fields={6} fallback="Could not load the area representatives." />
   const roster = (salesmenData?.salesmen || []).filter((s) => s.is_active !== false)
   const areas = String(settings.shop_areas || '').split(',').map((a) => a.trim()).filter(Boolean)
   // an area the map holds but the checkout list no longer offers stays visible, so nothing is dropped unseen
@@ -349,6 +403,7 @@ function AreaRepsCard() {
 
   return (
     <Card className="mb-4 p-6">
+      <FadeIn on={fade}>
       <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
         <Truck size={18} className="text-primary" /> Area representatives
       </div>
@@ -383,6 +438,7 @@ function AreaRepsCard() {
       <Button className="mt-4" onClick={() => save.mutate(JSON.stringify(map))} disabled={save.isPending || draft === null}>
         {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save area representatives
       </Button>
+      </FadeIn>
     </Card>
   )
 }
@@ -481,7 +537,9 @@ const newPromiseUid = () => `new-${(addedPromises += 1)}`
 function PromiseBarCard() {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data } = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const read = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const data = read.data
+  const fade = useSkeletonFade(data !== undefined)
   const settings = data?.settings
   const stored = useMemo(() => storedPromises(settings?.shop_market_promises), [settings?.shop_market_promises])
   const [draft, setDraft] = useState<PromiseRow[] | null>(null)
@@ -530,7 +588,7 @@ function PromiseBarCard() {
     }
   })
 
-  if (!settings) return null
+  if (!settings) return <PendingCard icon={BadgeCheck} title="Promise bar" read={read} fields={5} cols={1} fallback="Could not load the promise bar." />
 
   const edit = (next: PromiseRow[]) => {
     setDraft(next)
@@ -584,6 +642,7 @@ function PromiseBarCard() {
 
   return (
     <Card className="mb-4 p-6">
+      <FadeIn on={fade}>
       <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
         <BadgeCheck size={18} className="text-primary" /> Promise bar
       </div>
@@ -725,6 +784,7 @@ function PromiseBarCard() {
           </Button>
         </div>
       </div>
+      </FadeIn>
     </Card>
   )
 }
@@ -782,7 +842,7 @@ function fmtAuditTime(iso: string): string {
 function AuditCard() {
   const [entity, setEntity] = useState('')
   const [open, setOpen] = useState<number | null>(null)
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['shop-audit', entity],
     queryFn: () => apiGet<AuditResp>(`/shop/audit?limit=100${entity ? `&entity=${encodeURIComponent(entity)}` : ''}`),
     staleTime: 30_000,
@@ -809,9 +869,11 @@ function AuditCard() {
         </div>
       )}
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : isError ? (
-        <p className="text-sm text-muted-foreground">Could not load the audit.</p>
+        <div className="space-y-px overflow-hidden rounded-xl border" aria-busy="true" aria-label="Loading the audit">
+          {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-10 rounded-none" />)}
+        </div>
+      ) : isError && !data ? (
+        <InlineError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the audit." />
       ) : rows.length === 0 ? (
         !data?.hint && <p className="text-sm text-muted-foreground">No changes recorded yet.</p>
       ) : (
