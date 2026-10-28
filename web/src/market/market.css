@@ -276,6 +276,45 @@
     background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
     animation: m-shimmer 1.4s linear infinite;
   }
+  /* photo fade-in (ui/ProductImage.tsx): while the photo decodes, the tile wears the skeleton tint
+   * (::before) with a light sweep over it (::after), and the 160 px stand-in (.m-photo-low) paints
+   * on the tint; then the photo fades in and the tint fades out with it, back to the white shelf
+   * tile. Only opacity and transform move. */
+  .m-photo {
+    position: relative;
+    overflow: hidden;
+  }
+  .m-photo::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-color: hsl(var(--m-surface-2));
+    transition: opacity var(--m-d-2) var(--m-ease);
+    pointer-events: none;
+  }
+  .m-photo[data-state='in']::before {
+    opacity: 0;
+  }
+  .m-photo-low {
+    position: absolute;
+    inset: 0;
+  }
+  .m-photo-img {
+    position: relative;
+    transition: opacity var(--m-d-2) var(--m-ease);
+  }
+  .m-photo[data-state='wait'] .m-photo-img {
+    opacity: 0;
+  }
+  .m-photo[data-state='wait']::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
+    animation: m-shimmer 1.4s linear infinite;
+    pointer-events: none;
+  }
   /* cards below the fold skip layout/paint until they scroll near (React still renders them).
    * Placeholder heights = card v3 (components/MarketCard.tsx) without the optional rows, measured
    * from its classes: borders 2 + square photo (card width − 2) + body. `auto` keeps the real size
@@ -511,6 +550,10 @@
     scroll-behavior: auto !important;
   }
   .skeleton::after {
+    display: none;
+  }
+  /* a waiting photo tile is a still tint (::before), not a sweep */
+  .m-photo[data-state='wait']::after {
     display: none;
   }
 }

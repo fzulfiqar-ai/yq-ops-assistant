@@ -88,7 +88,7 @@ PHOTO_TILES = r"""
     }
     return false;
   };
-  for (const img of document.querySelectorAll('img')) {
+  for (const img of document.querySelectorAll('img:not([aria-hidden="true"])')) {
     const src = (img.currentSrc || img.src || '') + ' ' + (img.getAttribute('srcset') || '');
     if (!/\/thumbs\/|\/storage\/v1\/object\//.test(src)) continue;
     const r = img.getBoundingClientRect();
