@@ -1,24 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AnimatePresence, motion } from 'motion/react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Search, CornerDownLeft, User, Package, BadgeCheck, Loader2 } from 'lucide-react'
 import { navFor } from '@/lib/nav'
 import { useAuth } from '@/lib/auth'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { DURATION, ENTER_EASE, EXIT_EASE } from '@/lib/motionOnce'
+// where a result opens: a salesman opens Sales filtered to him (?rep=), not Sales for everybody
+import { hitRoute, type SearchHit as DataHit } from '@/lib/searchRoute'
 
-interface DataHit { type: 'customer' | 'item' | 'salesman'; label: string; sub: string }
 type Row =
   | { kind: 'page'; label: string; to: string; icon: React.ComponentType<{ size?: number; className?: string }> }
   | { kind: 'data'; hit: DataHit; to: string }
 
 const HIT_ICON = { customer: User, item: Package, salesman: BadgeCheck }
-function hitRoute(h: DataHit): string {
-  const q = encodeURIComponent(h.label)
-  if (h.type === 'customer') return `/receivables?q=${q}`
-  if (h.type === 'item') return `/inventory?q=${q}`
-  return '/sales'
-}
 
 export function CommandPalette() {
   const { me } = useAuth()
@@ -29,6 +25,8 @@ export function CommandPalette() {
   const [hits, setHits] = useState<DataHit[]>([])
   const [loading, setLoading] = useState(false)
   const reqRef = useRef(0)
+  // the motion system (lib/motionOnce.ts): in on the enter curve, out on the exit curve; still when asked
+  const still = useReducedMotion() ?? false
 
   const pages = useMemo(() => navFor(me), [me])
   const filteredPages = useMemo(
@@ -84,12 +82,15 @@ export function CommandPalette() {
         // the DOM, so a tie at z-50 would paint them over the palette); still under the toasts (z-[100])
         <motion.div
           className="fixed inset-0 z-[60] flex items-start justify-center bg-black/50 p-4 pt-[12vh] backdrop-blur-md"
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          initial={still ? false : { opacity: 0 }} animate={{ opacity: 1 }}
+          exit={{ opacity: 0, transition: { duration: still ? 0 : DURATION.press, ease: EXIT_EASE } }}
+          transition={{ duration: still ? 0 : DURATION.fade, ease: ENTER_EASE }}
           onClick={() => setOpen(false)}
         >
           <motion.div
-            initial={{ opacity: 0, y: -12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -12, scale: 0.98 }}
-            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+            initial={still ? false : { opacity: 0, y: -8, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={still ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, y: -8, scale: 0.98, transition: { duration: DURATION.press, ease: EXIT_EASE } }}
+            transition={{ duration: DURATION.fade, ease: ENTER_EASE }}
             className="w-full max-w-xl overflow-hidden rounded-2xl border border-white/10 bg-card text-card-foreground shadow-[0_30px_80px_-20px_rgba(76,29,149,.55)] ring-1 ring-black/5"
             onClick={(e) => e.stopPropagation()}
           >

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Area, Bar, BarChart, Cell, ComposedChart, Line, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, Bar, BarChart, Cell, ComposedChart, Line, Pie, PieChart, ReferenceLine, Tooltip, XAxis, YAxis } from 'recharts'
 import { motion } from 'motion/react'
 import {
   DollarSign, FileText, Boxes, Landmark, TrendingUp, TrendingDown, Crown, TriangleAlert,
   CalendarDays, Store, Truck, ListChecks, ArrowRight, Percent, Clock, Snowflake,
-  Flame, ArrowUpRight, ArrowDownRight, Smartphone,
+  Flame, ArrowUpRight, ArrowDownRight, Smartphone, CheckCircle2, Loader2, RefreshCw,
 } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
@@ -14,8 +15,12 @@ import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
 import { deadUncostedNote } from '@/lib/basisText'
 import { behindFocus } from '@/lib/dataDate'
+import { panelState, refreshFailed } from '@/lib/dataState'
+import { DURATION, ENTER_EASE, useFirstView, useSkeletonFade } from '@/lib/motionOnce'
+import { ChartBox, FadeIn } from '@/lib/motionKit'
 import { CountUp } from '@/components/CountUp'
 import type { Freshness } from '@/components/FreshnessChip'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -131,10 +136,12 @@ interface DashboardData {
   pace?: Pace
 }
 
-const container = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } }
+// The KPI row's entrance (lib/motionOnce.ts): a short stagger of opacity and an 8 px rise on the enter curve,
+// on its first view in the session only — KpiRow decides — and none under reduced motion
+const container = { hidden: {}, show: { transition: { staggerChildren: 0.04 } } }
 const item = {
-  hidden: { opacity: 0, y: 16 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.5, ease: [0.16, 1, 0.3, 1] as const } },
+  hidden: { opacity: 0, y: 8 },
+  show: { opacity: 1, y: 0, transition: { duration: DURATION.fade, ease: ENTER_EASE } },
 }
 const ACCENTS = {
   purple: 'linear-gradient(90deg,#7c3aed,#a78bfa)',
@@ -190,12 +197,13 @@ function KpiCard({ accent, icon: Icon, label, value, foot, hero, to, basis }: {
   /** the API's full basis line (the Command Centre's words), on hover */
   basis?: string
 }) {
+  // the hover lift moves (transform, 200 ms); the deeper shadow is set, never animated
   const card = (
-    <Card title={basis} className="group relative flex h-full flex-col overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
+    <Card title={basis} className="group relative flex h-full flex-col overflow-hidden p-4 transition-transform duration-200 ease-[cubic-bezier(.22,1,.36,1)] hover:-translate-y-0.5 hover:shadow-luxe-hover motion-reduce:transition-none motion-reduce:hover:translate-y-0">
       {/* top accent rail */}
       <div className="absolute inset-x-0 top-0 h-[3px]" style={{ background: accent }} />
       {/* soft accent glow that intensifies on hover */}
-      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-500 group-hover:opacity-70"
+      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-200 group-hover:opacity-70"
         style={{ background: accent }} />
       <div className="relative flex items-start justify-between">
         <div className="grid h-9 w-9 place-items-center rounded-xl bg-accent/60 text-accent-foreground ring-1 ring-inset ring-white/40">
@@ -233,8 +241,8 @@ function HealthStat({ icon: Icon, label, value, sub, tone, to, basis }: {
 }) {
   const t = TONES[tone]
   const inner = (
-    <Card title={basis} className="group relative h-full overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
-      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-30 blur-2xl transition-opacity group-hover:opacity-60" style={{ background: t.glow }} />
+    <Card title={basis} className="group relative h-full overflow-hidden p-4 transition-transform duration-200 ease-[cubic-bezier(.22,1,.36,1)] hover:-translate-y-0.5 hover:shadow-luxe-hover motion-reduce:transition-none motion-reduce:hover:translate-y-0">
+      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-30 blur-2xl transition-opacity duration-200 group-hover:opacity-60" style={{ background: t.glow }} />
       <div className="relative flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         <Icon size={15} className={t.text} /> {label}
       </div>
@@ -277,6 +285,100 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
   )
 }
 
+/** The KPI row: its cards come in with a short stagger on the row's first view in the session (decided when the
+ *  row itself mounts, i.e. when the figures arrive), and are simply there on every later visit. */
+function KpiRow({ children }: { children: ReactNode }) {
+  const enter = useFirstView('dashboard.kpis')
+  return (
+    <motion.div variants={container} initial={enter ? 'hidden' : false} animate="show"
+      className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      {children}
+    </motion.div>
+  )
+}
+
+// ── the page while its one read is under way ────────────────────────────────────────────────────────────
+// Every card in its place and at about its height, so nothing jumps when the figures arrive: the actions card
+// used to appear ABOVE the KPI skeletons only once the data came, and the day-by-day, health and momentum
+// cards had no placeholder at all — the page moved by hundreds of pixels as it filled in. The heights are the
+// cards' measured ones at 390, 1024 and 1366 px (three actions, five movers each way: the API sends up to five).
+
+function CardSkeleton({ className, title = 'w-40', children }: { className?: string; title?: string; children: ReactNode }) {
+  return (
+    <Card className={cn('p-5', className)}>
+      <Skeleton className={cn('h-5', title)} />
+      <Skeleton className="mt-2 h-3 w-64 max-w-full" />
+      <div className="mt-4">{children}</div>
+    </Card>
+  )
+}
+
+function ActionsSkeleton() {
+  return (
+    <Card className="mb-5 p-5">
+      <Skeleton className="h-6 w-52" />
+      <div className="mt-3 space-y-1">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-9" />)}</div>
+    </Card>
+  )
+}
+
+function DailySkeleton() {
+  return (
+    <CardSkeleton className="mt-4" title="w-48">
+      {/* the pace figures and the Daily / Cumulative switch: one line on a wide screen, two up to xl, five on a phone */}
+      <Skeleton className="h-7 w-[28rem] max-w-full" />
+      <Skeleton className="mt-2 h-7 w-56 xl:hidden" />
+      {[0, 1, 2].map((i) => <Skeleton key={i} className="mt-2 h-7 w-44 sm:hidden" />)}
+      <Skeleton className="mt-3 h-[190px]" />
+      <Skeleton className="mt-3 h-8 w-80 max-w-full" />
+    </CardSkeleton>
+  )
+}
+
+function HealthSkeleton() {
+  return (
+    <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      {[0, 1, 2].map((i) => <Skeleton key={i} className="h-[116px] rounded-xl sm:h-[160px] xl:h-[124px]" />)}
+    </div>
+  )
+}
+
+function MomentumSkeleton() {
+  return (
+    <CardSkeleton className="mt-5" title="w-32">
+      <div className="grid grid-cols-1 gap-x-10 gap-y-2 md:grid-cols-2">
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => <Skeleton key={i} className="h-7" />)}
+        {/* stacked on a phone, the second list's heading takes its own lines */}
+        {[10, 11].map((i) => <Skeleton key={i} className="h-7 md:hidden" />)}
+      </div>
+    </CardSkeleton>
+  )
+}
+
+function DashboardSkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading the dashboard">
+      <ActionsSkeleton />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-[176px] rounded-xl xl:h-[220px]" />)}
+      </div>
+      <DailySkeleton />
+      <HealthSkeleton />
+      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        {/* at lg the channel card is a narrow third and wraps its lines: the row is that card's height */}
+        <CardSkeleton className="lg:col-span-2"><Skeleton className="h-[278px] lg:h-[306px] xl:h-[278px]" /></CardSkeleton>
+        <CardSkeleton><Skeleton className="mx-auto h-[168px] w-[168px] rounded-full" /><Skeleton className="mt-3 h-12" /></CardSkeleton>
+      </div>
+      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <CardSkeleton className="lg:col-span-2"><Skeleton className="h-[278px]" /></CardSkeleton>
+        <CardSkeleton><div className="space-y-2.5">{[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-9" />)}</div></CardSkeleton>
+      </div>
+      <MomentumSkeleton />
+      <Skeleton className="mt-5 h-[146px] rounded-xl sm:h-[94px] xl:h-[62px]" />
+    </div>
+  )
+}
+
 /** how often the page asks again while its figures are behind the header chip's Focus date */
 const CATCH_UP_MS = 30_000
 
@@ -307,6 +409,18 @@ export default function Dashboard() {
   useEffect(() => {
     if (behind) void refetch()
   }, [behind, refetch])
+
+  // The same read's error and progress, for the Retry panel: a second, passive observer of the one query (it
+  // never fetches; the read above stays as the R8 tests hold it). A failure used to leave the skeletons up for
+  // good, under a header that said "All clear".
+  const { isError, error, isFetching } = useQuery({
+    queryKey: ['report', 'dashboard'],
+    queryFn: () => apiGet<DashboardData>('/report/dashboard'),
+    enabled: false,
+  })
+  const state = panelState({ data, isError })
+  // the figures fade in over the skeleton (200 ms) when one was shown; a page opened from the cache draws at once
+  const fade = useSkeletonFade(data !== undefined)
 
   // ONE basis with the pace and the Command Centre (R7b review): the target is read as ex-VAT,
   // Accessories, business days — so the daily target is the monthly target ÷ the month's business days
@@ -375,7 +489,7 @@ export default function Dashboard() {
     <div>
       {/* the scope pill: what the page counts, in the API's own sentence on hover — quiet, the look of the
           header's freshness chip */}
-      <PageHeader title={greeting} subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus}
+      <PageHeader title={greeting} subtitle={state === 'ready' ? focus : 'Mobile Accessories Intelligence'}
         actions={accOnly ? (
           <span title={data?.scope?.text}
             className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">
@@ -394,44 +508,75 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Today's priority actions — the morning brief, on screen */}
-      {!!data?.actions?.length && (
+      {state === 'error' ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching}
+          fallback="Could not load the dashboard from the server." />
+      ) : state === 'loading' ? (
+        <>
+          {/* nothing read and nothing on its way: the read is paused until the connection is back (react-query
+              resumes it by itself) — said, rather than a skeleton that never ends */}
+          {!isLoading && (
+            <p role="status" className="mb-4 rounded-xl border bg-card px-4 py-2.5 text-sm text-muted-foreground">
+              Waiting for a connection — the figures load as soon as it is back.
+            </p>
+          )}
+          <DashboardSkeleton />
+        </>
+      ) : (
+      <FadeIn on={fade}>
+      {/* a re-read that failed (a poll while behind the chip, a tab coming back): the figures shown are the last
+          ones read, and the page says so instead of passing them off as current */}
+      {refreshFailed({ data, isError }) && (
+        <div role="status" className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-[13px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          <TriangleAlert size={15} className="shrink-0" aria-hidden="true" />
+          Could not refresh just now — these are the figures read earlier.
+          <button type="button" onClick={() => refetch()} disabled={isFetching}
+            className="ml-auto inline-flex items-center gap-1 font-semibold hover:underline disabled:opacity-60">
+            {isFetching ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Retry
+          </button>
+        </div>
+      )}
+
+      {/* Today's priority actions — the morning brief, on screen. The card keeps its place when there is nothing
+          to do (an answer without the list, an older API, shows none — never a false all-clear). */}
+      {Array.isArray(data?.actions) && (
         <Card className="mb-5 p-5">
           <div className="mb-3 flex items-center gap-2 font-display text-base font-semibold">
             <ListChecks size={18} className="text-primary" /> Today's priority actions
           </div>
-          <div className="space-y-1">
-            {data.actions.map((a, i) => (
-              <Link key={i} to={a.to}
-                className="group flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-accent/50">
-                <span className={cn('h-2 w-2 shrink-0 rounded-full',
-                  a.urgency >= 3 ? 'bg-rose-500' : a.urgency === 2 ? 'bg-amber-500' : 'bg-slate-400')} />
-                <span className="min-w-0 flex-1 truncate font-medium" title={a.action}>{a.action}</span>
-                {a.bhd > 0 && <span className="shrink-0 tabular-nums text-muted-foreground">{bhd(a.bhd, 0)}</span>}
-                <ArrowRight size={15} className="shrink-0 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
-              </Link>
-            ))}
-          </div>
+          {data.actions.length === 0 ? (
+            <p className="flex items-center gap-2 px-2 text-sm text-muted-foreground">
+              <CheckCircle2 size={16} className="shrink-0 text-emerald-600" aria-hidden="true" /> Nothing needs your attention right now.
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {data.actions.map((a, i) => (
+                <Link key={i} to={a.to}
+                  className="group flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-accent/50">
+                  <span className={cn('h-2 w-2 shrink-0 rounded-full',
+                    a.urgency >= 3 ? 'bg-rose-500' : a.urgency === 2 ? 'bg-amber-500' : 'bg-slate-400')} />
+                  <span className="min-w-0 flex-1 truncate font-medium" title={a.action}>{a.action}</span>
+                  {a.bhd > 0 && <span className="shrink-0 tabular-nums text-muted-foreground">{bhd(a.bhd, 0)}</span>}
+                  <ArrowRight size={15} className="shrink-0 text-muted-foreground opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+                </Link>
+              ))}
+            </div>
+          )}
         </Card>
       )}
 
       {/* KPI row */}
-      {isLoading || !k ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-[140px]" />)}
-        </div>
-      ) : (
-        <motion.div variants={container} initial="hidden" animate="show"
-          className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      {k && (
+        <KpiRow>
           <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Accessories sales this month · ex-VAT" hero to="/sales"
             basis={salesMtd?.basis}
-            value={salesMtd?.value != null ? <CountUp value={salesMtd.value} format={(n) => bhd(n, 0)} /> : '—'}
+            value={salesMtd?.value != null ? <CountUp id="dashboard.sales_mtd" value={salesMtd.value} format={(n) => bhd(n, 0)} /> : '—'}
             foot={salesMtd
               ? <Delta pct={salesMtd.delta_pct} vs={cc?.compare_basis || salesMtd.compare?.label} />
               : <span className="text-muted-foreground">Not available just now · the Command Centre figures did not load</span>} />
           <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label={cc?.day ? `Latest day · ${weekdayLabel(cc.day.end)}` : 'Latest day'} to="/sales"
             basis={salesDay?.basis}
-            value={salesDay?.value != null ? <CountUp value={salesDay.value} format={(n) => bhd(n, 0)} /> : '—'}
+            value={salesDay?.value != null ? <CountUp id="dashboard.sales_day" value={salesDay.value} format={(n) => bhd(n, 0)} /> : '—'}
             foot={salesDay ? (
               <span className="text-muted-foreground">
                 Accessories ex-VAT · <Delta pct={salesDay.delta_pct}
@@ -441,19 +586,19 @@ export default function Dashboard() {
             ) : <span className="text-muted-foreground">Accessories · ex-VAT · not available just now</span>} />
           <KpiCard accent={ACCENTS.slate} icon={FileText} label="Focus invoices this month (Accessories)" to="/sales"
             basis={salesMtd?.basis}
-            value={salesMtd?.invoices != null ? <CountUp value={salesMtd.invoices} /> : '—'}
+            value={salesMtd?.invoices != null ? <CountUp id="dashboard.invoices" value={salesMtd.invoices} /> : '—'}
             foot={<span className="text-muted-foreground">Month to date{cc?.focus ? ` · ${cc.focus.label}` : ''} · the Focus sales day book</span>} />
           <KpiCard accent={ACCENTS.green} icon={Landmark} label={arLabel} to="/receivables"
             basis={arBasis}
-            value={arValue != null ? <CountUp value={arValue} format={(n) => bhd(n, 0)} /> : '—'}
+            value={arValue != null ? <CountUp id="dashboard.receivables" value={arValue} format={(n) => bhd(n, 0)} /> : '—'}
             foot={<span className="text-muted-foreground">
               {arOver90?.value != null && <><span className="font-semibold text-rose-600">{arOver90.value.toFixed(1)}% over 90 days</span>{' '}· </>}
               <Amount>{bhd(k.overdue_total_bhd, 0)}</Amount> overdue &gt;30d · {k.overdue_count} accts</span>} />
           <KpiCard accent={ACCENTS.amber} icon={Boxes} label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'} to="/inventory"
             basis={accOnly ? 'Accessories items with under 30 days of stock cover, sold-out items with sales in the last 90 days included · the latest stock snapshot' : undefined}
-            value={<CountUp value={k.low_stock_count} />}
+            value={<CountUp id="dashboard.low_stock" value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
-        </motion.div>
+        </KpiRow>
       )}
 
       {/* This month, day by day — daily sales + pace vs target + the cash / credit split, all Accessories ex-VAT */}
@@ -479,8 +624,12 @@ export default function Dashboard() {
                       : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300')}>
                     {data.pace.target_pct}% of {bhd(data.pace.target_bhd, 0)} target so far
                   </span>
+                ) : me?.role === 'admin' ? (
+                  <Link to="/settings" className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground">
+                    Set a monthly target in Settings <ArrowRight size={12} aria-hidden="true" />
+                  </Link>
                 ) : (
-                  <span className="text-xs text-muted-foreground">Set a monthly target in Settings →</span>
+                  <span className="text-xs text-muted-foreground">No monthly target set</span>
                 )}
               </>)}
               <div className="flex overflow-hidden rounded-lg border text-[12px] font-semibold">
@@ -495,7 +644,7 @@ export default function Dashboard() {
             </div>
           </div>
           {dailyMode === 'daily' ? (
-            <ResponsiveContainer width="100%" height={190}>
+            <ChartBox id="dashboard.daily" height={190}>{(m) => (
               <BarChart data={data.daily_mtd} margin={{ top: 18, right: 8, left: 8, bottom: 0 }}>
                 <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
                   tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -511,15 +660,15 @@ export default function Dashboard() {
                   <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
                     label={{ value: `target per business day ${bhd(dailyTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
                 )}
-                <Bar dataKey={barKey} radius={[4, 4, 0, 0]} maxBarSize={26}>
-                  {data.daily_mtd.map((r, i) => (
+                <Bar {...m} dataKey={barKey} radius={[4, 4, 0, 0]} maxBarSize={26}>
+                  {data.daily_mtd!.map((r, i) => (
                     <Cell key={i} fill={dailyTarget && Number(r.acc_net_bhd ?? r.acc_bhd ?? 0) >= dailyTarget ? '#059669' : '#7c3aed'} />
                   ))}
                 </Bar>
               </BarChart>
-            </ResponsiveContainer>
+            )}</ChartBox>
           ) : (
-            <ResponsiveContainer width="100%" height={190}>
+            <ChartBox id="dashboard.cumulative" height={190}>{(m) => (
               <ComposedChart data={cumSeries} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
                 <defs>
                   <linearGradient id="cumFill" x1="0" y1="0" x2="0" y2="1">
@@ -535,13 +684,13 @@ export default function Dashboard() {
                   formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? (exVat ? 'Accessories MTD ex-VAT' : 'Accessories MTD') : 'Target to date (business days)']}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-                <Area type="monotone" dataKey="cum_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#cumFill)" />
+                <Area {...m} type="monotone" dataKey="cum_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#cumFill)" />
                 {dailyTarget && (
-                  <Line type="monotone" dataKey="cum_target" stroke="#d97706" strokeWidth={2}
+                  <Line {...m} type="monotone" dataKey="cum_target" stroke="#d97706" strokeWidth={2}
                     strokeDasharray="6 4" dot={false} />
                 )}
               </ComposedChart>
-            </ResponsiveContainer>
+            )}</ChartBox>
           )}
           {split && (split.rows.length > 0 || split.giveaway_qty > 0) && (
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3 text-[13px]">
@@ -604,10 +753,10 @@ export default function Dashboard() {
             {partialMonth ? ` · ${partialMonth.m} so far (to ${dayLabel(partialMonth.through)}), the lighter bar` : ''}
             {monthTarget ? ' · the line is the monthly target' : ''}
           </div>
-          {isLoading ? <Skeleton className="h-[260px]" /> : trendAcc.length === 0 ? (
+          {trendAcc.length === 0 ? (
             <p className="grid h-[260px] place-items-center text-sm text-muted-foreground">Monthly Accessories sales could not be read just now.</p>
           ) : (
-            <ResponsiveContainer width="100%" height={260}>
+            <ChartBox id="dashboard.trend" height={260}>{(m) => (
               <BarChart data={trendAcc} margin={{ top: 18, right: 8, left: 8, bottom: 0 }}>
                 <XAxis dataKey="m" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false}
@@ -623,33 +772,33 @@ export default function Dashboard() {
                   <ReferenceLine y={monthTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
                     label={{ value: `monthly target ${bhd(monthTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
                 )}
-                <Bar dataKey="acc_net_bhd" radius={[4, 4, 0, 0]} maxBarSize={34}>
+                <Bar {...m} dataKey="acc_net_bhd" radius={[4, 4, 0, 0]} maxBarSize={34}>
                   {/* the month still running is lighter: it is not a whole month yet */}
                   {trendAcc.map((r, i) => <Cell key={i} fill={r.partial ? '#c4b5fd' : '#7c3aed'} />)}
                 </Bar>
               </BarChart>
-            </ResponsiveContainer>
+            )}</ChartBox>
           )}
         </Card>
 
         <Card className="p-5">
           <div className="font-display text-base font-semibold">Sales by channel</div>
           <div className="mb-2 text-xs text-muted-foreground">Accessories · ex-VAT · month to date · B2C = Causeway + Roadshow</div>
-          {isLoading ? <Skeleton className="h-[220px]" /> : !chTile ? (
+          {!chTile ? (
             <p className="text-sm text-muted-foreground">Not available just now · the Command Centre figures did not load.</p>
           ) : (
             <div title={chTile.basis}>
               <div className="relative">
-                <ResponsiveContainer width="100%" height={168}>
+                <ChartBox id="dashboard.channels" height={168}>{(m) => (
                   <PieChart>
-                    <Pie data={chips.map((c) => ({ name: c.label, value: Number(c.value) || 0 }))}
+                    <Pie {...m} data={chips.map((c) => ({ name: c.label, value: Number(c.value) || 0 }))}
                       dataKey="value" nameKey="name" innerRadius={54} outerRadius={78} paddingAngle={2} stroke="none">
                       {chips.map((c, i) => <Cell key={i} fill={c.label === 'B2C' ? '#8b5cf6' : '#3b82f6'} />)}
                     </Pie>
                     <Tooltip formatter={(v) => [bhd(Number(v), 0), 'Accessories ex-VAT']}
                       contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                   </PieChart>
-                </ResponsiveContainer>
+                )}</ChartBox>
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                   <div className="font-display text-lg font-extrabold tabular-nums">{bhd(chTile.value, 0)}</div>
                   <div className="text-[10px] uppercase tracking-wide text-muted-foreground">ex-VAT · MTD</div>
@@ -685,22 +834,22 @@ export default function Dashboard() {
             The kickback basis: accessories only, giveaways excluded, SIM never counts{smScope?.data_through ? ` · sales data to ${fmtDate(smScope.data_through)}` : ''}.
             The all-time, all-division rollup is on the Sales page.
           </div>
-          {isLoading ? <Skeleton className="h-[260px]" /> : smScope?.error ? (
+          {smScope?.error ? (
             <p className="text-sm text-destructive">{smScope.error}</p>
           ) : salesmen.length === 0 ? (
             <p className="text-sm text-muted-foreground">No accessories sales loaded for this month yet.</p>
           ) : (
-            <ResponsiveContainer width="100%" height={260}>
+            <ChartBox id="dashboard.salesmen" height={260}>{(m) => (
               <BarChart data={salesmen} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
                 <XAxis type="number" hide tickFormatter={(v) => bhd(v, 0)} />
                 <YAxis type="category" dataKey="name" width={110} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
                 <Tooltip formatter={(value, _name, item) => [`${bhd(Number(value), 3)} ex-VAT · ${bhd(Number((item?.payload as { gross?: number } | undefined)?.gross || 0), 3)} gross`, 'Accessories']} cursor={{ fill: 'hsl(var(--accent))' }}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-                <Bar dataKey="rev" radius={[0, 6, 6, 0]}>
+                <Bar {...m} dataKey="rev" radius={[0, 6, 6, 0]}>
                   {salesmen.map((s, i) => <Cell key={i} fill={s.no_target ? '#c4b5fd' : i === 0 ? '#7c3aed' : '#a78bfa'} />)}
                 </Bar>
               </BarChart>
-            </ResponsiveContainer>
+            )}</ChartBox>
           )}
         </Card>
 
@@ -709,9 +858,7 @@ export default function Dashboard() {
             <Crown size={18} className="text-amber-500" /> Top customers
           </div>
           <div className="mb-3 text-[12px] text-muted-foreground">Accessories · ex-VAT · month to date · Cash Customer left out</div>
-          {isLoading ? (
-            <div className="space-y-3">{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-10" />)}</div>
-          ) : topCustomersFailed ? (
+          {topCustomersFailed ? (
             <p className="text-sm text-muted-foreground">Top customers could not be read just now.</p>
           ) : topCustomers.length === 0 ? (
             <p className="text-sm text-muted-foreground">No named-account Accessories sales this month.</p>
@@ -769,6 +916,8 @@ export default function Dashboard() {
           </div>
           )}
         </Card>
+      )}
+      </FadeIn>
       )}
     </div>
   )
