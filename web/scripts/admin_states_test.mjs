@@ -235,5 +235,13 @@ await check('Data upload: a load, commit, undo or remove refreshes every report 
   ok(dp.includes("coverageState === 'error'") && dp.includes("batchState === 'error'"), 'the sources and the history say when they did not load')
 })
 
+await check('Inventory and Sales: a page-shaped skeleton, never a 60vh block', () => {
+  for (const [f, name] of [['pages/Inventory.tsx', 'InventorySkeleton'], ['pages/Sales.tsx', 'SalesSkeleton']]) {
+    const src = text(f)
+    ok(!src.includes('h-[60vh]'), `${f}: no 60vh block`)
+    ok(src.includes(`function ${name}(`) && src.includes(`<${name} />`), `${f}: ${name}`)
+  }
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

@@ -5,6 +5,9 @@ import { apiGet } from '@/lib/api'
 import { bhd, fmtDate, num } from '@/lib/format'
 import { deadUncostedNote } from '@/lib/basisText'
 import { cn } from '@/lib/utils'
+import { panelState } from '@/lib/dataState'
+import { useSkeletonFade } from '@/lib/motionOnce'
+import { FadeIn } from '@/lib/motionKit'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
@@ -110,9 +113,32 @@ const cols: Column<Row>[] = [
   },
 ]
 
+/** The page while its one read is under way: the stat tiles, a card and the table in their places (it was a
+ *  60vh block, so everything jumped when the figures came). */
+function InventorySkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading inventory">
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-6">
+        {[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-[88px] rounded-xl" />)}
+      </div>
+      <Skeleton className="mb-4 h-[132px] rounded-xl" />
+      <div className="mb-3 flex items-center gap-2">
+        <Skeleton className="h-9 w-56" />
+        <Skeleton className="ml-auto h-9 w-28" />
+      </div>
+      <div className="space-y-2 rounded-xl border p-3">
+        <Skeleton className="h-8" />
+        {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => <Skeleton key={i} className="h-9" />)}
+      </div>
+    </div>
+  )
+}
+
 export default function Inventory() {
   const [params] = useSearchParams()
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
+  const { data, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
+  const state = panelState({ data, isError })
+  const fade = useSkeletonFade(data !== undefined)
   const s = data?.by_status || {}
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
   const sc = data?.stock_cost
@@ -122,12 +148,12 @@ export default function Inventory() {
   return (
     <div>
       <PageHeader title="Inventory" subtitle="Velocity-aware stock health — what to reorder, what's stuck" />
-      {isError && !data ? (
+      {state === 'error' ? (
         <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load inventory." />
-      ) : isLoading || !data ? (
-        <Skeleton className="h-[60vh]" />
+      ) : state === 'loading' || !data ? (
+        <InventorySkeleton />
       ) : (
-        <>
+        <FadeIn on={fade}>
           <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-6">
             {!showCost ? null : sc ? (
               <Stat label="Stock value (at cost)" value={bhd(sc.cost_value_bhd, 0)} tone="violet"
@@ -254,7 +280,7 @@ export default function Inventory() {
               : r.status === 'low_stock' ? 'bg-amber-50/50 dark:bg-amber-500/5' : undefined)}
             empty="No stock records."
           />
-        </>
+        </FadeIn>
       )}
     </div>
   )
