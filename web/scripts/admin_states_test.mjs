@@ -225,5 +225,15 @@ await check('Stock moves: the daily chart and the transfers say when they did no
   ok(!sm.includes("'From main →'") && !sm.includes("'→ Into main'") && !/\? '→' : '←'/.test(sm), 'direction controls draw icons')
 })
 
+await check('Data upload: a load, commit, undo or remove refreshes every report and the freshness chip; skeletons, not "Loading…"', () => {
+  const dp = text('pages/DataPage.tsx')
+  ok(dp.includes('<PageHeader title="Data upload"'), 'the menu label')
+  ok(dp.includes("import { refreshAfterDataChange } from '@/lib/dataRefresh'"), 'the one helper')
+  ok((dp.match(/refreshAfterDataChange\(qc\)/g) || []).length >= 4, 'upload, commit, undo and remove')
+  ok(!/invalidateQueries\(\{ queryKey: \['data', 'coverage'\] \}\)/.test(dp), 'no coverage-only refresh left')
+  ok(!dp.includes('Loading…'), 'skeleton rows instead of "Loading…"')
+  ok(dp.includes("coverageState === 'error'") && dp.includes("batchState === 'error'"), 'the sources and the history say when they did not load')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

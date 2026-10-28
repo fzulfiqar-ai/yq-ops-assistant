@@ -5,10 +5,14 @@ import {
 } from 'lucide-react'
 import { apiGet, apiUpload, apiPost, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { panelState } from '@/lib/dataState'
+import { refreshAfterDataChange } from '@/lib/dataRefresh'
+import { InlineError } from '@/lib/inlineError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
+import { Skeleton } from '@/components/ui/skeleton'
 
 // Client-side label hint for dropped files (mirrors scripts/ingest.classify()); backend is authoritative.
 // `focus` is the EXACT Focus report name (matches what you export) so there's no confusion.
@@ -158,7 +162,9 @@ function BatchPreview({ preview, onDone }: { preview: PreviewResult; onDone: () 
     try {
       const r = await apiPost<CommitResult>(`/ingest/batches/${s.batch_id}/commit`, { acknowledged: Array.from(acked) })
       setCommit(r)
-      if (r.ok) { qc.invalidateQueries({ queryKey: ['data', 'coverage'] }); qc.invalidateQueries({ queryKey: ['ingest', 'batches'] }) }
+      // the drop is live: every report, the freshness chip and the Command Centre read again (lib/dataRefresh.ts) —
+      // a commit used to refresh only this page's coverage and history, the rest kept old figures for up to 5 min
+      if (r.ok) void refreshAfterDataChange(qc)
     } catch (e) {
       setCommit({ ok: false, error: e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 200)}` : 'Commit failed.' })
     } finally { setBusy(null) }
@@ -352,16 +358,18 @@ function BatchPreview({ preview, onDone }: { preview: PreviewResult; onDone: () 
 function BatchHistory() {
   const qc = useQueryClient()
   const [msg, setMsg] = useState('')
-  const { data, isLoading } = useQuery({
+  const { data, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['ingest', 'batches'],
     queryFn: () => apiGet<{ batches: BatchRow[]; migration_applied: boolean; error?: string }>('/ingest/batches?limit=15'),
   })
+  const batchState = panelState({ data, isError }, (d) => !d.batches?.length)
   const undo = useMutation({
     mutationFn: (id: number) => apiPost<{ ok: boolean; error?: string; result?: { targets: Record<string, Record<string, number>> } }>(`/ingest/batches/${id}/undo`, {}),
     onSuccess: (r, id) => {
       setMsg(r.ok ? `Batch ${id} undone: its rows are gone and the rows it replaced are back.` : r.error || 'Undo refused.')
-      qc.invalidateQueries({ queryKey: ['ingest', 'batches'] })
-      qc.invalidateQueries({ queryKey: ['data', 'coverage'] })
+      // an undo changes the data as much as the commit did: every report and the freshness chip read again
+      if (r.ok) void refreshAfterDataChange(qc)
+      else qc.invalidateQueries({ queryKey: ['ingest', 'batches'] })
     },
     onError: (e) => setMsg(e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 160)}` : 'Undo failed.'),
   })
@@ -379,8 +387,18 @@ function BatchHistory() {
         {data?.error && <Badge tone="rose">batch importer unavailable</Badge>}
       </div>
       {data?.error && <div className="mt-2 text-[13px] text-rose-700">{data.error}</div>}
-      {isLoading && <div className="mt-2 text-[13px] text-muted-foreground">Loading…</div>}
-      {data && rows.length === 0 && <div className="mt-2 text-[13px] text-muted-foreground">No batches yet. Tick "Preview first" above to use the batch importer.</div>}
+      {batchState === 'loading' && (
+        <div className="mt-3 space-y-2" aria-busy="true" aria-label="Loading the batch history">
+          <Skeleton className="h-4 w-full max-w-xl" />
+          {[0, 1, 2].map((i) => <Skeleton key={i} className="h-9" />)}
+        </div>
+      )}
+      {batchState === 'error' && (
+        <div className="mt-3">
+          <InlineError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the batch history." />
+        </div>
+      )}
+      {batchState === 'empty' && !data?.error && <div className="mt-2 text-[13px] text-muted-foreground">No batches yet. Tick "Preview first" above to use the batch importer.</div>}
       {rows.length > 0 && (
         <div className="mt-3 overflow-x-auto">
           <table className="w-full min-w-[640px] text-[12.5px]">
@@ -448,7 +466,10 @@ export default function DataPage() {
   // Off by default: the proven refresh path stays the default until the batch replay is signed off.
   const [batchMode, setBatchMode] = useState(false)
 
-  const { data: cov } = useQuery({ queryKey: ['data', 'coverage'], queryFn: () => apiGet<Coverage[]>('/data/coverage') })
+  const covQuery = useQuery({ queryKey: ['data', 'coverage'], queryFn: () => apiGet<Coverage[]>('/data/coverage') })
+  const cov = covQuery.data
+  // a failed read says so with Retry (the panel used to go on saying it was loading, for good)
+  const coverageState = panelState({ data: cov, isError: covQuery.isError })
   const { data: purgeTargets } = useQuery({ queryKey: ['purge-targets'], queryFn: () => apiGet<{ targets: PurgeTarget[] }>('/ingest/purge-targets') })
 
   // ── Fix a bad upload: remove a report's rows for a date (or its null-date junk) ──
@@ -471,7 +492,11 @@ export default function DataPage() {
         report: pReport, date_from: pBlanks ? null : pFrom, date_to: pBlanks ? null : (pTo || null), blanks: pBlanks,
       })
       if (r.error) setPMsg(r.error)
-      else { setPMsg(`Removed ${r.deleted} row(s). Now re-upload the correct ${tgt.label} export above.`); qc.invalidateQueries({ queryKey: ['data', 'coverage'] }) }
+      else {
+        setPMsg(`Removed ${r.deleted} row(s). Now re-upload the correct ${tgt.label} export above.`)
+        // the rows are gone from every report too, not just from the coverage panel
+        void refreshAfterDataChange(qc)
+      }
     } catch (e) {
       setPMsg(e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 120)}` : 'Remove failed.')
     } finally { setPBusy(false) }
@@ -502,7 +527,9 @@ export default function DataPage() {
         if (partialOk) form.append('partial_ok', 'true')
         setResult(await apiUpload<IngestResult>('/ingest', form))
         setReplaceOk(false); setPartialOk(false)
-        qc.invalidateQueries({ queryKey: ['data', 'coverage'] })
+        // a refresh (even one that needs attention may have loaded some reports): every report, the freshness
+        // chip and the Command Centre read again — they used to keep the old figures for up to 5 minutes
+        void refreshAfterDataChange(qc)
       }
       setFiles([])
     } catch (e) {
@@ -516,17 +543,24 @@ export default function DataPage() {
 
   return (
     <div>
-      <PageHeader title="Data" subtitle="Upload the day's Focus exports — verified refresh, no duplicates" />
+      <PageHeader title="Data upload" subtitle="Upload the day's Focus exports — verified refresh, no duplicates" />
 
       {/* Zoho-style coverage panel: what's loaded and how fresh */}
       <Card className="mb-4 p-5">
         <div className="mb-3 text-sm font-semibold">Data sources</div>
-        {groups.map((g) => (
+        {coverageState === 'error' ? (
+          <InlineError error={covQuery.error} onRetry={() => covQuery.refetch()} isRetrying={covQuery.isFetching}
+            fallback="Could not read which reports are loaded." />
+        ) : groups.map((g) => (
           <div key={g} className="mb-3 last:mb-0">
             <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
               {g === 'daily' ? 'Daily reports' : 'Weekly reports'}
             </div>
             <div className="space-y-1.5">
+              {/* one row's shape per report while the panel loads (six daily, three weekly) */}
+              {coverageState === 'loading' && Array.from({ length: g === 'daily' ? 6 : 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-[19px]" />
+              ))}
               {(cov || []).filter((r) => r.cadence === g).map((r) => (
                 <div key={r.report} className="flex items-center gap-2 text-[13px]">
                   <span className={cn('h-2 w-2 shrink-0 rounded-full', DOT[r.status])} />
@@ -535,7 +569,6 @@ export default function DataPage() {
                   <span className="ml-auto shrink-0 text-muted-foreground">{freshness(r)}</span>
                 </div>
               ))}
-              {!cov && <div className="text-[13px] text-muted-foreground">Loading…</div>}
             </div>
           </div>
         ))}
