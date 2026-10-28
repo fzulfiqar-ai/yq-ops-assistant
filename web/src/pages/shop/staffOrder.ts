@@ -74,6 +74,41 @@ export function afterOrderKeys(basketKey: string | null): (readonly string[])[] 
   ]
 }
 
+export interface Minimum {
+  value: number
+  remaining: number
+  met: boolean
+  /** how far along, 0-100 */
+  pct: number
+}
+
+/**
+ * The wholesale minimum for the order bar and the slip: the server's (quote.minimum) once it has
+ * priced the cart, the list-price estimate until then; null when there is no minimum to draw.
+ */
+export function minimumOf(
+  total: number,
+  minBhd: number,
+  quote?: { minimum?: { value_bhd: number; remaining_bhd: number; met: boolean } | null } | null,
+): Minimum | null {
+  const m = quote?.minimum
+  const value = Number(m?.value_bhd ?? minBhd) || 0
+  if (value <= 0) return null
+  const remaining = m ? Number(m.remaining_bhd) || 0 : Math.max(0, value - total)
+  const met = m ? Boolean(m.met) : remaining <= 0
+  return { value, remaining, met, pct: met ? 100 : Math.max(0, Math.min(100, ((value - remaining) / value) * 100)) }
+}
+
+/**
+ * The compact order bar's one line under the total: how far the order is from the minimum while it
+ * is short of it (the thing to act on), otherwise whose order it is and its size.
+ */
+export function orderBarLine(o: { shop: string; lines: number; units: number; minimum: Minimum | null }): string {
+  const lines = `${o.lines} ${o.lines === 1 ? 'line' : 'lines'}`
+  if (o.minimum && !o.minimum.met) return `BHD ${o.minimum.remaining.toFixed(3)} to the minimum · ${lines}`
+  return `${o.shop || 'No shop picked yet'} · ${lines} · ${o.units} pcs`
+}
+
 /**
  * Picking a shop: do the lines on screen move into that shop's cart? Only into an EMPTY cart, and
  * only from the cart of "no shop picked yet" ('staff') or from the checkout's "Change" (the rep is

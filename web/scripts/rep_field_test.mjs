@@ -375,6 +375,25 @@ check("the tabs' features are the routes' own (App.tsx <Gate feature>): a rename
   eq(Object.keys(map).sort(), ['/customers', '/shop', '/shop-orders', '/today'])
 })
 
+/* ── 14. the compact order bar: the minimum as a line, one line of words under the total ── */
+check('the wholesale minimum: the server\'s when it has priced the cart, the list-price estimate until then', () => {
+  const min = need(O, 'minimumOf')
+  eq(min(15, 20, null), { value: 20, remaining: 5, met: false, pct: 75 }, 'the estimate, short of it')
+  eq(min(25, 20, null), { value: 20, remaining: 0, met: true, pct: 100 }, 'the estimate, past it')
+  eq(min(15, 20, { minimum: { value_bhd: 30, remaining_bhd: 12, met: false } }), { value: 30, remaining: 12, met: false, pct: 60 }, "the server's own")
+  eq(min(15, 20, { minimum: { value_bhd: 20, remaining_bhd: 0, met: true } }).met, true)
+  eq([min(15, 0, null), min(15, 0, { minimum: null })], [null, null], 'no minimum: nothing to draw')
+})
+
+check('the order bar\'s one line: how far from the minimum while short of it, else the shop and the order\'s size', () => {
+  const line = need(O, 'orderBarLine')
+  const short = { value: 20, remaining: 4.5, met: false, pct: 77.5 }
+  const met = { value: 20, remaining: 0, met: true, pct: 100 }
+  eq(line({ shop: 'Alpha Mobile', lines: 3, units: 24, minimum: short }), 'BHD 4.500 to the minimum · 3 lines')
+  eq(line({ shop: 'Alpha Mobile', lines: 3, units: 24, minimum: met }), 'Alpha Mobile · 3 lines · 24 pcs')
+  eq(line({ shop: '', lines: 1, units: 6, minimum: null }), 'No shop picked yet · 1 line · 6 pcs')
+})
+
 /* ── 11–13. the catalog keeps up with typing: the index at idle, a plain filter until then ── */
 const B = await load('pages/shop/staffBrowse.ts')
 const CAT = [

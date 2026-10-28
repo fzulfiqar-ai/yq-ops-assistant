@@ -10,6 +10,7 @@ import { peekCart, useCart, writeCart } from '@/lib/cart'
 import { useSeo } from '@/lib/seo'
 import { getStaffCatalog, postStaffQuote, type OrderResponse, type ShopItem, type StaffCustomer } from '@/lib/shopApi'
 import { buildIndex, searchItems, type SearchIndex } from '@/market/lib/search'
+import { useScrollDirection } from '@/market/shell/useScrollDirection'
 import { parseToken, resolveQuick, splitList } from '@/market/lib/quickParse'
 import { codeKey } from '@/market/lib/format'
 import {
@@ -32,7 +33,7 @@ import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
 import { plainSearch, whenIdle } from './staffBrowse'
 import { FILTER_CHIPS, isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
-import { afterOrderKeys, carryCart } from './staffOrder'
+import { afterOrderKeys, carryCart, minimumOf, orderBarLine } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
 import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
@@ -231,6 +232,10 @@ export function StaffCatalog() {
   const [filters, setFilters] = useState<StaffFilters>(() => (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
   const [sort, setSort] = useState<StaffSort>('featured')
   const [filtersOpen, setFiltersOpen] = useState(false)
+  // the tools step out of the way while the list scrolls down — never while the field has the keyboard
+  const scrollDir = useScrollDirection()
+  const [typing, setTyping] = useState(false)
+  const toolsTucked = scrollDir === 'down' && !typing
   const [view, setViewState] = useState<View>(readView)
   const [pageN, setPageN] = useState({ key: '', n: CHUNK })
   const [highlight, setHighlight] = useState(0)
@@ -378,7 +383,8 @@ export function StaffCatalog() {
   }, [searched, cat])
 
   const shown = useMemo(() => {
-    let r = searched.filter((i) => passFilters(i) && (cat === 'All' || (i.category || 'OTHER') === cat))
+    // a typed list adds exact codes: the category row is not on screen then, so it does not apply
+    let r = searched.filter((i) => passFilters(i) && (quick || cat === 'All' || (i.category || 'OTHER') === cat))
     const order = new Map(items.map((i, n) => [i.item_code, n]))
     const shelf = (a: ShopItem, b: ShopItem) => (order.get(a.item_code) ?? 0) - (order.get(b.item_code) ?? 0)
     if (sort === 'price_asc') r = r.slice().sort((a, b) => byPrice(1)(a, b) || shelf(a, b))
@@ -387,7 +393,7 @@ export function StaffCatalog() {
     else if (sort === 'newest') r = r.slice().sort((a, b) => Number(hasBadge(b, 'new')) - Number(hasBadge(a, 'new')) || shelf(a, b))
     // stable partition: what can be sold today, then the sold-out lines, each in the order above
     return [...r.filter((i) => !isSoldOut(i)), ...r.filter((i) => isSoldOut(i))]
-  }, [searched, passFilters, cat, sort, items])
+  }, [searched, passFilters, quick, cat, sort, items])
 
   const firstOut = shown.findIndex((i) => isSoldOut(i))
   const soldCount = firstOut < 0 ? 0 : shown.length - firstOut
@@ -424,6 +430,7 @@ export function StaffCatalog() {
   const { quote, quoting, error: quoteError, fresh: quoteFresh, retry: retryQuote } = useQuote(true, cart.lines, coupon, '', fetchQuote)
   const estimate = useMemo(() => cart.lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0), [cart.lines, itemsByCode])
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
+  const minimum = minimumOf(total, minBhd, quote)
 
   /* ── actions ── */
   const addLine = useCallback((it: ShopItem, qty?: number | null) => cart.set(it.item_code, Math.max(minQtyOf(it), qty || 0)), [cart])
@@ -615,8 +622,18 @@ export function StaffCatalog() {
 
           {age && <p className={cn('mt-2 text-[11.5px]', age.stale ? 'font-semibold text-amber-700' : 'text-[#6b6480]')}>{age.label}{age.stale ? ' — check before promising a quantity' : ''}</p>}
 
-          {/* ── the tools, pinned: one field for search and quick add, one chip row ── */}
-          <div className="sticky z-20 -mx-4 mt-2 border-b border-[#E9E4EF] bg-[#F9F7F3]/95 px-4 pb-2 pt-2 backdrop-blur-md lg:-mx-6 lg:px-6 xl:mx-0 xl:rounded-b-2xl xl:px-0" style={{ top: TOPBAR }}>
+          {/* ── the tools, pinned: one field for search and quick add, one chip row. Under 1280 px they
+              step up behind the header while the list scrolls down and come back on scroll up (never
+              while the field has the keyboard): transform and opacity, no height animation, so the
+              rows get the room. Solid on a touch screen (a blur recomputed every scroll frame, for a
+              95% opaque bar); a mouse keeps the translucent glass. ── */}
+          <div
+            className={cn(
+              'sticky z-20 -mx-4 mt-2 border-b border-[#E9E4EF] bg-[#F9F7F3] px-4 pb-2 pt-2 transition-[transform,opacity] duration-200 motion-reduce:transition-none lg:-mx-6 lg:px-6 xl:mx-0 xl:rounded-b-2xl xl:px-0 [@media(pointer:fine)]:bg-[#F9F7F3]/95 [@media(pointer:fine)]:backdrop-blur-md',
+              toolsTucked ? 'ease-[cubic-bezier(.4,0,1,1)] max-xl:pointer-events-none max-xl:-translate-y-full max-xl:opacity-0' : 'ease-[cubic-bezier(.22,1,.36,1)]',
+            )}
+            style={{ top: TOPBAR }}
+          >
             <div className="relative">
               <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#a8a2bb]" aria-hidden="true" />
               <input
@@ -624,6 +641,8 @@ export function StaffCatalog() {
                 value={qRaw}
                 onChange={(e) => setQRaw(e.target.value)}
                 onKeyDown={onSearchKey}
+                onFocus={() => setTyping(true)}
+                onBlur={() => setTyping(false)}
                 placeholder="Search, or add a list: C18 3, UK15 6"
                 aria-label="Search the catalog, or type codes and quantities to add them"
                 aria-describedby="yq-staff-search-hint"
@@ -644,26 +663,28 @@ export function StaffCatalog() {
             <p id="yq-staff-search-hint" className="sr-only">
               Enter adds the highlighted line; a list like C18 3, UK15 6 adds every exact code. Arrow keys move the highlight.
             </p>
-            {quick && (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-live="polite">
+            {quick ? (
+              // a list being typed takes the chip row's place, in one row that scrolls sideways and is
+              // exactly as tall: the bar never grows while the rep types (it wrapped, line after line).
+              // The list ignores the category while it is a list: it adds exact codes.
+              <div className="-mx-4 mt-0.5 flex h-[50px] items-center gap-1.5 overflow-x-auto px-4 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0" aria-live="polite">
                 {quickRows.map((r, n) => (
                   <span
                     key={`${r.raw}-${n}`}
                     className={cn(
-                      'rounded-lg px-2 py-1 text-[11.5px] font-semibold tabular-nums',
+                      'shrink-0 whitespace-nowrap rounded-lg px-2 py-1 text-[11.5px] font-semibold tabular-nums',
                       r.item ? 'bg-[#EEE8F4] text-[#5A3478]' : r.soldOut ? 'bg-[#fdecef] text-[#9f1239]' : 'bg-[#f4f3f8] text-[#6b6480]',
                     )}
                   >
                     {r.item ? `${r.item.item_code} × ${Math.max(minQtyOf(r.item), r.qty || 0)}` : r.soldOut ? `${r.soldOut.item_code} sold out` : `${r.raw} — not a code`}
                   </span>
                 ))}
-                <span className="text-[11.5px] text-[#6b6480]">
+                <span className="shrink-0 whitespace-nowrap pr-4 text-[11.5px] text-[#6b6480]">
                   {quickRows.some((r) => r.item) ? 'Enter adds the exact codes' : 'No exact code yet — pick from the list below'}
                 </span>
               </div>
-            )}
-
-            {/* py-1.5: the scroll box clips, and each chip's 44 px hit area (HIT) reaches past its 36 px */}
+            ) : (
+            /* py-1.5: the scroll box clips, and each chip's 44 px hit area (HIT) reaches past its 36 px */
             <div className="-mx-4 mt-0.5 flex items-center gap-1.5 overflow-x-auto px-4 py-1.5 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0">
               {cats.map((c) => (
                 <button
@@ -712,6 +733,7 @@ export function StaffCatalog() {
                 ))}
               </span>
             </div>
+            )}
           </div>
 
           {/* ── results ── */}
@@ -856,22 +878,22 @@ export function StaffCatalog() {
         </div>
       </div>
 
-      {/* ── the order bar, in the thumb zone (under 1280 px) ── */}
+      {/* ── the order bar, in the thumb zone (under 1280 px): one row, 53 px — the total, one line under
+          it (how far from the minimum while short of it, else the shop and the order's size) and
+          Review; the minimum itself is a 3 px line along the top edge. Solid: no blur on a phone. ── */}
       {hasCart && (
-        <div ref={setOrderBar} className="fixed right-0 z-30 border-t border-[#E9E4EF] bg-white/95 px-4 pb-2.5 pt-2 backdrop-blur-md xl:hidden" style={{ bottom: TABBAR, left: 'var(--yq-sidebar, 0px)' }}>
-          <div className="mx-auto max-w-[1600px]">
-            <MinimumRuler total={total} minBhd={minBhd} quote={quote} className="mb-2" />
-            <div className="flex items-center gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[11.5px] text-[#6b6480]">
-                  {sel ? <b className="font-semibold text-[#1A1428]">{sel.shop || sel.name}</b> : 'No shop picked yet'} · <span className="tabular-nums">{cart.items}</span> {cart.items === 1 ? 'line' : 'lines'} · <span className="tabular-nums">{cart.units}</span> pcs
-                </div>
-                <div className="font-display text-[17px] font-extrabold leading-tight tracking-[-0.015em] tabular-nums text-[#1A1428]">{bhd(total)}</div>
+        <div ref={setOrderBar} className="fixed right-0 z-30 border-t border-[#E9E4EF] bg-white px-4 py-1 xl:hidden" style={{ bottom: TABBAR, left: 'var(--yq-sidebar, 0px)' }}>
+          <MinimumRuler total={total} minBhd={minBhd} quote={quote} compact className="absolute inset-x-0 -top-px" />
+          <div className="mx-auto flex max-w-[1600px] items-center gap-3">
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="font-display text-[16px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1A1428]">{bhd(total)}</div>
+              <div className={cn('truncate text-[11px] tabular-nums', minimum && !minimum.met ? 'font-medium text-[#1A1428]' : 'text-[#6b6480]')}>
+                {orderBarLine({ shop: sel ? sel.shop || sel.name : '', lines: cart.items, units: cart.units, minimum })}
               </div>
-              <button type="button" onClick={() => setCartOpen(true)} className={cn('flex h-12 shrink-0 items-center gap-2 rounded-xl bg-[#6D4091] px-5 text-[14px] font-semibold text-white hover:bg-[#5A3478] active:scale-[.99]', RING)}>
-                <ShoppingBag size={17} aria-hidden="true" /> Review
-              </button>
             </div>
+            <button type="button" onClick={() => setCartOpen(true)} className={cn('flex h-11 shrink-0 items-center gap-2 rounded-xl bg-[#6D4091] px-5 text-[14px] font-semibold text-white transition-transform duration-[120ms] hover:bg-[#5A3478] active:scale-[.98] motion-reduce:transition-none', RING)}>
+              <ShoppingBag size={17} aria-hidden="true" /> Review
+            </button>
           </div>
         </div>
       )}
