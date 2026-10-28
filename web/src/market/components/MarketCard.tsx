@@ -573,7 +573,8 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         >
           <Heart size={compact ? 15 : 16} aria-hidden="true" className={cn(saved && 'fill-current')} />
         </button>
-        <button type="button" onClick={open} className="block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
+        {/* press feedback (motion M9): the photo gives a little under the finger before the sheet opens */}
+        <button type="button" onClick={open} className="block w-full transition-transform duration-1 ease-m active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
           <div ref={imgWrap}>
             <ProductImage
               item={item}
