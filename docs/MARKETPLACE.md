@@ -624,6 +624,17 @@ truthful "Deal" badge · `moq` / `pack_size` on SKUs that ship in packs · photo
 
 ## Release log
 
+- **Polish, ship 1 (28-Oct-2026, branch `worktree-polish-market`, `6258a44` → `e15a774`, released on the
+  owner's go)** — smoothness and honesty. The photo fade-in, Back that lands where you were, the page
+  glide with page-shaped skeletons (`RouteOutlet`, `lib/lazyPage` with an idle warm-up of the main
+  pages), the sheet slide on the shared `lib/sheet.ts`, the photo flight, the lightbox gestures,
+  scroll reveal v2 and lite mode, the light boot frame for slow networks; the cart never offers an
+  order on an unchecked or older cart's price (`lib/cartGate`, "≈" estimates); Back never leaves the
+  shop; one reload per release; boundaries per page, overlay and optional section; the look fixes
+  (category discs, whole slide headlines, display-box names, 360 px rows, the one-row dock). A
+  fresh whole-branch review found 1 critical and 8 important issues, all fixed with a failing test
+  first; 11 minors are listed in the ledger for later. The QA harness gained the smoothness and
+  motion guards (`scripts/qa/smooth.py`). The ops portal and the salesman app are ship 2.
 - **v3 (17 → 20-Sep-2026, branch `market-v3`, commits `0834a7e` → `99fe741` → `5759d53`)** —
   wholesale-first. Round 1: the four promises with Arabic + validation, `small_order_mode` in the
   catalog settings, `order_kind` end to end, the clearance tie-break in gap fillers, the campaign

@@ -152,7 +152,7 @@ def main() -> int:
     if R4:
         EXPECTED_BEFORE.update(R4_EXPECTED)
     for c in [c.strip() for c in args.new_checks.split(",") if c.strip()]:
-        EXPECTED_BEFORE.setdefault(c, "a check new in this review: the before build has no such behaviour")
+        EXPECTED_BEFORE.setdefault(c, "a check new in this review: the before build fails what this branch fixes")
     before, after = Path(args.before), Path(args.after)
     b, a = load(before), load(after)
     mb, ma = b["meta"] or {}, a["meta"] or {}
