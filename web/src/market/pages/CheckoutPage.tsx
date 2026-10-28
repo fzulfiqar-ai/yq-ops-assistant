@@ -41,7 +41,10 @@ const FORM_ID = 'yq-market-checkout'
 export default function CheckoutPage() {
   const navigate = useNavigate()
   const m = useMarket()
-  const { quote, quoting, gate, retryQuote, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
+  const { quote, quoting, gate, estimate, retryQuote, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
+  // the total is the server's: until a checked quote is on screen it is this cart's estimate, marked
+  // (it read "BHD 0.000" with the price check out or failed, S14)
+  const totalText = quote ? bhd(quote.total_bhd) : `≈ ${bhd(estimate)}`
   const { rep, data, itemsByCode, recognized } = m
   const words = useServerWords()
   const { viewport } = useShell()
@@ -240,7 +243,7 @@ export default function CheckoutPage() {
           {/* the order, folded */}
           <Link to="/cart" className="hit relative mt-1 flex items-center justify-between gap-3 rounded-md border border-line bg-surface px-3.5 py-2.5 text-sm hover:bg-plum-wash lg:mt-4">
             <span className="text-ink-2">{S.cart.summary(items, units)}</span>
-            <span className="font-display font-bold tnum text-ink">{bhd(quote?.total_bhd)}</span>
+            <span className="font-display font-bold tnum text-ink">{totalText}</span>
             <span className="font-semibold text-plum">{S.cart.edit}</span>
           </Link>
           {small && minimum && (
@@ -435,7 +438,7 @@ export default function CheckoutPage() {
           <div className="rounded-lg border border-line bg-surface p-4">
             <div className="flex items-baseline justify-between">
               <span className="text-sm text-ink-2">{S.cart.summary(items, units)}</span>
-              <span className="font-display text-xl font-extrabold tnum text-ink">{bhd(quote?.total_bhd)}</span>
+              <span className="font-display text-xl font-extrabold tnum text-ink">{totalText}</span>
             </div>
             {error && (
               <p role="alert" className="mt-3 rounded-sm bg-bad-soft px-3 py-2 text-xs font-medium text-bad">
@@ -512,7 +515,7 @@ export default function CheckoutPage() {
               and the money column was the one that gave way (BHD / 21.000 on two lines at 390) */}
           <div className="flex items-baseline justify-between gap-3">
             <span className="min-w-0 truncate text-xs text-ink-2">{S.cart.summary(items, units)}</span>
-            <span className="shrink-0 whitespace-nowrap font-display text-xl font-extrabold leading-tight tnum text-ink">{bhd(quote?.total_bhd)}</span>
+            <span className="shrink-0 whitespace-nowrap font-display text-xl font-extrabold leading-tight tnum text-ink">{totalText}</span>
           </div>
           <div className="mt-2">{submitBtn}</div>
           {sendHint('mt-1.5 text-2xs')}

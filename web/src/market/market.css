@@ -314,6 +314,15 @@
     position: relative;
     transition: opacity var(--m-d-2) var(--m-ease);
   }
+  /* A card's photo carries `transition-transform` for its hover zoom, and that utility (emitted later,
+   * same specificity) set transition-property to transform alone: card photos popped in over the
+   * tint instead of fading (final review, 28-Oct-2026). Two classes outrank any one utility; the
+   * transform keeps the zoom's own duration (duration-3). */
+  .m-photo .m-photo-img {
+    transition-property: opacity, transform;
+    transition-duration: var(--m-d-2), var(--m-d-3);
+    transition-timing-function: var(--m-ease), var(--m-ease);
+  }
   .m-photo[data-state='wait'] .m-photo-img {
     opacity: 0;
   }

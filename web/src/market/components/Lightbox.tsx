@@ -45,6 +45,14 @@ export function Lightbox({ photos, start = 0, alt, onClose }: { photos: Lightbox
   }, [onClose])
   const go = useCallback((dir: 1 | -1) => setI((v) => (v + dir + n) % n), [n])
 
+  // mounted = open: the lock, the layer and the focus are taken once, not again whenever the panel
+  // re-renders and hands in a new onClose (that re-ran them, like the sheet's; final review). The
+  // key handler reads the latest close and go from here.
+  const keys = useRef({ close, go })
+  useEffect(() => {
+    keys.current = { close, go }
+  }, [close, go])
+
   useEffect(() => {
     const unlock = lockScroll()
     const layer = pushLayer()
@@ -55,13 +63,13 @@ export function Lightbox({ photos, start = 0, alt, onClose }: { photos: Lightbox
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        close()
+        keys.current.close()
         return
       }
       if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
       // the arrow that points toward the reading direction's end is "next": → in English, ← in Arabic
       const forward = (e.key === 'ArrowRight') !== (document.documentElement.dir === 'rtl')
-      go(forward ? 1 : -1)
+      keys.current.go(forward ? 1 : -1)
     }
     document.addEventListener('keydown', onKey, true)
     return () => {
@@ -70,7 +78,7 @@ export function Lightbox({ photos, start = 0, alt, onClose }: { photos: Lightbox
       unlock()
       restore?.focus?.({ preventScroll: true })
     }
-  }, [close, go])
+  }, [])
 
   /* ── gestures: one transform, written straight to the photo ── */
   const g = useRef({ scale: 1, tx: 0, ty: 0, pointers: new Map<number, { x: number; y: number }>(), mode: '' as '' | 'swipe-x' | 'swipe-y' | 'pan' | 'pinch', sx: 0, sy: 0, stx: 0, sty: 0, dist: 0, startScale: 1, lastTap: 0, tapX: 0, tapY: 0 })

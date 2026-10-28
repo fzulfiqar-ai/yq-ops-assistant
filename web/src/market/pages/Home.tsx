@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { ErrorBoundary } from '../ui/ErrorBoundary'
 import { useNavigate, useParams } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { ContinueRestock } from '../components/ContinueRestock'
@@ -245,9 +246,13 @@ export default function Home() {
       </div>
 
       {phase2 ? (
-        <Suspense fallback={belowPlaceholder}>
-          <HomeBelow recent={recent} lastLines={lastLines} lastCodes={lastCodes} desktop={desktop} continueCard={continueTop ? null : continueCard} />
-        </Suspense>
+        // its own boundary: a chunk that cannot load (or a section that throws) leaves the painted top
+        // of Home in place instead of turning the whole page into the error card
+        <ErrorBoundary silent>
+          <Suspense fallback={belowPlaceholder}>
+            <HomeBelow recent={recent} lastLines={lastLines} lastCodes={lastCodes} desktop={desktop} continueCard={continueTop ? null : continueCard} />
+          </Suspense>
+        </ErrorBoundary>
       ) : (
         belowPlaceholder
       )}

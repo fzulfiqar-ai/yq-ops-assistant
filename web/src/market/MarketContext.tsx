@@ -75,6 +75,8 @@ export interface OrderValue {
   quoteError: string
   /** the minimum and whether the cart may be placed — from the quote, else from the payload */
   gate: CartGate
+  /** this cart at shelf prices: what a page shows, marked ≈, while no checked quote is on screen */
+  estimate: number
   /** ask the price server again (after a failed check) */
   retryQuote: () => void
   /** a retry is on its way */
@@ -292,7 +294,12 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
     },
     [attempt],
   )
-  const { quote, quoting, error: quoteError } = useQuote(Boolean(data), lines, coupon, ref || '', fetchQuote)
+  const { quote: lastQuote, quoting, error: quoteError } = useQuote(Boolean(data), lines, coupon, ref || '', fetchQuote)
+  // After a failed re-price the shared hook keeps the last good quote on screen (the portal wants
+  // that). Here it is an OLDER cart's price — "ready" and orderable on a cart that has since dropped
+  // under the minimum — so a failed check leaves no quote at all: the pages show this cart's
+  // estimate, marked ≈, and Try again (final review, 28-Oct-2026).
+  const quote = !quoting && quoteError ? null : lastQuote
   const retryQuote = useCallback(() => {
     setAttempt((n) => n + 1)
     setRetrying(true)
@@ -361,8 +368,8 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
   const search = useMemo<SearchValue>(() => ({ index, ensureIndex }), [index, ensureIndex])
 
   const order = useMemo<OrderValue>(
-    () => ({ quote, quoting, quoteError, gate, retryQuote, retrying, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
-    [quote, quoting, quoteError, gate, retryQuote, retrying, coupon, note, setNote, myOrders, refreshMyOrders],
+    () => ({ quote, quoting, quoteError, gate, estimate, retryQuote, retrying, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
+    [quote, quoting, quoteError, gate, estimate, retryQuote, retrying, coupon, note, setNote, myOrders, refreshMyOrders],
   )
 
   return (

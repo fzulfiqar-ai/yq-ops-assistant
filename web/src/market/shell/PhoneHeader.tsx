@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Search } from 'lucide-react'
 import { LangSwitch } from '../components/LangSwitch'
 import { SearchHints } from '../components/SearchField'
 import { useMarket } from '../MarketContext'
 import { readCustomer } from '../lib/device'
 import { initials } from '../lib/format'
+import { canGoBack } from '../lib/history'
 import { primeKeyboard } from '../lib/keyboard'
 import { NAV_ICONS } from '../lib/icons'
 import { S } from '../strings'
@@ -28,10 +29,10 @@ export function PhoneHeader() {
   const { title, searchBand } = useShell()
   const { rep } = useMarket()
   const navigate = useNavigate()
-  const location = useLocation()
-  // the first page of this visit (key 'default'): Back goes Home, never out of the shop — the old
-  // history.length test counted the WhatsApp / Google page the merchant came from and left the site
-  const back = () => (location.key !== 'default' ? navigate(-1) : navigate('/'))
+  // with no shop page behind this one (the entry the merchant arrived on, even after a filter chip
+  // replaced it): Back goes Home, never out of the shop (lib/history). The old history.length test
+  // counted the WhatsApp / Google page the merchant came from, and a key test missed replaces.
+  const back = () => (canGoBack(window.history.state) ? navigate(-1) : navigate('/'))
 
   if (searchBand) return <BandHeader title={title} onBack={back} />
 

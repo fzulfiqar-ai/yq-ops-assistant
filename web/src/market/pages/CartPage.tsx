@@ -208,7 +208,7 @@ export default function CartPage() {
       <dl className="space-y-2 text-sm">
         <div className="flex justify-between gap-3">
           <dt className="text-ink-2">{S.cart.subtotal}</dt>
-          <dd className="tnum">{bhd(quote?.subtotal_bhd ?? estimate)}</dd>
+          <dd className="tnum">{quote ? bhd(quote.subtotal_bhd ?? estimate) : `≈ ${bhd(estimate)}`}</dd>
         </div>
         {(quote?.discounts || []).map((d, i) => (
           <div key={d.rule_id ?? i} className="flex justify-between gap-3">
@@ -216,15 +216,19 @@ export default function CartPage() {
             <dd className="shrink-0 tnum text-ok">{bhdMinus(d.amount_bhd)}</dd>
           </div>
         ))}
-        <div className="flex justify-between gap-3">
-          <dt className="text-ink-2">{S.cart.delivery}</dt>
-          <dd className="tnum">{Number(quote?.delivery_bhd) > 0 ? bhd(quote?.delivery_bhd) : S.cart.free}</dd>
-        </div>
+        {/* delivery is the server's to say: no row until a checked quote is on screen (never "Free"
+            on an unchecked price, S14) */}
+        {quote && (
+          <div className="flex justify-between gap-3">
+            <dt className="text-ink-2">{S.cart.delivery}</dt>
+            <dd className="tnum">{Number(quote.delivery_bhd) > 0 ? bhd(quote.delivery_bhd) : S.cart.free}</dd>
+          </div>
+        )}
         <div className="flex items-baseline justify-between gap-3 border-t border-line-2 pt-2.5">
           <dt className="font-semibold">{S.cart.total}</dt>
           <dd>
             <span key={total} className="block font-display text-xl font-extrabold tnum anim-fade-in">
-              {bhd(total)}
+              {quote ? bhd(total) : `≈ ${bhd(total)}`}
             </span>
           </dd>
         </div>
@@ -485,7 +489,7 @@ export default function CartPage() {
                 <div className="truncate text-xs text-ink-2">{S.cart.summary(items, units)}</div>
               )}
               <span key={total} className="block truncate font-display text-lg font-extrabold leading-tight tnum text-ink anim-fade-in sm:text-xl">
-                {bhd(total)}
+                {quote ? bhd(total) : `≈ ${bhd(total)}`}
               </span>
             </div>
             {keepMode ? (

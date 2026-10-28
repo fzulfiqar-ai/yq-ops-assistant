@@ -77,6 +77,21 @@ export function initialFocus(panel: HTMLElement | null): void {
 const resist = (px: number) => 40 * (1 - 1 / (1 + px / 120))
 
 const INTERACTIVE = 'button,a[href],input,textarea,select,label,[role="button"],[role="tab"],[contenteditable="true"]'
+const FIELDS = 'textarea,input,select,[contenteditable="true"],[contenteditable=""]'
+
+/**
+ * May a downward touch that started on `target` pull the sheet whose scrolling body is `body`?
+ * Only when the body is at its top, the finger is not in a field (there it moves the caret or
+ * scrolls the field: the pasted list of Quick order is a 7-row textarea), and nothing scrollable
+ * between the finger and the body is scrolled down (that scroll is the finger's first).
+ */
+export function pullAllowed(target: Element | null, body: Element): boolean {
+  if (body.scrollTop > 0) return false
+  for (let el: Element | null = target; el && el !== body; el = el.parentElement) {
+    if (el.matches(FIELDS) || el.scrollTop > 0) return false
+  }
+  return true
+}
 
 /**
  * One sheet's drag. A plain object rather than hook state: it moves DOM nodes on every pointer
@@ -184,12 +199,14 @@ export class SheetDrag {
   private watch(body: HTMLElement): () => void {
     let startX = 0
     let startY = 0
+    let startTarget: Element | null = null
     let pulling = false
     let decided = false
     const onStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return
       startX = e.touches[0].clientX
       startY = e.touches[0].clientY
+      startTarget = e.target instanceof Element ? e.target : null
       pulling = false
       decided = false
     }
@@ -201,9 +218,9 @@ export class SheetDrag {
         const dy = y - startY
         if (Math.abs(dy) < 6 && dx < 6) return
         decided = true
-        // only a pull that is mostly DOWN, from the very top: a sideways swipe (a photo row) or an
-        // upward scroll stays the content's own
-        pulling = dy > dx && body.scrollTop <= 0 && this.begin(startY)
+        // only a pull that is mostly DOWN, from the very top: a sideways swipe (a photo row), an
+        // upward scroll, a field and an inner list still scrolled down stay the content's own
+        pulling = dy > dx && pullAllowed(startTarget, body) && this.begin(startY)
       }
       if (!pulling) return
       e.preventDefault()

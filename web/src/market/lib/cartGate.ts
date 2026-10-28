@@ -10,6 +10,9 @@ import type { Quote, QuoteMinimum, ShopSettings } from '@/lib/shopApi'
  *     (`min_order_bhd`, `small_order_mode`) against the shelf-price estimate — marked `estimated`;
  *   - nothing can be placed without a priced quote: `checking` while it is out, `failed` (with a
  *     Retry) when it did not come back.
+ * A quote is this cart's price only when its check answered without an error (`priced`). After a
+ * failed re-price the shared useQuote keeps the LAST good quote on screen, which belongs to an older
+ * cart: it is treated as no quote at all (final review, 28-Oct-2026), never as "ready".
  * The server re-prices and enforces the minimum on submit anyway; this keeps the page honest.
  */
 export interface CartGate {
@@ -18,6 +21,8 @@ export interface CartGate {
   estimated: boolean
   checking: boolean
   failed: boolean
+  /** the quote on screen is this cart's, freshly checked */
+  priced: boolean
   canCheckout: boolean
 }
 
@@ -36,16 +41,19 @@ export function cartGate({
   settings: Pick<ShopSettings, 'min_order_bhd' | 'small_order_mode'>
   estimate: number
 }): CartGate {
-  const checking = !quote && quoting
-  const failed = !quote && !quoting && Boolean(quoteError)
-  let minimum: QuoteMinimum | null = quote?.minimum ?? null
+  const failed = !quoting && Boolean(quoteError)
+  const priced = Boolean(quote) && !quoting && !quoteError
+  // a quote left over from a failed check is an older cart's: as good as none
+  const shown = failed ? null : quote
+  const checking = !shown && quoting
+  let minimum: QuoteMinimum | null = shown?.minimum ?? null
   let estimated = false
   const floor = Number(settings.min_order_bhd) || 0
-  if (!quote && floor > 0) {
+  if (!shown && floor > 0) {
     const remaining = Math.max(0, Math.round((floor - estimate) * 1000) / 1000)
     minimum = { value_bhd: floor, remaining_bhd: remaining, met: remaining <= 0, mode: settings.small_order_mode || 'request', kind: remaining <= 0 ? 'standard' : 'small' }
     estimated = true
   }
-  const canCheckout = lines > 0 && !quoting && Boolean(quote) && quote?.can_submit !== false
-  return { minimum, estimated, checking, failed, canCheckout }
+  const canCheckout = lines > 0 && priced && quote?.can_submit !== false
+  return { minimum, estimated, checking, failed, priced, canCheckout }
 }

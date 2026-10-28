@@ -1,8 +1,10 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
+import { lazyPage } from '@/lib/lazyPage'
 import { cn } from '@/lib/utils'
 import { splashDue } from '../lib/splashGate'
 import { useMarket } from '../MarketContext'
+import { ErrorBoundary } from '../ui/ErrorBoundary'
 import { DesktopShellSkeleton } from '../ui/Skeleton'
 import { CartDock } from './CartDock'
 import { FloatingNav } from './FloatingNav'
@@ -12,13 +14,12 @@ import { ShellProvider, useShell } from './ShellContext'
 import { useScrollDirection } from './useScrollDirection'
 import { isPhoneLike } from './useViewport'
 
-const loadDesktop = () => import('./DesktopShell')
+// lib/lazyPage: once its code is here each renders at once (no Suspense gap, no held fallback), and a
+// failed fetch is asked again on the next open instead of staying broken for the tab's life
+const DesktopShell = lazyPage(() => import('./DesktopShell'))
 // a laptop needs the desktop chrome on its first paint: fetch it with the app, not at first render
-if (typeof window !== 'undefined' && window.matchMedia?.('(min-width: 1024px)').matches) void loadDesktop()
-const DesktopShell = lazy(loadDesktop)
-const loadPanel = () => import('../components/ProductPanel')
-const ProductPanel = lazy(loadPanel)
-const loadSplash = () => import('../components/Splash')
+if (typeof window !== 'undefined' && window.matchMedia?.('(min-width: 1024px)').matches) void DesktopShell.preload()
+const ProductPanel = lazyPage(() => import('../components/ProductPanel'))
 // A load that will play the opening (at most once a week per device and once per tab session —
 // lib/splashGate.ts, the same predicate as Splash.tsx): start fetching it with the app itself (not at
 // the shell's first render), so the overlay lands as close to the first paint as a lazy chunk can.
@@ -26,10 +27,11 @@ const loadSplash = () => import('../components/Splash')
 // home skeleton first and the night field drops on top a round trip later (seconds on a cold 4G
 // cache), which reads as a glitch — app, dark overlay, app — instead of an entrance.
 const NEEDS_SPLASH = splashDue()
-if (NEEDS_SPLASH) void loadSplash()
-const Splash = lazy(() => loadSplash().then((mod) => ({ default: mod.Splash })))
-const loadPalette = () => import('../components/SearchPalette')
-const SearchPalette = lazy(loadPalette)
+const Splash = lazyPage<object>(() => import('../components/Splash').then((mod) => ({ default: mod.Splash })))
+if (NEEDS_SPLASH) void Splash.preload()
+const SearchPalette = lazyPage(() => import('../components/SearchPalette'))
+/** a broken opening must not leave its night frame up: the app is under it */
+const liftBootFrame = () => document.getElementById('yq-boot')?.remove()
 
 /**
  * The first tap on a card used to wait a round trip for the product panel's code (and ⌘K for the
@@ -42,8 +44,8 @@ function useWarmOverlays(phoneLike: boolean) {
     const warm = () => {
       if (done) return
       done = true
-      void loadPanel()
-      if (!phoneLike) void loadPalette()
+      void ProductPanel.preload()
+      if (!phoneLike) void SearchPalette.preload()
     }
     const idle = typeof window.requestIdleCallback === 'function' ? window.requestIdleCallback(warm, { timeout: 4000 }) : window.setTimeout(warm, 2500)
     window.addEventListener('pointerdown', warm, { once: true, passive: true })
@@ -91,7 +93,7 @@ function Hotkeys() {
 }
 
 function ShellBody() {
-  const { viewport, panelCode, paletteOpen } = useShell()
+  const { viewport, panelCode, paletteOpen, closeProduct, closePalette } = useShell()
   const phoneLike = isPhoneLike(viewport)
   useWarmOverlays(phoneLike)
   return (
@@ -104,18 +106,26 @@ function ShellBody() {
           <DesktopShell />
         </Suspense>
       )}
-      <Suspense fallback={null}>
-        {panelCode && <ProductPanel code={panelCode} />}
-        {paletteOpen && <SearchPalette />}
-      </Suspense>
+      {/* each overlay has its own boundary, keyed to what it shows: a product whose panel cannot load
+       * (a dropped signal before the warm-up, odd data) gets a small card with Reload and Close, the
+       * shop stays under it, and the next product starts clean */}
+      <ErrorBoundary key={`panel:${panelCode || ''}`} overlay onDismiss={closeProduct}>
+        <Suspense fallback={null}>{panelCode && <ProductPanel code={panelCode} />}</Suspense>
+      </ErrorBoundary>
+      <ErrorBoundary key={`palette:${paletteOpen ? 1 : 0}`} overlay onDismiss={closePalette}>
+        <Suspense fallback={null}>{paletteOpen && <SearchPalette />}</Suspense>
+      </ErrorBoundary>
       {/* Its own boundary, and a night field for the gap: the first frame of a session's first load is
        * the brand, with the horizon and the logo animating in on top of it. A product panel or the
        * palette loading later must never paint it, hence the split. Mounted only when the opening is
-       * due (at most weekly): any other load no longer downloads its code just to render nothing. */}
+       * due (at most weekly): any other load no longer downloads its code just to render nothing.
+       * An opening that breaks is skipped, and its night frame lifted. */}
       {NEEDS_SPLASH && (
-        <Suspense fallback={<div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" />}>
-          <Splash />
-        </Suspense>
+        <ErrorBoundary silent onError={liftBootFrame}>
+          <Suspense fallback={<div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" />}>
+            <Splash />
+          </Suspense>
+        </ErrorBoundary>
       )}
     </>
   )

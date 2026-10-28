@@ -8,9 +8,9 @@ import { S } from '../strings'
 /**
  * The market's one modal surface.
  *
- *   variant="sheet"  â€” bottom sheet on phones, centred dialog from `md` up (default)
- *   variant="dialog" â€” centred dialog from `sm` up (palette, keypad)
- *   variant="drawer" â€” bottom sheet on phones, side panel (inline-end) from `md` up
+ *   variant="sheet"  — bottom sheet on phones, centred dialog from `md` up (default)
+ *   variant="dialog" — centred dialog from `sm` up (palette, keypad)
+ *   variant="drawer" — bottom sheet on phones, side panel (inline-end) from `md` up
  *
  * Accessible by construction: labelled, focus-trapped, Esc-closable, scroll-locked, focus
  * restored. Enter/exit run on CSS keyframes (market.css); the `closing` state plays the exit and
@@ -58,10 +58,10 @@ export interface SheetProps {
   footer?: ReactNode
   /** extra header content (e.g. a search field) */
   header?: ReactNode
-  /** hide the title row (the body renders its own header) â€” the title is still announced */
+  /** hide the title row (the body renders its own header) — the title is still announced */
   bare?: boolean
   className?: string
-  /** a view-transition name for the panel root (card â†’ panel morph) */
+  /** a view-transition name for the panel root (card → panel morph) */
   vtName?: string
 }
 
@@ -92,6 +92,16 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
   const { attachPanel, attachBackdrop, attachScroller, onPointerDown, panelEl } = useSheetDrag(open && bottomSheet && !closing, onClose)
   useKeyboardInset(panelEl, open && bottomSheet)
 
+  // The open effect runs when the sheet opens and cleans up when it closes — not when a parent hands
+  // in a new onClose (most pass an inline arrow, re-made on every render). Each such re-run gave the
+  // focus back to the opener, moved it to the panel again (the keypad's keyboard closed mid-number)
+  // and re-stacked the layer, so a palette could land above the product opened from it (final
+  // review, 28-Oct-2026). The key handler reads the latest close from here.
+  const closeRef = useRef(close)
+  useEffect(() => {
+    closeRef.current = close
+  }, [close])
+
   useEffect(() => {
     if (!open) return
     restoreRef.current = document.activeElement as HTMLElement | null
@@ -105,7 +115,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        close()
+        closeRef.current()
         return
       }
       if (e.key !== 'Tab') return
@@ -135,7 +145,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
       if (!document.querySelector('[data-sheet-panel]:not([data-leaving])')) delete document.body.dataset.sheetOpen
       restoreRef.current?.focus?.({ preventScroll: true })
     }
-  }, [open, close, panelEl])
+  }, [open, panelEl])
 
   if (!open) return null
 
@@ -171,7 +181,9 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         aria-label={S.states.close}
         tabIndex={-1}
         onClick={close}
-        style={{ animation: closing ? `m-fade-in ${OUT_MS}ms ease-in reverse both` : 'm-fade-in 200ms ease-out both' }}
+        // the entrance fills `backwards` only: with `both` its finished keyframe outranked the opacity
+        // the drag writes, so the dim stayed full under a dragged sheet and cut out at the end
+        style={{ animation: closing ? `m-fade-in ${OUT_MS}ms ease-in reverse both` : 'm-fade-in 200ms ease-out backwards' }}
         className="absolute inset-0 h-full w-full cursor-default bg-ink/45 [@media(hover:hover)_and_(pointer:fine)]:backdrop-blur-[2px]"
       />
       <div
@@ -186,7 +198,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         style={{ viewTransitionName: vtName, ...lift }}
         className={cn('relative flex flex-col overflow-hidden bg-surface shadow-3 outline-none', shape, closing ? exit : enter, className)}
       >
-        {/* Grab handle â€” the affordance that says "this slides". Phones only; a 24 px strip to catch. */}
+        {/* Grab handle — the affordance that says "this slides". Phones only; a 24 px strip to catch. */}
         <div aria-hidden="true" onPointerDown={onPointerDown} className={cn('flex touch-none justify-center pb-2 pt-2.5', isDrawer || !isDialog ? 'md:hidden' : 'sm:hidden')}>
           <span className="h-1 w-9 rounded-full bg-line" />
         </div>

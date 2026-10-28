@@ -65,8 +65,10 @@ const BOOT_CSS = [
   // shell's own outline (plum band, logo, search pill, the first blocks) straight from the HTML, so
   // a phone on a slow network sees the shop's shape in the first second instead of a white page for
   // six (measured: Slow 3G + 4x CPU painted nothing for 6 s). MarketApp removes it on its first
-  // commit, which paints the same outline; pointer-events none, and the same 8 s safety net.
-  "html[data-boot=off] #yq-boot{background:#F9F7F3;pointer-events:none}",
+  // commit, which paints the same outline. It takes no taps, so it needs no 8 s safety net: the slow
+  // networks it exists for take longer than that (the outline faded to white before the app came,
+  // final review) — 30 s only covers an app that never boots.
+  "html[data-boot=off] #yq-boot{background:#F9F7F3;pointer-events:none;animation-delay:30s}",
   "html[data-boot=off] #yq-boot span{display:none}",
   "html[data-boot=off] #yq-boot b{display:block;position:absolute}",
   // phone: the plum band with the logo, two lines and the search pill; then a promo card and four discs

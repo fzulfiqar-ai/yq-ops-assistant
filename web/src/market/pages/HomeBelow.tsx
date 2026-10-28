@@ -1,5 +1,6 @@
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { LayoutGrid, List } from 'lucide-react'
+import { ErrorBoundary } from '../ui/ErrorBoundary'
 import type { OrderStatusPayload } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { BrandTiles } from '../components/BrandTiles'
@@ -216,9 +217,11 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           above it. A workstream that adds rails to this file (e.g. sold-out / clearing) must
           place them above this block only if they are in-stock rails, otherwise below the grid. */}
       <Sect reveal={!desktop}>
-        <Suspense fallback={null}>
-          <ComingSoonRail />
-        </Suspense>
+        <ErrorBoundary silent>
+          <Suspense fallback={null}>
+            <ComingSoonRail />
+          </Suspense>
+        </ErrorBoundary>
       </Sect>
       <Sect reveal>{continueCard}</Sect>
 
