@@ -423,5 +423,18 @@ check('a short list never shows two lines that read the same: a colliding name c
   eq(names.get('T-PB'), F.productName(c), 'a unique name is untouched')
 })
 
+// loaded here, not inside the check: check() is synchronous, and a missing module must FAIL its check
+const R = await mod('lib/preloadReload.ts').catch((e) => ({ missing: e }))
+check('a tab outlives two deploys: one reload per BUILD, never a loop on a broken one (T11)', () => {
+  if (R.missing) throw new Error('lib/preloadReload.ts did not load: ' + (R.missing.message || R.missing))
+  const tab = new Map()
+  const s = { getItem: (k) => (tab.has(k) ? tab.get(k) : null), setItem: (k, v) => tab.set(k, String(v)) }
+  eq(R.shouldReload('build-a', s), true, 'the first missing chunk of build A reloads')
+  eq(R.shouldReload('build-a', s), false, 'build A again (a broken build): no loop')
+  eq(R.shouldReload('build-b', s), true, 'the NEXT deploy in the same tab reloads again (it used to stay stuck)')
+  const blocked = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+  eq(R.shouldReload('build-c', blocked), false, 'storage blocked: never reload (it could not stop a loop)')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
