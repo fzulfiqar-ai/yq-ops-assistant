@@ -1,0 +1,35 @@
+{
+ "format": "yq-portal-rec/1",
+ "synthetic": true,
+ "note": "SYNTHETIC fixture for scripts/qa/portal_qa.py --selftest. Every name, code and number here is invented (QA ..., example.invalid, round numbers); nothing comes from a real recording.",
+ "recorded_at": "2026-01-15T09:00:00+03:00",
+ "base": "https://portal.example.invalid",
+ "api": "https://api.example.invalid",
+ "supabase_host": null,
+ "signed_in_role": "admin",
+ "rep": null,
+ "pages": [
+  {"key": "receivables", "route": "/receivables", "requests": ["GET /report/receivables"]},
+  {"key": "margins", "route": "/margins", "requests": ["GET /report/margins"]},
+  {"key": "picklist", "route": "/picklist", "requests": ["GET /shop/picklist"]},
+  {"key": "account", "route": "/account", "requests": ["GET /shop/me"]},
+  {"key": "shop", "route": "/shop", "requests": ["GET /shop/catalog"]},
+  {"key": "orders", "route": "/orders", "requests": ["GET /purchase-orders", "GET /procurement/board", "GET /supplier-prices"]}
+ ],
+ "entries": {
+  "GET /me": {"file": "api/me.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /health": {"file": "api/health.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /freshness": {"file": "api/freshness.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /report/receivables": {"file": "api/report_receivables.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /report/margins": {"file": "api/report_margins.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /shop/picklist": {"file": "api/shop_picklist.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /shop/me": {"file": "api/shop_me.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /shop/catalog": {"file": "api/shop_catalog.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /purchase-orders": {"file": "api/purchase_orders.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /procurement/board": {"file": "api/procurement_board.json", "status": 200, "content_type": "application/json", "origin": "api"},
+  "GET /supplier-prices": {"file": "api/supplier_prices.json", "status": 200, "content_type": "application/json", "origin": "api"}
+ },
+ "as": {"salesman": {}},
+ "blocked_writes": [],
+ "notes": ["Deliberately incomplete: the shell's background prefetches (/report/sales, /report/inventory, /catalog) and the salesman's /shop/me/* reads are left out, so a replay logs real misses."]
+}

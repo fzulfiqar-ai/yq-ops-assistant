@@ -1,0 +1,9 @@
+{
+ "groups": [
+  {"salesman_id": 9001, "salesman": "QA Rep One", "orders": [
+   {"id": 9001, "order_no": "QA-0001", "status": "confirmed", "status_label": "Confirmed", "customer_shop": "QA Example Shop A", "customer_area": "QA Area", "salesman_name": "QA Rep One", "total_confirmed_bhd": 10.0, "units_count": 5, "lines": [{"item_code": "QA-CBL-1", "display_name": "QA Example Cable 1m", "qty": 5}]}
+  ]}
+ ],
+ "totals_by_item": [{"item_code": "QA-CBL-1", "display_name": "QA Example Cable 1m", "qty": 5, "orders": 1}],
+ "count": 1
+}
