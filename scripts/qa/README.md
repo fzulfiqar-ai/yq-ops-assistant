@@ -173,9 +173,11 @@ python scripts/qa/portal_qa.py --record --base https://ops.yqmarketplace.com \
 A Chrome window opens on the portal's login page. Sign in as usual (the harness waits up to 10
 minutes, `--wait-min`). The walk then starts by itself: every page in `--list` (42, a few seconds
 each, about five minutes in all), each loaded, given time to finish its requests, and scrolled to
-the bottom once so lazy sections load. Leave the window alone until it closes by itself. A detail page (a purchase order, a Market
-Intel case, a merchant profile) is the first one linked from its list page. `--only` records some
-pages again and merges them into an existing recording.
+the bottom once so lazy sections load. Leave the window alone until it closes by itself. A detail
+page (a purchase order, a Market Intel case, a merchant profile) is the first one linked from its
+list page. `--only` records some pages again and merges them into an existing recording. The API
+allows 300 requests a minute per user: should it answer 429, the walk waits a minute and walks
+that page again, and a 429 never replaces an answer already saved.
 
 `--rep "<Focus name>"` (or a salesman id) also fetches the reads the API lets an admin take as a rep
 (today `/shop/me/followups?rep=`, see `app/shop_api.py`) and files them under the plain key, so a

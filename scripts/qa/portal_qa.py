@@ -613,6 +613,7 @@ class Recorder:
         self.saved = 0
         self.saved_bytes = 0
         self.masked = 0
+        self.throttled = 0
         self.errors: list[str] = []
         self.me: dict | None = None
         self.supabase_host: str | None = None
@@ -683,7 +684,11 @@ class Recorder:
                     self.me = json.loads(body.decode("utf-8"))   # the sign-in signal; only its role is ever printed
                 except ValueError:
                     pass
-            if self.recording and req.method.upper() == "GET" and resp.status != 304:
+            if resp.status == 429:
+                self.throttled += 1      # the API's rate limit (300/minute per user): the walk backs off
+            good = self.rec.entries.get(key)
+            keep_good = resp.status >= 400 and good is not None and int(good.get("status") or 0) < 400
+            if self.recording and req.method.upper() == "GET" and resp.status != 304 and not keep_good:
                 try:
                     _, masked = self.rec.put(key, kind, resp.status, ctype, body)
                 except OSError as exc:   # a full or locked disk costs this answer, never the walk
@@ -797,14 +802,23 @@ def record(args) -> int:
                 recorder.current = pg.key
                 t0 = time.time()
                 try:
-                    page.goto(base + route, wait_until="domcontentloaded", timeout=90000)
-                    wait_quiet(page, lambda: recorder.inflight, 1200, 40000)
-                    try:
-                        page.wait_for_selector("main h1, h1", timeout=6000)
-                    except PWError:
-                        pass
-                    scrolled = page.evaluate(SCROLL_TO_BOTTOM)
-                    wait_quiet(page, lambda: recorder.inflight, 900, 25000)
+                    for attempt in (1, 2):
+                        throttled = recorder.throttled
+                        page.goto(base + route, wait_until="domcontentloaded", timeout=90000)
+                        wait_quiet(page, lambda: recorder.inflight, 1200, 40000)
+                        try:
+                            page.wait_for_selector("main h1, h1", timeout=6000)
+                        except PWError:
+                            pass
+                        scrolled = page.evaluate(SCROLL_TO_BOTTOM)
+                        wait_quiet(page, lambda: recorder.inflight, 900, 25000)
+                        if recorder.throttled == throttled or attempt == 2:
+                            break
+                        # 429: the API's 300/minute. A good answer already saved is never replaced by a
+                        # 429; the page is walked once more after the window has passed
+                        print("· " + pg.key.ljust(18) + " the API asked to slow down (429) — waiting a minute, then walking it again", flush=True)
+                        for _ in range(61):
+                            page.wait_for_timeout(1000)
                     for d in PAGES:
                         if d.detail_from == pg.key and d.link:
                             href = page.evaluate(FIRST_LINK, d.link)
@@ -860,7 +874,11 @@ def record(args) -> int:
     print("pages walked " + str(len(done)) + " of " + str(len(walked)) + " · answers saved " + str(recorder.saved)
           + " (" + str(len(rec.entries)) + " distinct, " + str(round(recorder.saved_bytes / 1e6, 1)) + " MB)"
           + " · writes blocked " + str(len(recorder.blocked)) + " · tokens masked " + str(recorder.masked)
+          + (" · rate-limited answers " + str(recorder.throttled) if recorder.throttled else "")
           + " · " + str(round(time.time() - t_start)) + " s")
+    still_429 = sorted(k for k, e in rec.entries.items() if int(e.get("status") or 0) == 429)
+    for k in still_429[:10]:
+        print("  still rate-limited (walk that page again with --only): " + k)
     for d in distinct[:20]:
         print("  blocked: " + d)
     for e in recorder.errors[:10]:
