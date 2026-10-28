@@ -251,5 +251,49 @@ await check('Settings: every card keeps its place while it loads and says when i
   ok(!st.includes('>Loading…<') && st.includes('fallback="Could not load the audit."'), 'the audit: skeleton rows and Retry')
 })
 
+const NAV = text('lib/nav.ts')
+/** the menu label of a route in lib/nav.ts NAV (the first entry with that `to`) */
+function navLabel(to) {
+  const m = [...NAV.matchAll(/label: '([^']+)', to: '([^']+)'/g)].find((x) => x[2] === to)
+  if (!m) throw new Error(`no NAV entry for ${to}`)
+  return m[1]
+}
+const PAGES = [
+  ['pages/Orders.tsx', '/orders'], ['pages/ShopOrders.tsx', '/shop-orders'], ['pages/StockMovement.tsx', '/stock'],
+  ['pages/DataPage.tsx', '/data'], ['pages/Inventory.tsx', '/inventory'], ['pages/Sales.tsx', '/sales'],
+  ['pages/Catalog.tsx', '/catalog'], ['pages/Leads.tsx', '/leads'],
+]
+
+await check('each page title is its menu label (the top bar and the page say the same name)', () => {
+  for (const [file, route] of PAGES) {
+    const titles = [...text(file).matchAll(/<PageHeader\s+title="([^"]+)"/g)].map((m) => m[1])
+    ok(titles.length >= 1, `${file} has a PageHeader title`)
+    for (const t of titles) eq(t, navLabel(route), `${file}`)
+  }
+})
+
+const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u
+await check('lucide icons, not emoji or text arrows, in the admin pages', () => {
+  for (const f of ['pages/Catalog.tsx', 'pages/Leads.tsx', 'pages/Orders.tsx', 'pages/Dashboard.tsx', 'pages/StockMovement.tsx',
+    'pages/DataPage.tsx', 'pages/Settings.tsx', 'pages/Inventory.tsx', 'pages/Sales.tsx', 'pages/ShopOrders.tsx']) {
+    const src = text(f)
+    const hit = src.split('\n').find((l) => EMOJI.test(l) || /[▲▼✓✔]/.test(l))
+    ok(!hit, `${f}: "${(hit || '').trim().slice(0, 80)}"`)
+  }
+  const cat = text('pages/Catalog.tsx')
+  for (const icon of ['FileText', 'FileSpreadsheet', 'Camera']) ok(new RegExp(`\\b${icon}\\b`).test(cat), `Catalog uses ${icon}`)
+  // a control's label never leans on an arrow glyph: the direction toggle and the partner chips draw icons
+  const sm = text('pages/StockMovement.tsx')
+  ok(!sm.includes("'From main →'") && !sm.includes("'→ Into main'") && !/\? '→' : '←'/.test(sm), 'Stock moves direction controls')
+  ok(!text('pages/Orders.tsx').includes('Approve → pipeline'), 'the Approve button')
+  ok(!text('pages/Dashboard.tsx').includes('Settings →'), 'the target hint')
+})
+
+await check('Catalog and Leads: a failed read says so; Leads shows skeleton cards while it loads', () => {
+  ok(text('pages/Catalog.tsx').includes("catalogState === 'error'"), 'Catalog')
+  const l = text('pages/Leads.tsx')
+  ok(l.includes("leadsState === 'loading'") && l.includes("leadsState === 'error'"), 'Leads')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

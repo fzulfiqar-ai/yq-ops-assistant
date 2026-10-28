@@ -2,16 +2,19 @@ import { useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Radar, Loader2, Phone, Globe, MapPin, Target, ClipboardCopy, ChevronRight, Sparkles,
-  Pencil, Wand2, Mail, X, Check,
+  Pencil, Wand2, Mail, X, Check, UserRound,
 } from 'lucide-react'
 import { apiGet, apiPost, apiSend } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { panelState } from '@/lib/dataState'
 import { BodyPortal } from '@/components/BodyPortal'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { useToast } from '@/components/Toast'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 
 interface Lead {
   id: number; name: string; category: string | null; area: string | null
@@ -36,7 +39,7 @@ const NEXT: Record<string, { to: string; label: string }[]> = {
   new: [{ to: 'contacted', label: 'Contacted' }, { to: 'rejected', label: 'Reject' }],
   contacted: [{ to: 'visited', label: 'Visited' }, { to: 'rejected', label: 'Reject' }],
   visited: [{ to: 'quoted', label: 'Quoted' }, { to: 'rejected', label: 'Reject' }],
-  quoted: [{ to: 'ordered', label: 'Ordered ✓' }, { to: 'rejected', label: 'Reject' }],
+  quoted: [{ to: 'ordered', label: 'Ordered' }, { to: 'rejected', label: 'Reject' }],
   ordered: [], rejected: [{ to: 'new', label: 'Reopen' }],
 }
 const STATUS_COLOR: Record<string, string> = {
@@ -106,10 +109,12 @@ export default function Leads() {
   const [seg, setSeg] = useState<string>('all')
   const [busy, setBusy] = useState(false)
   const toast = useToast()
-  const { data } = useQuery({
+  const { data, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['leads', filter],
     queryFn: () => apiGet<LeadsData>(`/leads${filter ? `?status=${filter}` : ''}`),
   })
+  // loading and failure have their own faces: both used to read "No new leads yet"
+  const leadsState = panelState({ data, isError })
 
   async function discover() {
     setBusy(true)
@@ -199,6 +204,15 @@ export default function Leads() {
       </div>
 
       {/* Leads */}
+      {leadsState === 'loading' && (
+        <div className="space-y-2.5" aria-busy="true" aria-label="Loading leads">
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[124px] rounded-xl" />)}
+        </div>
+      )}
+      {leadsState === 'error' && (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the leads." />
+      )}
+      {(leadsState === 'ready' || leadsState === 'empty') && (
       <div className="space-y-2.5">
         {leads.map((l) => (
           <Card key={l.id} className="p-4">
@@ -213,7 +227,7 @@ export default function Leads() {
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
                   {l.category && <span className="capitalize">{l.category.replace(/_/g, ' ')}</span>}
                   {(l.address || l.area) && <span className="inline-flex items-center gap-1"><MapPin size={11} />{l.address || l.area}</span>}
-                  {l.contact_name && <span>👤 {l.contact_name}</span>}
+                  {l.contact_name && <span className="inline-flex items-center gap-1"><UserRound size={11} aria-hidden="true" />{l.contact_name}</span>}
                   {l.phone && <a href={`tel:${l.phone}`} className="inline-flex items-center gap-1 text-primary hover:underline"><Phone size={11} />{l.phone}</a>}
                   {l.email && <a href={`mailto:${l.email}`} className="inline-flex items-center gap-1 text-primary hover:underline"><Mail size={11} />{l.email}</a>}
                   {l.website && <a href={l.website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline"><Globe size={11} />site</a>}
@@ -259,6 +273,7 @@ export default function Leads() {
           </Card>
         )}
       </div>
+      )}
 
       <p className="mt-4 px-1 text-[11px] text-muted-foreground">{data?.attribution || 'Lead data © OpenStreetMap contributors (ODbL).'} · Business contacts for B2B outreach only.</p>
 

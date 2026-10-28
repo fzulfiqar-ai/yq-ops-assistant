@@ -3,12 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'motion/react'
 import {
   Search, Download, Share2, Plus, Pencil, X, Loader2, Check,
-  ImagePlus, Copy, MessageCircle, RefreshCw, Package, Camera,
+  ImagePlus, Copy, MessageCircle, RefreshCw, Package, Camera, FileText, FileSpreadsheet,
 } from 'lucide-react'
 import { apiGet, apiPost, apiUpload, apiDownload, apiSend } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
+import { panelState } from '@/lib/dataState'
+import { LoadError } from '@/components/LoadError'
 import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
@@ -359,7 +361,9 @@ export default function Catalog() {
   const isAdmin = me?.role === 'admin'
   const isSalesman = me?.role === 'salesman'
   const [view, setView] = useState<CatalogItem | null>(null)
-  const { data, isLoading } = useQuery({ queryKey: ['catalog'], queryFn: () => apiGet<CatalogData>('/catalog') })
+  const { data, isError, error, isFetching, refetch } = useQuery({ queryKey: ['catalog'], queryFn: () => apiGet<CatalogData>('/catalog') })
+  // a failed read says so, with Retry: it used to read "No items match."
+  const catalogState = panelState({ data, isError })
   const [cat, setCat] = useState<string>('All')
   const [q, setQ] = useState('')
   const [needsPhoto, setNeedsPhoto] = useState(false)
@@ -430,13 +434,15 @@ export default function Catalog() {
                     ))}
                   </div>
                 )}
-                <button onClick={() => download('pdf')}
+                <button type="button" onClick={() => download('pdf')}
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent">
-                  📄 PDF <span className="ml-auto text-[11px] text-muted-foreground">for WhatsApp</span>
+                  <FileText size={15} className="shrink-0 text-muted-foreground" aria-hidden="true" /> PDF
+                  <span className="ml-auto text-[11px] text-muted-foreground">for WhatsApp</span>
                 </button>
-                <button onClick={() => download('xlsx')}
+                <button type="button" onClick={() => download('xlsx')}
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent">
-                  📊 Excel <span className="ml-auto text-[11px] text-muted-foreground">with photos</span>
+                  <FileSpreadsheet size={15} className="shrink-0 text-muted-foreground" aria-hidden="true" /> Excel
+                  <span className="ml-auto text-[11px] text-muted-foreground">with photos</span>
                 </button>
               </div>
             )}
@@ -454,18 +460,20 @@ export default function Catalog() {
           </button>
         ))}
         {isAdmin && noPhotoCount > 0 && (
-          <button onClick={() => setNeedsPhoto((v) => !v)}
-            className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition',
+          <button type="button" onClick={() => setNeedsPhoto((v) => !v)} aria-pressed={needsPhoto}
+            className={cn('inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition',
               needsPhoto ? 'border-amber-500 bg-amber-500 text-white' : 'border-amber-300 bg-amber-50 text-amber-700 hover:border-amber-400 dark:bg-amber-500/10 dark:text-amber-300')}>
-            📷 needs photo · {noPhotoCount}
+            <Camera size={14} aria-hidden="true" /> needs photo · {noPhotoCount}
           </button>
         )}
       </div>
 
-      {isLoading ? (
+      {catalogState === 'loading' ? (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           {Array.from({ length: 10 }).map((_, i) => <Skeleton key={i} className="aspect-[3/4] rounded-2xl" />)}
         </div>
+      ) : catalogState === 'error' ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the catalog." />
       ) : items.length === 0 ? (
         <Card className="p-10 text-center text-sm text-muted-foreground">No items match.</Card>
       ) : (
