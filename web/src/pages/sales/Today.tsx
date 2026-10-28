@@ -1,13 +1,14 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, BookImage, Check, ChevronRight, ClipboardList, Copy, ExternalLink, Loader2, MessageCircle, PackageSearch, QrCode, Share2, Timer, Users } from 'lucide-react'
+import { ArrowRight, BookImage, Check, ChevronRight, ClipboardList, Copy, ExternalLink, MessageCircle, PackageSearch, QrCode, Share2, Timer, Users } from 'lucide-react'
 import { apiPost } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
 import { Badge } from '@/components/ui/badge'
-import { HIT } from '@/pages/shop/shared'
+import { HIT, SKELETON } from '@/pages/shop/shared'
+import { LoadFailed } from './LoadFailed'
 import { ageLabel, bhd3, bhdStr, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useToday, waLink, type MoneyStrip, type TodayData } from './lib'
 import { ComingSoon } from './ComingSoon'
 import { BasketsNotSent, DueThisWeek, LinkThisWeek } from './FollowUps'
@@ -129,6 +130,40 @@ function ToConfirm({ t }: { t: TodayData }) {
   )
 }
 
+/** Today while its one call is on its way: the money band, To confirm, the three tiles and the right
+ *  column's cards, as blocks in the one loading look (no spinner: the page arrives where they stand). */
+function TodaySkeleton() {
+  const bar = (w: string) => <div className={cn(SKELETON, 'h-3 rounded', w)} />
+  return (
+    <div role="status" className="mt-5 grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-6">
+      <span className="sr-only">Loading your day…</span>
+      <div aria-hidden="true" className="min-w-0 space-y-4">
+        <div className={cn(SKELETON, 'h-[12.5rem] rounded-3xl')} />
+        <div className="space-y-3 rounded-2xl border border-border bg-card p-4">
+          {bar('w-28')}
+          {bar('w-full')}
+          {bar('w-2/3')}
+        </div>
+        <div className="grid grid-cols-3 gap-2 md:gap-3">
+          {[0, 1, 2].map((n) => (
+            <div key={n} className={cn(SKELETON, 'min-h-[5.5rem] rounded-2xl')} />
+          ))}
+        </div>
+      </div>
+      <div aria-hidden="true" className="min-w-0 space-y-4">
+        <div className="space-y-3 rounded-2xl border border-border bg-card p-4">
+          {bar('w-40')}
+          <div className="grid grid-cols-2 gap-2">
+            {[0, 1, 2, 3].map((n) => (
+              <div key={n} className={cn(SKELETON, 'h-14 rounded-xl')} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Today() {
   const { me } = useAuth()
   const toast = useToast()
@@ -187,17 +222,9 @@ export default function Today() {
       </div>
 
       {todayQ.isLoading ? (
-        <div className="grid h-60 place-items-center text-muted-foreground">
-          <Loader2 size={20} className="animate-spin" aria-label="Loading your day" />
-        </div>
+        <TodaySkeleton />
       ) : todayQ.isError || !t ? (
-        <div className="mt-5 rounded-2xl border border-border bg-card px-4 py-6 text-center">
-          <p className="text-[13.5px] font-semibold">Your day did not load</p>
-          <p className="mt-1 text-[12.5px] text-muted-foreground">The server did not answer. Check the connection and try again.</p>
-          <button type="button" onClick={() => void todayQ.refetch()} className="mt-4 inline-flex h-11 items-center rounded-xl bg-primary px-5 text-[13px] font-semibold text-primary-foreground">
-            Try again
-          </button>
-        </div>
+        <LoadFailed className="mt-5" title="Your day did not load" onRetry={() => void todayQ.refetch()} retrying={todayQ.isFetching} />
       ) : (
         /* minmax(0,…) at every width: an `auto` phone column grows to the widest nowrap line (a long
            shop name + badges) and pushes every card past the screen edge */
@@ -327,7 +354,7 @@ export default function Today() {
                   </div>
                   {qrOpen && (
                     <div className="mt-3 grid place-items-center rounded-xl border border-border bg-white p-3">
-                      {qr ? <img src={qr} alt="QR code for my link" width={220} height={220} className="h-[220px] w-[220px]" /> : qrLoading ? <Loader2 size={18} className="my-24 animate-spin text-muted-foreground" /> : <span className="my-24 text-[12px] text-muted-foreground">QR unavailable</span>}
+                      {qr ? <img src={qr} alt="QR code for my link" width={220} height={220} className="h-[220px] w-[220px]" /> : qrLoading ? <div role="img" aria-label="Loading the QR code" className={cn(SKELETON, 'h-[220px] w-[220px] rounded-lg')} /> : <span className="my-24 text-[12px] text-muted-foreground">QR unavailable</span>}
                       <p className="mt-2 text-center text-[11.5px] text-muted-foreground">Show this in the shop — they scan and order from your storefront.</p>
                     </div>
                   )}

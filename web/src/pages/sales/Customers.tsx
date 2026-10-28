@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ClipboardList, Loader2, MessageCircle, Phone, RotateCcw, Search, Send, ShoppingBag, Users, X } from 'lucide-react'
+import { ClipboardList, MessageCircle, Phone, RotateCcw, Search, Send, ShoppingBag, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CreditChip, StatusBadge } from '@/pages/shop/ShopPicker'
 import { ShopSheet } from '@/pages/shop/ShopSheet'
-import { HIT } from '@/pages/shop/shared'
+import { HIT, SKELETON } from '@/pages/shop/shared'
+import { LoadFailed } from './LoadFailed'
 import { customerOf, dayLabel, initials, phoneLabel, setSelectedCustomer, telLink, useFollowups, useOrderAgain, useShopBook, waLink, type BookShop } from './lib'
 import { FollowupRow } from './FollowUps'
 
@@ -85,6 +86,53 @@ function ShopCard({ s, onRestock }: { s: BookShop; onRestock: (s: BookShop) => v
   )
 }
 
+/** The book while it loads: shop cards (a circle, three lines, the action row) in the one loading look. */
+function CardsSkeleton() {
+  return (
+    <div role="status">
+      <span className="sr-only">Loading your shops…</span>
+      <ul aria-hidden="true" className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {Array.from({ length: 6 }, (_, i) => (
+          <li key={i} className="min-w-0 rounded-2xl border border-border bg-card p-3.5">
+            <div className="flex items-start gap-3">
+              <div className={cn(SKELETON, 'h-11 w-11 shrink-0 rounded-full')} />
+              <div className="min-w-0 flex-1 space-y-2 pt-1">
+                <div className={cn(SKELETON, 'h-3.5 w-2/3 rounded')} />
+                <div className={cn(SKELETON, 'h-3 w-1/2 rounded')} />
+                <div className={cn(SKELETON, 'h-2.5 w-1/3 rounded')} />
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] gap-1.5">
+              <div className={cn(SKELETON, 'h-10 rounded-xl')} />
+              {[0, 1, 2, 3].map((n) => (
+                <div key={n} className={cn(SKELETON, 'h-10 w-10 rounded-xl')} />
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Due / Lapsed while they load: the list's rows (a name, a reason, the product chips, the actions). */
+function RowsSkeleton() {
+  return (
+    <div role="status">
+      <span className="sr-only">Loading your Focus book…</span>
+      <ul aria-hidden="true" className="mt-4 divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card">
+        {Array.from({ length: 4 }, (_, i) => (
+          <li key={i} className="space-y-2 px-4 py-3.5">
+            <div className={cn(SKELETON, 'h-3.5 w-1/2 rounded')} />
+            <div className={cn(SKELETON, 'h-3 w-3/4 rounded')} />
+            <div className={cn(SKELETON, 'mt-2.5 h-10 rounded-xl')} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export default function Customers() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
@@ -154,11 +202,9 @@ export default function Customers() {
 
       {view !== 'all' ? (
         fu.isLoading ? (
-          <div className="grid h-40 place-items-center text-muted-foreground">
-            <Loader2 size={20} className="animate-spin" />
-          </div>
+          <RowsSkeleton />
         ) : fu.isError ? (
-          <p className="mt-6 text-[13px] text-destructive">Could not load your Focus book. Try again in a moment.</p>
+          <LoadFailed className="mt-6" title="Your Focus book did not load" onRetry={() => void fu.refetch()} retrying={fu.isFetching} />
         ) : fu.data?.hint ? (
           <p className="mt-6 rounded-2xl border border-border bg-card px-4 py-5 text-[13px] text-muted-foreground">{fu.data.hint}</p>
         ) : focusRows.length === 0 ? (
@@ -179,11 +225,9 @@ export default function Customers() {
           </>
         )
       ) : book.isLoading ? (
-        <div className="grid h-40 place-items-center text-muted-foreground">
-          <Loader2 size={20} className="animate-spin" />
-        </div>
+        <CardsSkeleton />
       ) : book.isError ? (
-        <p className="mt-6 text-[13px] text-destructive">Could not load your shops. Try again in a moment.</p>
+        <LoadFailed className="mt-6" title="Your shops did not load" onRetry={() => void book.refetch()} retrying={book.isFetching} />
       ) : (
         <>
           {book.data?.error && <p className="mt-4 rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12.5px] text-[#96600d]">{book.data.error}</p>}

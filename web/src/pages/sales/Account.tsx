@@ -6,6 +6,7 @@ import { navFor } from '@/lib/nav'
 import { changeOwnPassword } from '@/lib/password'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
+import { SKELETON } from '@/pages/shop/shared'
 import { bhd3, bhdStr, dayLabel, initials, monthName, useAuthedBlob, useShopMe } from './lib'
 import { SignOutSheet } from './SignOutSheet'
 
@@ -153,7 +154,7 @@ export default function Account() {
         </div>
         {qrOpen && (
           <div className="grid place-items-center border-t border-border bg-white p-4">
-            {qr ? <img src={qr} alt="QR code for my link" width={240} height={240} className="h-60 w-60" /> : <Loader2 size={18} className="my-24 animate-spin text-muted-foreground" />}
+            {qr ? <img src={qr} alt="QR code for my link" width={240} height={240} className="h-60 w-60" /> : <div role="img" aria-label="Loading the QR code" className={cn(SKELETON, 'h-60 w-60 rounded-lg')} />}
           </div>
         )}
       </section>

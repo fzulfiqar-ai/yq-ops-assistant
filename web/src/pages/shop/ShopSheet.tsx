@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Loader2, MessageCircle, Phone, RotateCcw } from 'lucide-react'
+import { ArrowLeftRight, MessageCircle, Phone, RefreshCw, RotateCcw } from 'lucide-react'
 import { Sheet } from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
 import {
@@ -17,7 +17,7 @@ import {
 } from '@/pages/sales/lib'
 import { CreditChip, StatusBadge } from './ShopPicker'
 import { SoldOutDivider } from './SoldOut'
-import { HIT, RING } from './shared'
+import { HIT, RING, SKELETON } from './shared'
 
 const FROM: Record<string, string> = {
   last_order: 'Their last app order',
@@ -150,11 +150,31 @@ export function ShopSheet({
 
         <section className="mt-4 rounded-2xl border border-[#E9E4EF] bg-white p-3.5">
           {q.isLoading ? (
-            <p className="flex items-center gap-2 text-[12.5px] text-[#6b6480]">
-              <Loader2 size={14} className="animate-spin" aria-hidden="true" /> Reading their usual order…
-            </p>
+            // the heading and its lines as they will be, in the one loading look
+            <div role="status">
+              <span className="sr-only">Reading their usual order…</span>
+              <div aria-hidden="true" className="space-y-2.5">
+                <div className={cn(SKELETON, 'h-3.5 w-1/2 rounded')} />
+                {[0, 1, 2].map((n) => (
+                  <div key={n} className="flex items-center justify-between gap-3">
+                    <div className={cn(SKELETON, 'h-3 w-2/5 rounded')} />
+                    <div className={cn(SKELETON, 'h-3 w-8 rounded')} />
+                  </div>
+                ))}
+              </div>
+            </div>
           ) : q.isError ? (
-            <p className="text-[12.5px] text-[#9f1239]">Their usual order did not load. Close this and try again.</p>
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[12.5px] text-[#9f1239]">Their usual order did not load.</p>
+              <button
+                type="button"
+                onClick={() => void q.refetch()}
+                disabled={q.isFetching}
+                className={cn('inline-flex h-11 items-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white px-3.5 text-[12.5px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb] disabled:opacity-60', RING)}
+              >
+                <RefreshCw size={14} aria-hidden="true" /> {q.isFetching ? 'Trying again…' : 'Try again'}
+              </button>
+            </div>
           ) : !b || !b.suggested.length ? (
             <p className="text-[12.5px] text-[#6b6480]">No usual order yet — once they have bought the same line twice, it shows here.</p>
           ) : (

@@ -24,6 +24,7 @@ import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
 import { ProductSheet } from './ProductSheet'
 import { Select } from './Select'
+import { CatalogSkeleton } from './Skeletons'
 import { bhd, fmtDate, hasBadge, minQtyOf, RING, sessionId, useCountdown } from './shared'
 import { useQuote, type QuoteFetcher } from './useQuote'
 
@@ -153,7 +154,7 @@ const StaffCatalog = lazy(() => import('./StaffCatalog'))
 export function ShopPage({ mode = 'public' }: ShopPageProps) {
   if (mode === 'salesman') {
     return (
-      <Suspense fallback={<div className="grid h-[60vh] place-items-center text-[13px] text-[#6b6480]">Loading the catalog…</div>}>
+      <Suspense fallback={<CatalogSkeleton />}>
         <StaffCatalog />
       </Suspense>
     )

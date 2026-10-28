@@ -44,7 +44,8 @@ import { QtySheet } from './QtySheet'
 import { ShopPickerSheet, ShopPill } from './ShopPicker'
 import { ShopSheet } from './ShopSheet'
 import { SoldOutDivider } from './SoldOut'
-import { bhd, hasBadge, HIT, isSoldOut, minQtyOf, RING, stepOf } from './shared'
+import { bhd, hasBadge, HIT, isSoldOut, minQtyOf, RING, SKELETON, stepOf } from './shared'
+import { ListSkeleton } from './Skeletons'
 import { UndoToast, type UndoOffer } from './UndoToast'
 import { useQuote, type QuoteFetcher } from './useQuote'
 
@@ -767,7 +768,11 @@ export function StaffCatalog() {
                     {shown.length !== items.length ? ` of ${items.length}` : ''}
                   </>
                 ) : (
-                  'Loading the price list…'
+                  // the count's place holds a bar like the rest of the page; the words are for a screen reader
+                  <>
+                    <span aria-hidden="true" className={cn(SKELETON, 'inline-block h-3 w-24 rounded align-middle')} />
+                    <span className="sr-only">Loading the price list…</span>
+                  </>
                 )}
               </p>
               {data && FILTER_CHIPS.filter((c) => filters[c.key]).map((c) => (
@@ -785,17 +790,7 @@ export function StaffCatalog() {
             </div>
 
             {!data ? (
-              <div className="overflow-hidden rounded-2xl border border-[#E9E4EF] bg-white">
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <div key={i} className="flex h-[72px] items-center gap-3 border-b border-[#F3F0F6] px-3 last:border-0">
-                    <div className="h-14 w-14 animate-pulse rounded-xl bg-[#F3F0F6]" />
-                    <div className="flex-1 space-y-2">
-                      <div className="h-3 w-1/3 animate-pulse rounded bg-[#f0eef6]" />
-                      <div className="h-2.5 w-2/3 animate-pulse rounded bg-[#F3F0F6]" />
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <ListSkeleton />
             ) : shown.length === 0 ? (
               <div className="rounded-2xl border border-[#E9E4EF] bg-white px-6 py-14 text-center">
                 <p className="font-display text-[15px] font-bold text-[#1A1428]">{quick ? 'No exact code in that list' : 'Nothing matches that'}</p>
