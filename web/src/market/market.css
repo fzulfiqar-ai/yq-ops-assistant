@@ -615,19 +615,36 @@
  * must sit inside an element passed to useReveal. Put it on a section wrapper or a wrapper around a
  * desktop grid card — never on compact rail cards, inside a .cv-* element, or on an element with its
  * own transition (this shorthand would replace it). Stagger: style={{ ['--i' as string]: index }}. */
+/* v2 (28-Oct-2026): 240 ms with the enter curve, a stagger of at most 4 × 40 ms (it was 6 × 45 on
+ * 320 ms, so a row's last card arrived 590 ms after the scroll), 8 px on a phone, none at all on a
+ * weak phone (html[data-lite]), and a flick or a jump shows the node at once (.is-instant). */
 @media (prefers-reduced-motion: no-preference) {
-  html[data-reveal] .reveal {
+  html[data-reveal]:not([data-lite]) .reveal {
     opacity: 0;
     transform: translateY(12px);
-    transition: opacity var(--m-d-3) var(--m-ease), transform var(--m-d-3) var(--m-ease);
-    transition-delay: calc(min(var(--i, 0), 6) * 45ms);
+    transition: opacity 240ms var(--m-ease-out), transform 240ms var(--m-ease-out);
+    transition-delay: calc(min(var(--i, 0), 4) * 40ms);
   }
-  html[data-reveal] .reveal.is-in {
+  html[data-reveal]:not([data-lite]) .reveal.is-in {
     opacity: 1;
     transform: none;
   }
+  html[data-reveal]:not([data-lite]) .reveal.is-instant {
+    transition: none;
+  }
+}
+@media (prefers-reduced-motion: no-preference) and (max-width: 767px) {
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) {
+    transform: translateY(8px);
+  }
 }
 /* end v3: reveal */
+
+/* lite (lib/lite.ts): no sweeps over skeletons or waiting photos */
+html[data-lite] .skeleton::after,
+html[data-lite] .m-photo::after {
+  display: none;
+}
 
 /* v3: horizon */
 /* The portal's glow horizon (web/src/components/ui/glow-horizon.tsx) in CSS, mirrored so the arcs

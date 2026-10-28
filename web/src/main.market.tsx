@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import './market/market.css'
+import { applyLite } from './market/lib/lite'
 import MarketApp from './MarketApp'
 
 /**
@@ -26,4 +27,5 @@ window.addEventListener('vite:preloadError', (event) => {
   window.location.reload()
 })
 
+applyLite()
 createRoot(document.getElementById('root')!).render(<MarketApp />)

@@ -308,6 +308,64 @@ def lazy_open(page: Page, url: str, look_at: int = 900) -> list[Finding]:
     return [("fail", "lazy-blank", f"S5: with {len(held)} chunk(s) still loading the page shows {what}", r)]
 
 
+# ── reveal v2 (motion list M6, M7, M16) ───────────────────────────────────────────────────────────
+REVEAL_STATE = r"""
+() => {
+  const all = [...document.querySelectorAll('.reveal')];
+  const fold = innerHeight;
+  const below = all.filter((el) => el.getBoundingClientRect().top >= fold);
+  // stuck = still hidden although it is in or above the viewport (below the fold it is just not reached)
+  const hidden = all.filter((el) => el.getBoundingClientRect().top < fold && +getComputedStyle(el).opacity < 0.99);
+  return { total: all.length, below: below.length, hidden: hidden.length,
+           instant: all.filter((el) => el.classList.contains('is-instant')).length,
+           lite: 'lite' in document.documentElement.dataset };
+}
+"""
+
+
+def reveal_phone(page: Page) -> list[Finding]:
+    """M6 on a phone: the home has sections that rise in below the fold (before: phones got none)."""
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(300)
+    r = page.evaluate(REVEAL_STATE)
+    if r["below"] == 0:
+        return [("fail", "reveal-phone", f"M6: no scroll reveal below the fold on this phone ({r['total']} .reveal in all)", r)]
+    return [("note", "reveal-phone", f"M6: {r['below']} section(s) rise in below the fold", r)]
+
+
+def reveal_flick(page: Page, speed: int = 4000, px: int = 6000) -> list[Finding]:
+    """M7: a flick faster than 2000 px/s reveals at once (`is-instant`), and nothing stays hidden after it."""
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(300)
+    page.evaluate(SCROLL_FRAMES, {"speed": speed, "px": px})
+    page.wait_for_timeout(450)
+    r = page.evaluate(REVEAL_STATE)
+    page.evaluate("() => window.scrollTo(0, 0)")
+    out: list[Finding] = []
+    if r["total"] and not r["instant"]:
+        out.append(("fail", "reveal-flick", f"M7: a {speed} px/s flick still animated every reveal (none instant of {r['total']})", r))
+    if r["hidden"]:
+        out.append(("fail", "reveal-stuck", f"M7: {r['hidden']} .reveal still hidden after the flick", r))
+    return out or [("note", "reveal-flick", f"M7: {r['instant']} of {r['total']} reveals were instant during the flick", r)]
+
+
+LOW_MEMORY = "Object.defineProperty(navigator, 'deviceMemory', { get: () => 1, configurable: true });"
+
+
+def lite_mode(page: Page) -> list[Finding]:
+    """M16: a page opened with navigator.deviceMemory = 1 (the caller's init script LOW_MEMORY) runs lite:
+    html[data-lite] is set and no reveal hides anything."""
+    page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+    page.wait_for_timeout(200)
+    r = page.evaluate(REVEAL_STATE)
+    page.evaluate("() => window.scrollTo(0, 0)")
+    if not r["lite"]:
+        return [("fail", "lite-mode", "M16: a 1 GB phone did not get html[data-lite]", r)]
+    if r["hidden"]:
+        return [("fail", "lite-mode", f"M16: lite mode still hides {r['hidden']} .reveal", r)]
+    return [("note", "lite-mode", "M16: lite mode on, nothing hidden", r)]
+
+
 # ── S6 ─────────────────────────────────────────────────────────────────────────────────────────
 TRACK_TOPS = r"""
 (ms) => {
