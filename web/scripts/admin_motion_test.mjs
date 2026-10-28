@@ -121,5 +121,25 @@ await check('content fades in over its skeleton only when a skeleton was shown; 
   eq([M.fadeFromSkeleton(false, false), M.fadeFromSkeleton(true, false), M.fadeFromSkeleton(false, true)], [true, false, false])
 })
 
+// ── the components and pages, as text ────────────────────────────────────────────────────────────
+await check('CountUp counts up on its first view only; a revisit or reduced motion shows the final figure at once', () => {
+  const c = text('components/CountUp.tsx')
+  ok(c.includes('useFirstView(`countup:${id}`)'), 'the first-view rule')
+  ok(c.includes('useMotionValue(first ? 0 : value)'), 'otherwise it starts at the final value')
+  ok(c.includes('id: string'), 'every figure names itself')
+  ok(c.includes('ease: ENTER_EASE'), 'the enter curve')
+})
+
+await check('Dashboard: every chart through ChartBox, the KPI stagger once, nothing animates box-shadow', () => {
+  const d = text('pages/Dashboard.tsx')
+  ok(!d.includes('<ResponsiveContainer'), 'no bare ResponsiveContainer')
+  eq((d.match(/<ChartBox id="dashboard\./g) || []).length, 5, 'five charts:')
+  for (const s of ['<Bar {...m}', '<Area {...m}', '<Line {...m}', '<Pie {...m}']) ok(d.includes(s), `${s} — its series reads the first-view rule`)
+  ok(d.includes("useFirstView('dashboard.kpis')"), 'the stagger reads the first-view rule')
+  ok(!/duration: 0\.5\b/.test(d), 'no 500 ms entrance')
+  ok(!d.includes('transition-[transform,box-shadow]'), 'box-shadow never animates')
+  eq((d.match(/<CountUp id="dashboard\./g) || []).length, 5, 'each figure named:')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

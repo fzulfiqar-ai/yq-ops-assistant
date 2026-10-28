@@ -166,5 +166,15 @@ await check('a double click saves once; the button is free again after the save,
   eq(await G.runGuarded(g, 'approve', async () => 'again'), 'again')
 })
 
+// ── the pages, as text ───────────────────────────────────────────────────────────────────────────
+await check('Dashboard: an error with Retry; every card holds its place while the figures load', () => {
+  const d = text('pages/Dashboard.tsx')
+  ok(d.includes("import { LoadError } from '@/components/LoadError'"), 'LoadError')
+  ok(d.includes('const state = panelState({ data, isError })'), 'the shared state rule')
+  ok(d.includes("state === 'error' ? (") && d.includes("state === 'loading' ? ("), 'an error face and a loading face')
+  for (const s of ['ActionsSkeleton', 'DailySkeleton', 'HealthSkeleton', 'MomentumSkeleton']) ok(d.includes(`function ${s}(`), s)
+  ok(!d.includes("subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus}"), 'no "All clear" under a failed read')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
