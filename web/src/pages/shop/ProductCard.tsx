@@ -67,13 +67,17 @@ export function ProductCard({
   const canOrder = !out || allowBackorder
   const selected = qty > 0
 
+  // The lift and the photo zoom are for a pointer that hovers (a mouse): on a phone a tap leaves
+  // :hover stuck on the card until the next tap elsewhere, so they apply only under
+  // @media (hover: hover). The shadow and border change without a transition (only transform and
+  // opacity animate); the zoom is a transform, 280 ms on the enter curve, still under reduced motion.
   return (
     <article
       className={cn(
-        'group flex flex-col overflow-hidden rounded-[20px] border bg-white transition duration-200 ease-out',
+        'group flex flex-col overflow-hidden rounded-[20px] border bg-white',
         selected
           ? 'border-[#6D4091]/40 shadow-[0_0_0_1px_rgba(109,40,217,.10),0_8px_24px_-16px_rgba(24,16,48,.30)]'
-          : 'border-[#E9E4EF] shadow-[0_1px_2px_rgba(24,16,48,.04)] hover:border-[#e2ddef] hover:shadow-[0_12px_28px_-18px_rgba(24,16,48,.32)]',
+          : 'border-[#E9E4EF] shadow-[0_1px_2px_rgba(24,16,48,.04)] [@media(hover:hover)]:hover:border-[#e2ddef] [@media(hover:hover)]:hover:shadow-[0_12px_28px_-18px_rgba(24,16,48,.32)]',
         className,
       )}
     >
@@ -89,7 +93,7 @@ export function ProductCard({
           eager={eagerImage}
           className="aspect-square w-full"
           imgClassName={cn(
-            'p-3 transition-transform duration-500 ease-out group-hover:scale-[1.035]',
+            'p-3 transition-transform duration-[280ms] ease-[cubic-bezier(.22,1,.36,1)] motion-reduce:transition-none [@media(hover:hover)]:group-hover:scale-[1.035]',
             out && 'opacity-45 saturate-50',
           )}
         />
