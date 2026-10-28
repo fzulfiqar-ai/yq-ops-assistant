@@ -261,6 +261,8 @@ export const en = {
     saveItem: 'Save',
     savedItem: 'Saved',
     zoom: 'Zoom photo',
+    /** a display box the export names by its contents list ("AA1:6|BB2:6|…"): lib/format productName */
+    mixedBox: (lines: number, pcs: number) => `Mixed box · ${lines} lines, ${pcs} pcs`,
     shareProduct: 'Share this product',
     tellBackDone: 'We will tell you when it is back',
     min: (n: number) => `Min ${n}`,

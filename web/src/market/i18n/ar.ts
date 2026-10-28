@@ -237,6 +237,7 @@ export const ar: Strings = {
     saveItem: 'احفظ',
     savedItem: 'محفوظ',
     zoom: 'كبّر الصورة',
+    mixedBox: (lines: number, pcs: number) => `صندوق منوّع · ${lines} أصناف، ${pcs} قطعة`,
     shareProduct: 'شارك هذا المنتج',
     tellBackDone: 'سنبلغك عند توفره',
     min: (n: number) => `الحد الأدنى ${n}`,

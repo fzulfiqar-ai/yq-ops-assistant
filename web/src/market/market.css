@@ -968,7 +968,11 @@ html[data-lite] .m-photo::after {
 }
 .slide-card[data-size='tile'] .slide-title {
   font-size: 20px;
-  font-size: clamp(17px, 7cqi, 26px);
+  font-size: clamp(17px, 6.4cqi, 24px);
+  /* the tile drops the slide's line, so its headline may take a third line rather than end in
+   * "…": "32 prices cut in our price…" read as a broken sentence (28-Oct-2026) */
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 .slide-card[data-size='aside'] .slide-title {
   font-size: 20px;

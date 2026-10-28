@@ -526,7 +526,10 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           ) : (
             <span className="text-xs font-semibold text-ink-2">{S.card.priceOnRequest}</span>
           )}
-          <div className="w-[6.5rem] md:w-[7.5rem]">{action('sm')}</div>
+          {/* 7.5rem holds the small stepper whole (two 38 px keys, a 36 px value, padding and border:
+              118 px). At 6.5rem it spilled 14 px past the row and widened a 360 px phone's page to
+              366 px, cutting off the "+". */}
+          <div className="w-[7.5rem]">{action('sm')}</div>
         </div>
         {keypadEl}
       </article>

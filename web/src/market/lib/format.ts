@@ -263,11 +263,38 @@ function calmCaps(text: string): string {
   return text.replace(SHOUT, (word) => (KEEP_CAPS.has(word) ? word : word[0] + word.slice(1).toLowerCase()))
 }
 
+/**
+ * A mixed display box that the export names by its contents list — "X05MK:6|LT:6|TC:6|X23CC：6"
+ * (CODE:QTY pairs joined by "|", sometimes with a full-width colon). Two pairs or more, nothing else
+ * on the line; anything else is an ordinary name.
+ */
+const PAIR = /^([A-Z0-9][\w-]*)\s*[:：]\s*(\d+)$/i
+
+export function contentsList(text: string): { code: string; qty: number }[] | null {
+  const parts = text.split('|').map((p) => p.trim())
+  if (parts.length < 2) return null
+  const out: { code: string; qty: number }[] = []
+  for (const p of parts) {
+    const m = PAIR.exec(p)
+    if (!m) return null
+    out.push({ code: m[1], qty: Number(m[2]) })
+  }
+  return out
+}
+
+/** the line as the export wrote it, without the item's own code or the brand tag */
+function bareLine(text: string, code: string): string {
+  return stripCode(cleanLine(text, code), code).replace(/^[\s\-–:·]+/, '').trim()
+}
+
 export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>): string {
   const code = item.item_code
   const dn = (item.display_name || '').trim()
   const firstSpec = (item.spec || '').split('\n')[0].trim()
   const raw = cleanLine(dn && dn.toUpperCase() !== code.toUpperCase() ? dn : firstSpec, code)
+  // a box named by its contents (TB-D10, TB-D12): say what it is; productDetail lists the contents
+  const box = contentsList(bareLine(raw, code))
+  if (box) return S.card.mixedBox(box.length, box.reduce((n, l) => n + l.qty, 0))
   let noCode = stripCode(raw, code).trim()
   if (noCode === raw) {
     // the line starts with the model only ("X24 2Mtr Cable …" for code "X24 CC")
@@ -280,8 +307,25 @@ export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 
   return out || code
 }
 
-/** The detail line under a name: the spec minus whatever the name already said. */
+/**
+ * Names for a short list that shows no codes (the desktop aside's "Popular right now"): two lines
+ * that read the same — "3.5mm Jack Flat In-Ear Phones" at two prices — each carry their code, so the
+ * merchant can tell them apart. A unique name is left as it is.
+ */
+export function distinctNames(items: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>[]): Map<string, string> {
+  const named = items.map((it) => [it.item_code, productName(it)] as const)
+  const seen = new Map<string, number>()
+  for (const [, n] of named) seen.set(n.toLowerCase(), (seen.get(n.toLowerCase()) || 0) + 1)
+  return new Map(named.map(([code, n]) => [code, (seen.get(n.toLowerCase()) || 0) > 1 ? `${n} · ${code}` : n]))
+}
+
+/** The detail line under a name: the spec minus whatever the name already said. A mixed box named
+ *  by its contents list gets the contents, one "CODE ×qty" each. */
 export function productDetail(item: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>): string {
+  const listed = [item.display_name || '', ...(item.spec || '').split('\n')]
+    .map((l) => contentsList(bareLine(l, item.item_code)))
+    .find(Boolean)
+  if (listed) return listed.map((l) => `${l.code} ×${l.qty}`).join(' · ')
   const name = productName(item).toLowerCase()
   const lines = (item.spec || '')
     .split('\n')

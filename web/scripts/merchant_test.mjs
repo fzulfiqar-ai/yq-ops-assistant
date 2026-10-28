@@ -401,5 +401,27 @@ check('price drop wins: a line with a REAL drop is never a clearing line — the
   eq([codes(sets.drops), codes(sets.lastChance)], [['T-DROP'], ['T-CLR']], 'deal sets')
 })
 
+check('a display box written as its contents list reads as a name, and its detail lists the contents (L12)', () => {
+  // the export's shape for a mixed box: its code, then CODE:QTY pairs joined by "|" (one with a full-width colon)
+  const box = { item_code: 'T-BOX1', display_name: 'T-BOX1 - AA1:6|BB2:6|CC3CC：6|DD4:6 (VFAN)', spec: 'T-BOX1 - AA1:6|BB2:6|CC3CC：6|DD4:6 (VFAN)' }
+  eq(F.productName(box), en.card.mixedBox(4, 24), 'name: "Mixed box · 4 lines, 24 pcs"')
+  ok(!/[|:：]/.test(F.productName(box)), 'no pipes or colons in the name')
+  eq(F.productDetail(box), 'AA1 ×6 · BB2 ×6 · CC3CC ×6 · DD4 ×6', 'detail: the contents, one "CODE ×qty" each')
+  ok(/[؀-ۿ]/.test(ar.card.mixedBox(4, 24)), 'Arabic mixedBox')
+  // a real name with a "|" in its spec is left alone (one pair is not a list)
+  const plain = { item_code: 'T-CAB', display_name: 'T-CAB 1mtr Mix Cables + HFs + AUX (VFAN)', spec: '' }
+  ok(!F.productName(plain).startsWith(en.card.mixedBox(1, 1).split('·')[0]), 'an ordinary name is untouched')
+})
+
+check('a short list never shows two lines that read the same: a colliding name carries its code (L7)', () => {
+  const a = { item_code: 'T-EAR1', display_name: '3.5mm Jack Flat In-Ear Phones', spec: '' }
+  const b = { item_code: 'T-EAR2', display_name: '3.5mm Jack Flat In-Ear Phones', spec: '' }
+  const c = { item_code: 'T-PB', display_name: 'Power bank 10000mAh', spec: '' }
+  const names = F.distinctNames([a, b, c])
+  ok(names.get('T-EAR1') !== names.get('T-EAR2'), 'the two earphones differ')
+  ok(names.get('T-EAR1').includes('T-EAR1') && names.get('T-EAR2').includes('T-EAR2'), 'each carries its own code')
+  eq(names.get('T-PB'), F.productName(c), 'a unique name is untouched')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
