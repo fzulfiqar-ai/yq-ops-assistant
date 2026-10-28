@@ -5,9 +5,16 @@ import { UploadCloud, Loader2, FileText, ArrowUpRight, ArrowDownRight, PackageOp
 import { apiGet, apiUpload, apiPost, apiDelete, apiDownload, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
+import { panelState } from '@/lib/dataState'
+import { refreshAfterDataChange } from '@/lib/dataRefresh'
+import { useActionGate } from '@/lib/actionGate'
+import { InlineError } from '@/lib/inlineError'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
+import { ScrollX } from '@/components/DataTable'
 import { useToast } from '@/components/Toast'
 import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
 
 interface ProposalLine {
   item_name: string
@@ -66,13 +73,38 @@ interface VerifyReport {
 
 const bhd = (n?: number) => (n == null ? '—' : `BHD ${Number(n).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}`)
 
+/** The proposal, the cost-change table and the order lists while /purchase-orders is still being read. */
+function OrdersSkeleton() {
+  return (
+    <div className="mt-6" aria-busy="true" aria-label="Loading the orders">
+      <Skeleton className="mb-2 h-3 w-64" />
+      <Card className="overflow-hidden">
+        <Skeleton className="h-14 rounded-none" />
+        <div className="space-y-2 p-4">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-8" />)}</div>
+      </Card>
+    </div>
+  )
+}
+
 export default function Orders() {
   const qc = useQueryClient()
-  const { data } = useQuery({ queryKey: ['purchase-orders'], queryFn: () => apiGet<POData>('/purchase-orders') })
-  const { data: board } = useQuery({ queryKey: ['procurement-board'], queryFn: () => apiGet<BoardData>('/procurement/board') })
-  const { data: supplierPrices } = useQuery({ queryKey: ['supplier-prices'], queryFn: () => apiGet<SupplierPrices>('/supplier-prices') })
+  // Three reads, each with its own honest state (lib/dataState.ts): the proposal, the cost changes and the
+  // order lists come from /purchase-orders; while it loads they show their skeletons, and if it fails one
+  // error with Retry stands in for them — "Everything ordered has been received" never stands for a failure.
+  const poQuery = useQuery({ queryKey: ['purchase-orders'], queryFn: () => apiGet<POData>('/purchase-orders') })
+  const data = poQuery.data
+  const poState = panelState({ data, isError: poQuery.isError })
+  const boardQuery = useQuery({ queryKey: ['procurement-board'], queryFn: () => apiGet<BoardData>('/procurement/board') })
+  const board = boardQuery.data
+  const spQuery = useQuery({ queryKey: ['supplier-prices'], queryFn: () => apiGet<SupplierPrices>('/supplier-prices') })
+  const supplierPrices = spQuery.data
   const { me } = useAuth()
   const isAdmin = me?.role === 'admin'
+  // Start order, Approve and Advance raise or move procurement orders: one save at a time per order, checked in
+  // the handler (a double click used to raise two), and the button disabled while it is on its way
+  const { run, pending } = useActionGate()
+  // a pipeline order being cancelled: the card asks "Cancel this order?" before anything is sent
+  const [confirmCancel, setConfirmCancel] = useState<number | null>(null)
 
   async function delOrder(poNo: string) {
     if (!window.confirm(`Delete order ${poNo} and all its files? This can't be undone.`)) return
@@ -128,7 +160,9 @@ export default function Orders() {
     }
     setBusy(false)
     if (pos) qc.invalidateQueries({ queryKey: ['purchase-orders'] })
-    if (mrns) qc.invalidateQueries({ queryKey: ['report', 'dashboard'] })  // costs → margins changed
+    // a goods receipt moves the landed costs: margins, stock at cost, the Dashboard, the price tracker — every
+    // report is read again (lib/dataRefresh.ts), not the Dashboard alone
+    if (mrns) void refreshAfterDataChange(qc)
     if (invs) qc.invalidateQueries({ queryKey: ['supplier-prices'] })
   }
 
@@ -137,17 +171,19 @@ export default function Orders() {
     catch { toast('Could not copy.', 'error') }
   }
 
-  async function startOrder(g: VendorGroup) {
-    try {
-      const lines = g.items.map((i) => ({ item: i.item_name, qty: qtyFor(i), rate: i.last_rate_bhd }))
-      const estTotal = g.items.reduce((s, i) => s + (estFor(i) ?? 0), 0)
-      const namedVendor = g.vendor.startsWith('(') ? null : g.vendor
-      await apiPost('/procurement/orders', {
-        title: `${namedVendor || 'New'} reorder`, vendor: namedVendor, est_value_bhd: estTotal, lines,
-      })
-      toast(`Order started${namedVendor ? ` for ${namedVendor}` : ''} — track it in the pipeline below.`, 'success')
-      qc.invalidateQueries({ queryKey: ['procurement-board'] })
-    } catch { toast('Could not start the order.', 'error') }
+  function startOrder(g: VendorGroup) {
+    return run(`start:${g.vendor}`, async () => {
+      try {
+        const lines = g.items.map((i) => ({ item: i.item_name, qty: qtyFor(i), rate: i.last_rate_bhd }))
+        const estTotal = g.items.reduce((s, i) => s + (estFor(i) ?? 0), 0)
+        const namedVendor = g.vendor.startsWith('(') ? null : g.vendor
+        await apiPost('/procurement/orders', {
+          title: `${namedVendor || 'New'} reorder`, vendor: namedVendor, est_value_bhd: estTotal, lines,
+        })
+        toast(`Order started${namedVendor ? ` for ${namedVendor}` : ''} — track it in the pipeline below.`, 'success')
+        await qc.invalidateQueries({ queryKey: ['procurement-board'] })
+      } catch { toast('Could not start the order.', 'error') }
+    })
   }
 
   // Export the reviewed proposal as a VFAN-format order .xlsx. The proposal carries the NET ¥ price
@@ -184,35 +220,41 @@ export default function Orders() {
     } catch { toast('Verify failed.', 'error') } finally { setVerifyBusy(false) }
   }
 
-  async function approveVerified() {
+  function approveVerified() {
     if (!verify?.lines?.length) return
-    const lines = verify.lines.map((l) => ({ item: l.model, spec: l.spec, qty: l.qty, rate: l.cost_bhd }))
-    const est = verify.lines.reduce((s, l) => s + (l.qty || 0) * (l.cost_bhd || 0), 0)
-    try {
-      await apiPost('/procurement/orders', {
-        title: `${verify.vendor || 'VFAN'} order (verified)`, vendor: verify.vendor || 'VFAN',
-        est_value_bhd: Math.round(est * 1000) / 1000, lines, stage: 'reviewed',
-        note: `Verified order — ${verify.summary}`,
-      })
-      toast('Verified order added to the pipeline at “Reviewed”.', 'success')
-      setVerify(null)
-      qc.invalidateQueries({ queryKey: ['procurement-board'] })
-    } catch { toast('Could not add to the pipeline.', 'error') }
+    const v = verify
+    return run('approve', async () => {
+      const lines = v.lines.map((l) => ({ item: l.model, spec: l.spec, qty: l.qty, rate: l.cost_bhd }))
+      const est = v.lines.reduce((s, l) => s + (l.qty || 0) * (l.cost_bhd || 0), 0)
+      try {
+        await apiPost('/procurement/orders', {
+          title: `${v.vendor || 'VFAN'} order (verified)`, vendor: v.vendor || 'VFAN',
+          est_value_bhd: Math.round(est * 1000) / 1000, lines, stage: 'reviewed',
+          note: `Verified order — ${v.summary}`,
+        })
+        toast('Verified order added to the pipeline at “Reviewed”.', 'success')
+        setVerify(null)
+        await qc.invalidateQueries({ queryKey: ['procurement-board'] })
+      } catch { toast('Could not add to the pipeline.', 'error') }
+    })
   }
 
-  async function advanceOrder(id: number, stage: string, label: string) {
-    try {
-      await apiPost(`/procurement/orders/${id}/advance`, { stage })
-      toast(`Moved to ${label}.`, 'success')
-      qc.invalidateQueries({ queryKey: ['procurement-board'] })
-    } catch { toast('Could not update the order.', 'error') }
+  function advanceOrder(id: number, stage: string, label: string) {
+    return run(`advance:${id}`, async () => {
+      try {
+        await apiPost(`/procurement/orders/${id}/advance`, { stage })
+        toast(`Moved to ${label}.`, 'success')
+        setConfirmCancel(null)
+        await qc.invalidateQueries({ queryKey: ['procurement-board'] })
+      } catch { toast('Could not update the order.', 'error') }
+    })
   }
 
   const proposal = data?.proposal
 
   return (
     <div>
-      <PageHeader title="Orders" subtitle="From AI proposal to delivery — propose, raise, track, and compare every order" />
+      <PageHeader title="Purchase orders" subtitle="From AI proposal to delivery — propose, raise, track, and compare every order" />
 
       <Card className="p-5">
         <div onDragOver={(e) => { e.preventDefault(); setDrag(true) }} onDragLeave={() => setDrag(false)}
@@ -228,6 +270,15 @@ export default function Orders() {
           <div className="mt-1 text-sm text-muted-foreground">PO = the order · MRN = real landed cost · Invoice = supplier price history — one or many</div>
         </div>
       </Card>
+
+      {/* /purchase-orders still on its way, or failed: the proposal, cost changes and order lists below wait on it */}
+      {poState === 'loading' && <OrdersSkeleton />}
+      {poState === 'error' && (
+        <div className="mt-6">
+          <LoadError error={poQuery.error} onRetry={() => poQuery.refetch()} isRetrying={poQuery.isFetching}
+            fallback="Could not load the purchase orders." />
+        </div>
+      )}
 
       {/* AI reorder proposal — the agentic headline (Phase 2) */}
       {proposal && proposal.count > 0 && (
@@ -261,13 +312,15 @@ export default function Orders() {
                       className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition hover:border-primary/50 hover:bg-accent">
                       <FileSpreadsheet size={13} /> Export Excel
                     </button>
-                    <button onClick={() => startOrder(g)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90">
-                      <Play size={13} /> Start order
+                    <button type="button" onClick={() => startOrder(g)} disabled={pending(`start:${g.vendor}`)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-60">
+                      {pending(`start:${g.vendor}`) ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} Start order
                     </button>
                   </div>
                 </div>
-                <table className="w-full text-sm">
+                {/* a phone scrolls the table sideways inside the card (it used to be cut off at the card's edge) */}
+                <ScrollX>
+                <table className="w-full min-w-[640px] text-sm">
                   <thead>
                     <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                       <th className="px-4 py-2">Item</th>
@@ -293,8 +346,10 @@ export default function Orders() {
                         <td className="px-4 py-2 text-right tabular-nums">
                           {i.vfan_rmb == null ? <span className="text-muted-foreground">—</span> : <>¥{i.vfan_rmb}
                             {i.vfan_change_pct != null && Math.abs(i.vfan_change_pct) >= 5 && (
-                              <span className={cn('ml-1 text-[11px] font-semibold', i.vfan_change_pct > 0 ? 'text-rose-600' : 'text-emerald-600')}>
-                                {i.vfan_change_pct > 0 ? '▲' : '▼'}{Math.abs(i.vfan_change_pct)}%
+                              <span className={cn('ml-1 inline-flex items-center text-[11px] font-semibold', i.vfan_change_pct > 0 ? 'text-rose-600' : 'text-emerald-600')}
+                                title={`${i.vfan_change_pct > 0 ? 'Up' : 'Down'} ${Math.abs(i.vfan_change_pct)}% on the last VFAN price`}>
+                                {i.vfan_change_pct > 0 ? <ArrowUpRight size={12} aria-hidden="true" /> : <ArrowDownRight size={12} aria-hidden="true" />}
+                                {Math.abs(i.vfan_change_pct)}%
                               </span>)}</>}
                         </td>
                         <td className="px-4 py-2 text-right tabular-nums">{estFor(i) == null ? '—' : bhd(estFor(i) as number)}</td>
@@ -306,6 +361,7 @@ export default function Orders() {
                     ))}
                   </tbody>
                 </table>
+                </ScrollX>
               </Card>
             ))}
           </div>
@@ -346,14 +402,14 @@ export default function Orders() {
                   {verify.summary}
                 </div>
                 {verify.verdict !== 'fail' && (
-                  <button onClick={approveVerified}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90">
-                    <Play size={13} /> Approve → pipeline
+                  <button type="button" onClick={approveVerified} disabled={pending('approve')}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-60">
+                    {pending('approve') ? <Loader2 size={13} className="animate-spin" /> : <Workflow size={13} />} Approve to the pipeline
                   </button>
                 )}
               </div>
-              <div className="mt-3 overflow-hidden rounded-xl border">
-                <table className="w-full text-sm">
+              <ScrollX className="mt-3 overflow-hidden rounded-xl border">
+                <table className="w-full min-w-[560px] text-sm">
                   <thead>
                     <tr className="border-b bg-accent/30 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                       <th className="px-3 py-2">Model</th>
@@ -385,7 +441,7 @@ export default function Orders() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollX>
               <div className="mt-2 px-1 text-[11px] text-muted-foreground">
                 The agent checks; you approve. Approving adds it to the pipeline at “Reviewed”.
                 {verify.total_amount_rmb ? ` Order total ≈ ¥${verify.total_amount_rmb.toLocaleString()}.` : ''}
@@ -395,7 +451,14 @@ export default function Orders() {
         </Card>
       </div>
 
-      {/* Procurement pipeline (Phase 3) — track each order to delivery */}
+      {/* Procurement pipeline (Phase 3) — track each order to delivery. A failed read says so (it used to look
+          like an empty pipeline). */}
+      {boardQuery.isError && !board && (
+        <div className="mt-6">
+          <InlineError error={boardQuery.error} onRetry={() => boardQuery.refetch()} isRetrying={boardQuery.isFetching}
+            fallback="The order pipeline could not be read just now." />
+        </div>
+      )}
       {board && board.orders.length > 0 && (
         <div className="mt-6">
           <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
@@ -413,6 +476,7 @@ export default function Orders() {
               const idx = linear.findIndex((s) => s.key === o.stage)
               const next = idx >= 0 && idx < linear.length - 1 ? linear[idx + 1] : null
               const terminal = o.stage === 'closed' || o.stage === 'cancelled'
+              const saving = pending(`advance:${o.id}`)
               return (
                 <Card key={o.id} className={cn('p-4', o.is_stuck && 'border-amber-300')}>
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -432,9 +496,9 @@ export default function Orders() {
                         </span>
                       )}
                       {!terminal && next && (
-                        <button onClick={() => advanceOrder(o.id, next.key, next.label)}
-                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90">
-                          {next.label} <ChevronRight size={13} />
+                        <button type="button" onClick={() => advanceOrder(o.id, next.key, next.label)} disabled={pending(`advance:${o.id}`)}
+                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-60">
+                          {next.label} {saving ? <Loader2 size={13} className="animate-spin" /> : <ChevronRight size={13} />}
                         </button>
                       )}
                     </div>
@@ -445,15 +509,29 @@ export default function Orders() {
                       <div key={s.key} title={s.label} className={cn('h-1.5 flex-1 rounded-full', si <= idx ? 'bg-primary' : 'bg-border')} />
                     ))}
                   </div>
-                  <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
                     <span className="inline-flex items-center gap-1">
                       {(o.stage === 'received' || o.stage === 'closed') && <CheckCircle2 size={12} className="text-emerald-500" />}
                       {linear[idx]?.label || (o.stage === 'cancelled' ? 'Cancelled' : o.stage)}
                       {!terminal && ` · ${o.days_in_stage}d in stage`}
                     </span>
-                    {!terminal && (
-                      <button onClick={() => advanceOrder(o.id, 'cancelled', 'Cancelled')}
-                        className="text-muted-foreground/70 transition hover:text-rose-600">Cancel</button>
+                    {/* Cancel asks first: it used to cancel on one grey click, with no way back */}
+                    {!terminal && confirmCancel !== o.id && (
+                      <button type="button" onClick={() => setConfirmCancel(o.id)} disabled={pending(`advance:${o.id}`)}
+                        className="min-h-8 px-1 text-muted-foreground/80 transition-colors hover:text-rose-600 disabled:opacity-50">Cancel</button>
+                    )}
+                    {!terminal && confirmCancel === o.id && (
+                      <span role="group" aria-label={`Cancel ${o.title}?`} className="inline-flex flex-wrap items-center gap-2 text-[12px]">
+                        <span className="font-medium text-foreground">Cancel this order?</span>
+                        <button type="button" onClick={() => setConfirmCancel(null)} disabled={saving}
+                          className="min-h-8 rounded-lg border px-2.5 font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-50">
+                          Keep it
+                        </button>
+                        <button type="button" onClick={() => advanceOrder(o.id, 'cancelled', 'Cancelled')} disabled={pending(`advance:${o.id}`)}
+                          className="inline-flex min-h-8 items-center gap-1 rounded-lg bg-rose-600 px-2.5 font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60">
+                          {saving && <Loader2 size={12} className="animate-spin" />} Yes, cancel
+                        </button>
+                      </span>
                     )}
                   </div>
                 </Card>
@@ -463,12 +541,16 @@ export default function Orders() {
         </div>
       )}
 
-      {/* cost change across orders — the headline */}
+      {/* cost change across orders — the headline (once /purchase-orders is read: its failure is said above) */}
+      {poState !== 'error' && (
       <div className="mt-6">
         <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Cost change vs the previous order</div>
-        {data?.cost_changes?.length ? (
+        {poState === 'loading' ? (
+          <Skeleton className="h-28 rounded-xl" />
+        ) : data?.cost_changes?.length ? (
           <Card className="overflow-hidden">
-            <table className="w-full text-sm">
+            <ScrollX>
+            <table className="w-full min-w-[420px] text-sm">
               <thead>
                 <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                   <th className="px-4 py-2.5">Item</th>
@@ -493,6 +575,7 @@ export default function Orders() {
                 })}
               </tbody>
             </table>
+            </ScrollX>
           </Card>
         ) : (
           <Card className="p-6 text-center text-sm text-muted-foreground">
@@ -500,8 +583,15 @@ export default function Orders() {
           </Card>
         )}
       </div>
+      )}
 
       {/* Supplier price changes — RMB unit prices from the VFAN proforma invoices */}
+      {spQuery.isError && !supplierPrices && (
+        <div className="mt-6">
+          <InlineError error={spQuery.error} onRetry={() => spQuery.refetch()} isRetrying={spQuery.isFetching}
+            fallback="The supplier price changes could not be read just now." />
+        </div>
+      )}
       {supplierPrices && supplierPrices.rows.length > 0 && (
         <div className="mt-6">
           <div className="mb-2 flex items-center gap-2 px-1">
@@ -531,7 +621,11 @@ export default function Orders() {
                         <td className="px-4 py-2.5 text-right text-muted-foreground tabular-nums">{r.prev_rmb == null ? '—' : `¥${r.prev_rmb}`}</td>
                         <td className="px-4 py-2.5 text-right tabular-nums">¥{r.latest_rmb}</td>
                         <td className={cn('px-4 py-2.5 text-right font-semibold tabular-nums', r.change_pct == null ? 'text-muted-foreground' : up ? 'text-rose-600' : 'text-emerald-600')}>
-                          {r.change_pct == null ? 'new' : `${up ? '▲' : '▼'} ${Math.abs(r.change_pct)}%`}
+                          {r.change_pct == null ? 'new' : (
+                            <span className="inline-flex items-center justify-end gap-0.5">
+                              {up ? <ArrowUpRight size={13} aria-label="up" /> : <ArrowDownRight size={13} aria-label="down" />}{Math.abs(r.change_pct)}%
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-2.5 text-right text-muted-foreground tabular-nums">{r.invoice_count}</td>
                       </tr>
@@ -545,10 +639,22 @@ export default function Orders() {
         </div>
       )}
 
-      {(() => {
+      {/* the order lists: their skeletons while /purchase-orders is read, their "nothing here" lines only once it is
+          (they used to say "Everything ordered has been received" while loading and after a failure) */}
+      {poState === 'loading' && (
+        <div className="mt-6 grid gap-6 lg:grid-cols-2" aria-hidden="true">
+          {[0, 1].map((col) => (
+            <div key={col}>
+              <Skeleton className="mb-2 h-3 w-40" />
+              <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-[66px] rounded-xl" />)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {(poState === 'ready' || poState === 'empty') && (() => {
         const all = data?.recent || []
         const received = all.filter((o) => o.received)
-        const pending = all.filter((o) => !o.received)
+        const onTheWay = all.filter((o) => !o.received)
         const orderCard = (o: POData['recent'][number]) => (
           <div key={o.po_no} className="group relative">
             <Link to={`/orders/${encodeURIComponent(o.po_no)}`}
@@ -567,9 +673,11 @@ export default function Orders() {
               <div className="text-sm font-semibold">{bhd(o.value_bhd)}</div>
               <ChevronRight size={16} className="text-muted-foreground opacity-0 transition group-hover:opacity-100" />
             </Link>
+            {/* shown on hover with a mouse, on keyboard focus, and always on a touch screen (it was hover-only:
+                no phone or tablet could reach it) */}
             {isAdmin && (
-              <button onClick={() => delOrder(o.po_no)} title="Delete order (admin)"
-                className="absolute -right-2 -top-2 hidden h-6 w-6 place-items-center rounded-full border bg-card text-muted-foreground shadow-soft transition hover:text-rose-600 group-hover:grid">
+              <button type="button" onClick={() => delOrder(o.po_no)} title="Delete order (admin)" aria-label={`Delete order ${o.po_no}`}
+                className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full border bg-card text-muted-foreground opacity-0 shadow-soft transition-opacity duration-200 hover:text-rose-600 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:h-8 [@media(hover:none)]:w-8 [@media(hover:none)]:opacity-100">
                 <Trash2 size={12} />
               </button>
             )}
@@ -585,10 +693,14 @@ export default function Orders() {
               </div>
             </div>
             <div>
-              <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">On the way · pending ({pending.length})</div>
+              <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">On the way · pending ({onTheWay.length})</div>
               <div className="space-y-2">
-                {pending.map(orderCard)}
-                {!pending.length && <Card className="p-6 text-center text-sm text-muted-foreground">Everything ordered has been received. ✓</Card>}
+                {onTheWay.map(orderCard)}
+                {!onTheWay.length && (
+                  <Card className="flex items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
+                    <CheckCircle2 size={16} className="shrink-0 text-emerald-600" aria-hidden="true" /> Everything ordered has been received.
+                  </Card>
+                )}
               </div>
             </div>
           </div>

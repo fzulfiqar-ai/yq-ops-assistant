@@ -176,5 +176,36 @@ await check('Dashboard: an error with Retry; every card holds its place while th
   ok(!d.includes("subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus}"), 'no "All clear" under a failed read')
 })
 
+await check('Purchase orders: a skeleton, an error with Retry, "everything received" only once the list is read', () => {
+  const o = text('pages/Orders.tsx')
+  ok(o.includes('<PageHeader title="Purchase orders"'), 'the menu label')
+  ok(o.includes("import { LoadError } from '@/components/LoadError'"), 'LoadError')
+  ok(o.includes('const poState = panelState({ data, isError: poQuery.isError })'), 'the shared state rule')
+  const at = o.lastIndexOf('Everything ordered has been received.')   // the rendered line, not a comment naming it
+  ok(at > 0, 'the message is still there')
+  const guard = o.indexOf("{(poState === 'ready' || poState === 'empty') && (() => {")
+  ok(guard > 0 && guard < at && o.indexOf('})()}', guard) > at, 'shown only inside the block drawn once the list is read')
+  ok(o.includes("poState === 'loading'") && o.includes("poState === 'error'"), 'a loading face and an error face')
+  ok(/boardQuery\.isError/.test(o) && /spQuery\.isError/.test(o), 'the pipeline and the supplier prices say when they did not load')
+})
+
+await check('Purchase orders: Start order, Approve and Advance save once; a pipeline cancel asks first; Delete on touch', () => {
+  const o = text('pages/Orders.tsx')
+  ok(o.includes("import { useActionGate } from '@/lib/actionGate'"), 'the gate')
+  for (const key of ['`start:', "'approve'", '`advance:']) ok(o.includes(`run(${key}`), `run(${key}…)`)
+  ok((o.match(/disabled=\{pending\(/g) || []).length >= 4, 'start, approve, advance and cancel disable while saving')
+  ok(o.includes('confirmCancel'), 'cancel asks first')
+  ok(!/className="[^"]*\bhidden\b[^"]*group-hover:grid/.test(o), 'Delete is not hover-only')
+  ok(o.includes('[@media(hover:none)]:opacity-100'), 'Delete shows on a touch screen')
+})
+
+await check('Purchase orders: wide tables scroll sideways in their card; icons, not glyphs; an MRN refreshes every report', () => {
+  const o = text('pages/Orders.tsx')
+  ok((o.match(/<ScrollX[\s>]/g) || []).length >= 3, 'the proposal, the verify and the cost-change tables')
+  ok(!/[▲▼✓]/.test(o) && !o.includes('Approve → pipeline'), 'no text arrows or ticks')
+  ok(o.includes("import { refreshAfterDataChange } from '@/lib/dataRefresh'") && o.includes('if (mrns) void refreshAfterDataChange(qc)'),
+    'a goods receipt moves the landed costs: every report and the freshness chip are read again')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
