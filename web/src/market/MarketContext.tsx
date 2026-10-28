@@ -11,12 +11,16 @@ import { S } from './strings'
 import { useToast } from './ui/Toast'
 
 /**
- * Two contexts, one provider:
+ * Three contexts, one provider:
  *
  *  • `useMarket()` — the catalog (painted from the copy this phone saved last time, replaced by
- *    the live payload), who the merchant is attributed to, the search index (loaded lazily, off
- *    the critical path), and the cart ACTIONS (add / setQty / remove with quantity memory and
- *    analytics). This value changes rarely, so product cards stay cheap.
+ *    the live payload), who the merchant is attributed to, and the cart ACTIONS (add / setQty /
+ *    remove with quantity memory and analytics). This value changes rarely, so product cards stay
+ *    cheap.
+ *  • `useMarketSearch()` — the search index (loaded lazily, off the critical path). Its own context
+ *    since 28-Oct-2026: the index lands at idle a second or two after the first paint, and while it
+ *    lived in useMarket() its arrival re-rendered every product card at once, right as the merchant
+ *    began to scroll. Only the three search surfaces subscribe.
  *  • `useOrder()` — the server-priced quote, coupon, note, and the orders this device placed.
  *    Changes on every cart edit; only cart surfaces subscribe.
  *
@@ -47,9 +51,6 @@ export interface MarketValue {
   ref: string | null
   setRef: (slug: string | null) => void
   recognized: boolean
-  index: SearchIndex | null
-  /** ask for the search index now (search intent) — resolves when built */
-  ensureIndex: () => Promise<SearchIndex | null>
   /** remembered quantity for this SKU, rounded to its rules — what one tap of Add sets */
   defaultQty: (item: ShopItem) => number
   add: (item: ShopItem, qty?: number, from?: string) => number
@@ -59,6 +60,12 @@ export interface MarketValue {
   addMany: (entries: { item: ShopItem; qty: number }[], from: string) => number
   pairsFor: (code: string) => ShopItem[]
   reload: () => void
+}
+
+export interface SearchValue {
+  index: SearchIndex | null
+  /** ask for the search index now (search intent) — resolves when built */
+  ensureIndex: () => Promise<SearchIndex | null>
 }
 
 export interface OrderValue {
@@ -74,6 +81,7 @@ export interface OrderValue {
 }
 
 const MarketCtx = createContext<MarketValue | null>(null)
+const SearchCtx = createContext<SearchValue | null>(null)
 const OrderCtx = createContext<OrderValue | null>(null)
 
 const cacheKey = (ref: string | null) => `yq-market-catalog:${(ref || '').toLowerCase()}`
@@ -310,8 +318,6 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       ref,
       setRef,
       recognized,
-      index,
-      ensureIndex,
       defaultQty,
       add,
       setQty,
@@ -320,8 +326,10 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       pairsFor,
       reload,
     }),
-    [data, status, items, itemsByCode, categories, settings, campaigns, allowBackorder, stockAsOf, stockStale, soldOutLabel, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
+    [data, status, items, itemsByCode, categories, settings, campaigns, allowBackorder, stockAsOf, stockStale, soldOutLabel, ref, setRef, recognized, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
   )
+
+  const search = useMemo<SearchValue>(() => ({ index, ensureIndex }), [index, ensureIndex])
 
   const order = useMemo<OrderValue>(
     () => ({ quote, quoting, quoteError, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
@@ -330,9 +338,18 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
 
   return (
     <MarketCtx.Provider value={market}>
-      <OrderCtx.Provider value={order}>{children}</OrderCtx.Provider>
+      <SearchCtx.Provider value={search}>
+        <OrderCtx.Provider value={order}>{children}</OrderCtx.Provider>
+      </SearchCtx.Provider>
     </MarketCtx.Provider>
   )
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function useMarketSearch(): SearchValue {
+  const v = useContext(SearchCtx)
+  if (!v) throw new Error('useMarketSearch must be used inside MarketProvider')
+  return v
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

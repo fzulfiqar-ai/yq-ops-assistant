@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react'
+import { useState, type CSSProperties, type SyntheticEvent } from 'react'
 import { Package } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
@@ -18,11 +18,23 @@ import { S } from '../strings'
  * today). The box always reserves its aspect ratio, so the grid never jumps while loading.
  * If a srcset candidate 404s the whole srcset is dropped and the fallback chain walks on.
  *
- * Photo fade-in (28-Oct-2026): until the photo decodes, the tile shimmers (`.m-photo`, market.css)
- * and the 2 KB 160 px rendition paints first when the payload has one; the photo then fades in over
- * it and the stand-in is dropped. A photo already in the cache shows at once, with no fade.
+ * Photo fade-in (28-Oct-2026): until the photo decodes the tile wears the skeleton tint (`.m-photo`,
+ * market.css; a light sweep over it where a mouse drives the page), then the photo fades in. The
+ * state lives on the tile's `data-state`, flipped by the image's own load event: no React render per
+ * photo, so a fast flick past forty photos costs nothing but the fades. A photo already in the cache
+ * shows at once, with no fade.
  */
-const LOW_HOLD_MS = 260 // the fade (--m-d-2) plus a frame, before the 160 px stand-in is dropped
+
+/** the photo decoded: its tile drops the tint and the photo fades in */
+function shown(img: HTMLImageElement | null) {
+  const tile = img?.parentElement
+  if (tile && tile.dataset.state !== 'in') tile.dataset.state = 'in'
+}
+
+/** a photo already complete when it mounts (memory cache) shows at once, before the first paint */
+function cached(img: HTMLImageElement | null) {
+  if (img && img.complete && img.naturalWidth > 0) shown(img)
+}
 
 export interface ProductImageProps {
   item?: Pick<ShopItem, 'thumb_url' | 'thumb_urls' | 'product_image_url' | 'package_image_url'> | null
@@ -61,22 +73,6 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
   const useSet = Boolean(srcset) && !srcsetDead && !srcs
   const src = useSet ? set!['320'] : chain[idx]
 
-  // which src has decoded, and whether its fade is over (then the stand-in can go)
-  const [shown, setShown] = useState<{ src: string; settled: boolean } | null>(null)
-  const loaded = Boolean(src) && shown?.src === src
-  const settled = loaded && Boolean(shown?.settled)
-  const low = useSet && set?.['160'] && set['160'] !== src && !settled ? set['160'] : null
-  useEffect(() => {
-    if (!loaded || settled || !src) return
-    const t = window.setTimeout(() => setShown({ src, settled: true }), LOW_HOLD_MS)
-    return () => window.clearTimeout(t)
-  }, [loaded, settled, src])
-  // a photo already in the memory cache is complete when it mounts: show it at once, no fade
-  const cached = useCallback((el: HTMLImageElement | null) => {
-    const at = el?.getAttribute('src')
-    if (el && at && el.complete && el.naturalWidth > 0) setShown((s) => (s?.src === at ? s : { src: at, settled: true }))
-  }, [])
-
   if (!src) {
     return (
       <div className={cn('grid place-items-center bg-surface text-line', className)} style={{ aspectRatio: '1 / 1', ...style }}>
@@ -89,10 +85,7 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
   }
 
   return (
-    <div className={cn('m-photo bg-surface', className)} data-state={loaded ? 'in' : 'wait'} style={{ aspectRatio: '1 / 1', ...style }}>
-      {low && (
-        <img src={low} alt="" aria-hidden="true" width={size} height={size} loading={eager || priority ? 'eager' : 'lazy'} decoding="async" draggable={false} className={cn('m-photo-low h-full w-full object-contain', imgClassName)} />
-      )}
+    <div className={cn('m-photo bg-surface', className)} data-state="wait" style={{ aspectRatio: '1 / 1', ...style }}>
       <img
         ref={cached}
         src={src}
@@ -106,10 +99,7 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
         fetchPriority={priority ? 'high' : undefined}
         draggable={false}
         style={vtName ? { viewTransitionName: vtName } : undefined}
-        onLoad={(e) => {
-          const at = e.currentTarget.getAttribute('src')
-          if (at) setShown((s) => (s?.src === at ? s : { src: at, settled: false }))
-        }}
+        onLoad={(e: SyntheticEvent<HTMLImageElement>) => shown(e.currentTarget)}
         onError={() => setState(useSet ? { key, idx: 0, srcsetDead: true } : { key, idx: idx + 1, srcsetDead })}
         className={cn('m-photo-img h-full w-full object-contain', imgClassName)}
       />

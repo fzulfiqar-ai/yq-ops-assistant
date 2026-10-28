@@ -4,7 +4,7 @@ import { ArrowRight, ClipboardPaste, Clock, Plus, RotateCcw, Save, X } from 'luc
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { fetchOrderCached } from '../hooks/useRecentOrders'
-import { useMarket } from '../MarketContext'
+import { useMarket, useMarketSearch } from '../MarketContext'
 import { lastQty, rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
 import { bhd, fmtDateShort, isOut, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
@@ -89,6 +89,7 @@ function writeLists(lists: SavedList[]) {
 
 export default function QuickOrderPage() {
   const m = useMarket()
+  const { index, ensureIndex } = useMarketSearch()
   const { viewport } = useShell()
   const navigate = useNavigate()
   const toast = useToast()
@@ -102,8 +103,8 @@ export default function QuickOrderPage() {
   const inputs = useRef(new Map<number, HTMLInputElement>())
   usePageTitle(S.quick.title, true, `${S.quick.title} · ${S.brand}`)
   useEffect(() => {
-    void m.ensureIndex()
-  }, [m])
+    void ensureIndex()
+  }, [ensureIndex])
   const last = rememberedOrders()[0] || null
 
   const setRow = useCallback((id: number, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r))), [])
@@ -156,7 +157,7 @@ export default function QuickOrderPage() {
       setRow(row.id, { query: value, item: null, suggestions: [], candidates: [], best: null, exactOut: null })
       return
     }
-    const r = resolveQuick(value, m.items, m.index)
+    const r = resolveQuick(value, m.items, index)
     // typing a code resolves the line: lock it the way picking it does — with a quantity and a
     // fresh row underneath. Without this the row read "0" and the order could not be sent.
     if (r.lock) {
@@ -186,7 +187,7 @@ export default function QuickOrderPage() {
   const remove = (id: number) => setRows((rs) => (rs.length === 1 ? [newRow()] : rs.filter((r) => r.id !== id)))
 
   const applyPaste = () => {
-    const parsed = parseList(pasteText, m.items, m.index)
+    const parsed = parseList(pasteText, m.items, index)
     if (!parsed.length) return
     const made = parsed.map((p) => {
       // a pasted code that IS a sold-out SKU is shown on its row, never resolved, with the in-stock lines to pick from
@@ -431,7 +432,7 @@ export default function QuickOrderPage() {
                           </ul>
                         </>
                       )}
-                      {row.query.trim() && !row.suggestions.length && !exactOut && m.index && <p className="mt-1.5 text-xs text-warn">{S.quick.notFound}</p>}
+                      {row.query.trim() && !row.suggestions.length && !exactOut && index && <p className="mt-1.5 text-xs text-warn">{S.quick.notFound}</p>}
                     </div>
                   )}
                 </li>

@@ -115,22 +115,32 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
     return homeGridOrder(r, filtering ? new Set<string>() : railCodes)
   }, [items, inStockOnly, dealsOnly, filtering, railCodes])
 
-  // the first grid page is on screen; the rest of the first chunk arrives on idle
+  // the first grid page is on screen; the rest of the first chunk arrives on idle, one row of FIRST
+  // cards per idle moment: the whole chunk in one task (48 cards on a desktop) was one long frame
+  // right where the merchant began to scroll. Once the chunk is reached, or a filter is touched,
+  // "Show more" takes over.
   const chunk = desktop ? CHUNK.desktop : CHUNK.phone
+  const grown = useRef(false)
   useEffect(() => {
+    if (grown.current) return
+    if (visible >= chunk) {
+      grown.current = true
+      return
+    }
     let idle = 0
     let t = 0
-    const grow = () => setVisible((v) => (v < chunk ? chunk : v))
+    const grow = () => setVisible((v) => (v < chunk ? Math.min(chunk, v + FIRST) : v))
     if (typeof window.requestIdleCallback === 'function') idle = window.requestIdleCallback(grow, { timeout: 2500 })
-    else t = window.setTimeout(grow, 1200)
+    else t = window.setTimeout(grow, 600)
     return () => {
       window.clearTimeout(t)
       if (idle) window.cancelIdleCallback(idle)
     }
-  }, [chunk])
+  }, [visible, chunk])
   const toggleFilter = (which: 'stock' | 'deals') => {
     if (which === 'stock') setInStockOnly((v) => !v)
     else setDealsOnly((v) => !v)
+    grown.current = true
     setVisible(FIRST)
   }
   const shownCount = Math.min(visible, grid.length)

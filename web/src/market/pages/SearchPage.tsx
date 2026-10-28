@@ -5,7 +5,7 @@ import { Rail } from '../components/Rail'
 import { SearchField } from '../components/SearchField'
 import { SearchEmpty, SearchGroups, SearchPreparing } from '../components/SearchResults'
 import { groupResults } from '../lib/searchGroups'
-import { useMarket } from '../MarketContext'
+import { useMarket, useMarketSearch } from '../MarketContext'
 import { rememberSearch } from '../lib/device'
 import { track, trackSearch } from '../lib/events'
 import { bestSellers } from '../lib/home'
@@ -22,13 +22,14 @@ import { S } from '../strings'
 export default function SearchPage() {
   const [params, setParams] = useSearchParams()
   const m = useMarket()
+  const { index, ensureIndex } = useMarketSearch()
   const [q, setQ] = useState(params.get('q') || '')
   const inputRef = useRef<HTMLInputElement>(null)
   usePageTitle(S.nav.search, true, q.trim() ? `${q.trim()} · ${S.brand}` : `${S.nav.search} · ${S.brand}`)
 
   useEffect(() => {
-    void m.ensureIndex()
-  }, [m])
+    void ensureIndex()
+  }, [ensureIndex])
   useEffect(() => {
     const cur = params.get('q') || ''
     if (cur !== q.trim()) setParams(q.trim() ? { q: q.trim() } : {}, { replace: true })
@@ -43,17 +44,17 @@ export default function SearchPage() {
     }
   }, [])
 
-  const grouped = useMemo(() => (search ? groupResults(q, m.items, m.index, search.searchItems) : { codes: [], products: [], categories: [], exact: null }), [q, m.items, m.index, search])
+  const grouped = useMemo(() => (search ? groupResults(q, m.items, index, search.searchItems) : { codes: [], products: [], categories: [], exact: null }), [q, m.items, index, search])
   const flat = grouped.codes.length + grouped.products.length
-  const hints = useMemo(() => (search && m.index && q.trim() && !flat ? search.suggest(m.index, q) : []), [search, m.index, q, flat])
+  const hints = useMemo(() => (search && index && q.trim() && !flat ? search.suggest(index, q) : []), [search, index, q, flat])
   const best = useMemo(() => bestSellers(m.items), [m.items])
 
   useEffect(() => {
-    if (!q.trim() || !m.index) return
+    if (!q.trim() || !index) return
     trackSearch(q, flat)
     const id = window.setTimeout(() => rememberSearch(q), 1200)
     return () => window.clearTimeout(id)
-  }, [q, flat, m.index])
+  }, [q, flat, index])
 
   const submit = (v: string) => {
     const query = v.trim()
@@ -69,16 +70,16 @@ export default function SearchPage() {
 
   return (
     <div className="px-gutter lg:px-0">
-      <div className="sticky top-0 z-header -mx-gutter border-b border-line-2 bg-canvas/95 px-gutter pb-3 pt-1 backdrop-blur lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:px-0 lg:pb-2 lg:pt-4 lg:backdrop-blur-none">
+      <div className="sticky top-0 z-header -mx-gutter border-b border-line-2 bg-canvas px-gutter pb-3 pt-1 lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:px-0 lg:pb-2 lg:pt-4">
         {/* desktop: the heading says which query the results belong to — the header's rotating
             search trigger is a palette opener, not this field, and the two read as two searches */}
-        <h1 className="hidden truncate font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{q.trim() && m.index && search ? S.shop.resultsFor(q.trim(), flat) : S.nav.search}</h1>
+        <h1 className="hidden truncate font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{q.trim() && index && search ? S.shop.resultsFor(q.trim(), flat) : S.nav.search}</h1>
         <SearchField ref={inputRef} value={q} onChange={setQ} onSubmit={submit} hints={S.search.hints} autoFocus />
       </div>
       <div className="pt-4">
         {!q.trim() ? (
           <SearchEmpty onPick={setQ} />
-        ) : !m.index || !search ? (
+        ) : !index || !search ? (
           <SearchPreparing />
         ) : (
           <>

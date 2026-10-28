@@ -611,7 +611,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           )}
           {/* desktop hover reveal */}
           <span aria-hidden="true" className="absolute bottom-2 end-2 hidden opacity-0 transition duration-2 ease-m group-hover:opacity-100 lg:flex">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-ink/85 px-3 py-1.5 text-xs font-semibold text-white shadow-2 backdrop-blur">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-ink/90 px-3 py-1.5 text-xs font-semibold text-white shadow-2">
               <Eye size={13} aria-hidden="true" /> {S.card.quickView}
             </span>
           </span>

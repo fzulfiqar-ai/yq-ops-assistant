@@ -29,8 +29,13 @@ function read(): Record<string, number> {
   }
 }
 
+/** In memory while the page scrolls; written to sessionStorage only when the entry is left or the tab
+ *  is hidden — a JSON write on every scroll frame cost real time on a slow phone. */
 function remember(key: string, y: number): void {
   positions[key] = y
+}
+
+function persist(): void {
   const keys = Object.keys(positions)
   if (keys.length > REMEMBER) positions = Object.fromEntries(keys.slice(-REMEMBER).map((k) => [k, positions[k]]))
   try {
@@ -38,6 +43,13 @@ function remember(key: string, y: number): void {
   } catch {
     /* storage blocked: this tab still restores from memory */
   }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', persist)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') persist()
+  })
 }
 
 export function useScrollKeeper(): void {
@@ -62,6 +74,7 @@ export function useScrollKeeper(): void {
     return () => {
       window.removeEventListener('scroll', onScroll)
       if (raf) cancelAnimationFrame(raf)
+      persist()
     }
   }, [location.key])
 

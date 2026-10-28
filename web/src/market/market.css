@@ -181,7 +181,9 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     font-feature-settings: 'kern', 'liga';
-    overscroll-behavior-y: none;
+    /* contain, not none: the page keeps its native bounce (iOS) and stretch (Android) at the ends,
+     * while Android's pull-to-refresh still cannot reload the shop mid-order */
+    overscroll-behavior-y: contain;
   }
   h1,
   h2,
@@ -257,15 +259,19 @@
     scroll-snap-align: start;
     flex: 0 0 auto;
   }
-  /* frosted surface (nav, header). Opaque fallback first for browsers without backdrop-filter. */
+  /* frosted surface (nav, header). A near-solid surface first; the frost only where a mouse
+   * drives the page. On a phone the blur under a fixed bar is recomputed on every scroll frame —
+   * the main jank on mid and low Android — for a bar that is 96% opaque anyway. */
   .glass {
     background-color: hsl(var(--m-surface) / 0.96);
   }
   @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
-    .glass {
-      background-color: hsl(var(--m-surface) / 0.78);
-      -webkit-backdrop-filter: blur(18px) saturate(1.4);
-      backdrop-filter: blur(18px) saturate(1.4);
+    @media (hover: hover) and (pointer: fine) {
+      .glass {
+        background-color: hsl(var(--m-surface) / 0.78);
+        -webkit-backdrop-filter: blur(18px) saturate(1.4);
+        backdrop-filter: blur(18px) saturate(1.4);
+      }
     }
   }
   .skeleton {
@@ -282,9 +288,10 @@
     animation: m-shimmer 1.4s linear infinite;
   }
   /* photo fade-in (ui/ProductImage.tsx): while the photo decodes, the tile wears the skeleton tint
-   * (::before) with a light sweep over it (::after), and the 160 px stand-in (.m-photo-low) paints
-   * on the tint; then the photo fades in and the tint fades out with it, back to the white shelf
-   * tile. Only opacity and transform move. */
+   * (::before); then the photo fades in and the tint fades out with it, back to the white shelf
+   * tile. Only opacity moves. Where a mouse drives the page a light sweep runs over the tint
+   * (::after); a phone keeps the still tint — one sweep per waiting tile is one more layer per photo
+   * on a flick, for a hint the tint already gives. */
   .m-photo {
     position: relative;
     overflow: hidden;
@@ -300,10 +307,6 @@
   .m-photo[data-state='in']::before {
     opacity: 0;
   }
-  .m-photo-low {
-    position: absolute;
-    inset: 0;
-  }
   .m-photo-img {
     position: relative;
     transition: opacity var(--m-d-2) var(--m-ease);
@@ -311,14 +314,16 @@
   .m-photo[data-state='wait'] .m-photo-img {
     opacity: 0;
   }
-  .m-photo[data-state='wait']::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    transform: translateX(-100%);
-    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
-    animation: m-shimmer 1.4s linear infinite;
-    pointer-events: none;
+  @media (hover: hover) and (pointer: fine) {
+    .m-photo[data-state='wait']::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
+      animation: m-shimmer 1.4s linear infinite;
+      pointer-events: none;
+    }
   }
   /* cards below the fold skip layout/paint until they scroll near (React still renders them).
    * Placeholder heights = card v3 (components/MarketCard.tsx) without the optional rows, measured
@@ -710,16 +715,17 @@
   @media (prefers-reduced-motion: no-preference) {
     .horizon.is-rising > i {
       animation: m-horizon-rise var(--arc-dur) cubic-bezier(0.16, 1, 0.3, 1) var(--arc-delay) both;
-      will-change: transform, opacity, filter;
+      will-change: transform, opacity;
     }
   }
 }
-/* `to` is implicit: each arc lands on its resting transform and blur declared above. */
+/* `to` is implicit: each arc lands on its resting transform declared above. The arcs rise at their
+ * resting blur: animating filter re-rasterised four large blurred layers every frame while the
+ * merchant scrolled past the night band (28-Oct-2026). Only transform and opacity move. */
 @keyframes m-horizon-rise {
   from {
     opacity: 0;
     transform: translate3d(0, calc(var(--horizon-y, 50%) + var(--arc-rise)), 0) scale(var(--arc-s), var(--arc-s-y0));
-    filter: blur(var(--arc-blur-0));
   }
 }
 /* .is-opening (components/Splash.tsx, full-screen): the arcs' box is wider than the screen and sunk
