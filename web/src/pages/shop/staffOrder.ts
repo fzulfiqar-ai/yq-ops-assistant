@@ -7,7 +7,8 @@
  *    first tap created instead of making a second one. A key is never reused for a DIFFERENT order:
  *    a new one is minted when the shop changes, and when the lines or the shop's details change
  *    after a failed attempt — otherwise shop B's order could come back as shop A's "duplicate";
- *  • which cart the lines on screen belong to when the rep picks another shop.
+ *  • which cart the lines on screen belong to when the rep picks another shop;
+ *  • what the other screens show again once an order is placed.
  */
 
 export interface CartLineLike { item_code: string; qty: number }
@@ -53,6 +54,24 @@ export function clientIdFor(
   if (tried[key]) return tried[key]
   if (!current || Object.keys(tried).length > 0) return mint()
   return current
+}
+
+/**
+ * What an order placed from the catalog changes on the rep's other screens — the React Query keys
+ * to drop (each a prefix: every list and filter under it). The Orders list and its badge, Today (to
+ * confirm, due), the book (the shop's last order), the stock the catalog shows (and Today's price
+ * drops, which read the same cache), and the usual basket of the shop it was for (a new shop typed
+ * at checkout has none). Without them the rep came back to an Orders list without the order.
+ */
+export function afterOrderKeys(basketKey: string | null): (readonly string[])[] {
+  return [
+    ['shop-orders'],
+    ['shop-orders-new-count'],
+    ['shop-today'],
+    ['shop-book'],
+    ['staff-catalog'],
+    ...(basketKey ? [['shop-basket', basketKey]] : []),
+  ]
 }
 
 /**

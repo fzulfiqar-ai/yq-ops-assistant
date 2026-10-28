@@ -29,7 +29,7 @@ import { FiltersSheet } from './FiltersSheet'
 import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
 import { FILTER_CHIPS, isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
-import { carryCart } from './staffOrder'
+import { afterOrderKeys, carryCart } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
 import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
@@ -854,9 +854,8 @@ export function StaffCatalog() {
             cart.clear()
             setCoupon('')
             setNotice(null)
-            void qc.invalidateQueries({ queryKey: ['shop-today'] })
-            void qc.invalidateQueries({ queryKey: ['shop-book'] })
-            void qc.invalidateQueries({ queryKey: ['shop-orders-new-count'] })
+            // the Orders list, Today, the book, the stock shown here and this shop's usual basket
+            for (const queryKey of afterOrderKeys(basketKey)) void qc.invalidateQueries({ queryKey })
             if (o.duplicate) toast('This order had already been placed — here it is.', 'success')
             window.scrollTo({ top: 0 })
           }}

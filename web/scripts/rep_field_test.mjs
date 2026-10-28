@@ -245,5 +245,29 @@ check('useQuote: an error belongs to the request it answered; a new cart or a Re
   eq(view(failedB, 'B', '1|B'), { quote: qA, quoting: true, error: '', fresh: false }, 'Retry: checking again, the old error gone')
 })
 
+/* ── 3. after an order: what the screens show again ── */
+const O = await load('pages/shop/staffOrder.ts')
+
+check('after an order: the Orders list and its badge, Today, the book, the catalog stock and that shop\'s usual basket', () => {
+  const keys = need(O, 'afterOrderKeys')
+  const k = keys('f:ALPHA MOBILE').map((x) => JSON.stringify(x))
+  for (const want of [['shop-orders'], ['shop-orders-new-count'], ['shop-today'], ['shop-book'], ['staff-catalog'], ['shop-basket', 'f:ALPHA MOBILE']]) {
+    if (!k.includes(JSON.stringify(want))) throw new Error(`missing ${JSON.stringify(want)} in ${k.join(' ')}`)
+  }
+  const fresh = keys(null).map((x) => JSON.stringify(x))
+  eq(fresh.some((x) => x.startsWith('["shop-basket"')), false, 'a new shop has no usual basket to refresh')
+})
+
+check('after an order: every key it drops is one a screen reads (no key that quietly stopped matching)', () => {
+  const keys = need(O, 'afterOrderKeys')
+  // the screens' own queryKey literals, read from the sources
+  const files = ['pages/ShopOrders.tsx', 'pages/sales/lib.ts', 'pages/shop/StaffCatalog.tsx', 'pages/sales/PriceDrops.tsx']
+  const text = files.map((f) => readFileSync(path.join(SRC, f), 'utf8')).join('\n')
+  for (const key of keys('f:ALPHA MOBILE')) {
+    const head = `queryKey: ['${key[0]}'`
+    if (!text.includes(head)) throw new Error(`no screen reads ${head}…`)
+  }
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
