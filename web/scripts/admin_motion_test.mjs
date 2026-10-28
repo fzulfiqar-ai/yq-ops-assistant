@@ -141,5 +141,13 @@ await check('Dashboard: every chart through ChartBox, the KPI stagger once, noth
   eq((d.match(/<CountUp id="dashboard\./g) || []).length, 5, 'each figure named:')
 })
 
+await check('Stock moves: its chart through ChartBox; the van cards fade in over their skeleton, not on every visit', () => {
+  const sm = text('pages/StockMovement.tsx')
+  ok(!sm.includes('<ResponsiveContainer') && sm.includes('<ChartBox id="stock.daily"'), 'the daily movement chart')
+  for (const s of ['<Bar {...m} dataKey="external_in"', '<Bar {...m} dataKey="in_qty"']) ok(sm.includes(s), s)
+  ok(!sm.includes('initial={{ opacity: 0, y: 8 }}'), 'no entrance replayed on every visit')
+  ok(sm.includes('<FadeIn on={vanFade}'), 'a fade over the skeleton only when one was shown')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

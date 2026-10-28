@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { motion } from 'motion/react'
-import { ArrowRight, ArrowLeftRight, Truck, AlertTriangle, BarChart3, ChevronLeft, ChevronRight, PackageCheck, Warehouse } from 'lucide-react'
-import { Bar, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { ArrowLeft, ArrowRight, ArrowLeftRight, Truck, AlertTriangle, BarChart3, ChevronLeft, ChevronRight, PackageCheck, Warehouse } from 'lucide-react'
+import { Bar, ComposedChart, Tooltip, XAxis, YAxis } from 'recharts'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, fmtDate } from '@/lib/format'
+import { panelState } from '@/lib/dataState'
+import { useSkeletonFade } from '@/lib/motionOnce'
+import { ChartBox, FadeIn } from '@/lib/motionKit'
+import { InlineError } from '@/lib/inlineError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -67,11 +70,16 @@ function monthTitle(m: string) {
 function DailyMovement() {
   const [month, setMonth] = useState<string>('')     // '' = latest data month (backend default)
   const [wh, setWh] = useState<string>('')
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, isFetching, isPlaceholderData, refetch } = useQuery({
     queryKey: ['stock-daily', month, wh],
     queryFn: () => apiGet<DailyData>(
       `/stock/daily?month=${encodeURIComponent(month)}&warehouse=${encodeURIComponent(wh)}`),
+    // another month or store keeps the chart on screen (dimmed) until its own answer is in — no skeleton flash
+    placeholderData: (prev) => prev,
   })
+  // empty = the ledger holds no month at all (no Stock_ledger upload yet): only then does the card stand down.
+  // A failed read used to vanish the same way, so the page looked as if there were nothing to show.
+  const dailyState = panelState({ data, isError }, (d) => !d.months?.length)
 
   // Company view ("All warehouses"): internal transfers appear on BOTH sides (issue
   // leg + receive leg), so we chart external in (supplier receipts + returns), sold,
@@ -98,7 +106,7 @@ function DailyMovement() {
       (Number(d.in_qty) + Number(d.out_qty)) > (best ? Number(best.in_qty) + Number(best.out_qty) : 0) ? d : best, null),
   }), [days])
 
-  if (!isLoading && (!data?.months?.length)) return null
+  if (dailyState === 'empty') return null
   const cur = data?.month || ''
   const idx = data ? data.months.indexOf(cur) : -1
   const prevM = idx >= 0 && idx < (data?.months.length ?? 0) - 1 ? data!.months[idx + 1] : null
@@ -135,11 +143,15 @@ function DailyMovement() {
           ))}
         </div>
       )}
-      {isLoading ? (
-        <Skeleton className="mt-4 h-[220px]" />
+      {dailyState === 'error' ? (
+        <div className="mt-4">
+          <InlineError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the daily movement." />
+        </div>
+      ) : isLoading || !data ? (
+        <Skeleton className="mt-4 h-[256px]" />
       ) : (
-        <>
-          <ResponsiveContainer width="100%" height={210}>
+        <div className={cn('transition-opacity duration-200', isFetching && isPlaceholderData && 'opacity-60')}>
+          <ChartBox id="stock.daily" height={210}>{(m) => (
             <ComposedChart data={days} margin={{ top: 12, right: 8, left: 8, bottom: 0 }}>
               <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
                 tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -163,18 +175,18 @@ function DailyMovement() {
                 contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
               {allWh ? (
                 <>
-                  <Bar dataKey="external_in" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={12} />
-                  <Bar dataKey="sales_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={12} />
-                  <Bar dataKey="transfer_out_qty" fill="#3b82f6" radius={[3, 3, 0, 0]} maxBarSize={12} />
+                  <Bar {...m} dataKey="external_in" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={12} />
+                  <Bar {...m} dataKey="sales_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={12} />
+                  <Bar {...m} dataKey="transfer_out_qty" fill="#3b82f6" radius={[3, 3, 0, 0]} maxBarSize={12} />
                 </>
               ) : (
                 <>
-                  <Bar dataKey="in_qty" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={14} />
-                  <Bar dataKey="out_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                  <Bar {...m} dataKey="in_qty" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                  <Bar {...m} dataKey="out_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={14} />
                 </>
               )}
             </ComposedChart>
-          </ResponsiveContainer>
+          )}</ChartBox>
           <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-3 text-sm">
             {allWh ? (
               <>
@@ -219,7 +231,7 @@ function DailyMovement() {
               </span>
             )}
           </div>
-        </>
+        </div>
       )}
     </Card>
   )
@@ -302,10 +314,13 @@ const FLOW_COLS_CONTENTS: Column<FlowRow>[] = [
 function WarehouseFlow() {
   const [direction, setDirection] = useState<'out' | 'in'>('out')
   const [days, setDays] = useState(30)
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+  const { data, isError, error, refetch, isFetching, isPlaceholderData } = useQuery({
     queryKey: ['stock-flow', direction, days],
     queryFn: () => apiGet<FlowData>(`/stock/flow?direction=${direction}&days=${days}`),
+    // another direction or window keeps the table on screen (dimmed) until its own answer is in
+    placeholderData: (prev) => prev,
   })
+  const flowState = panelState({ data, isError })
   const s = data?.summary || {}
   const contents = data?.basis === 'contents'
   const order: FlowStatus[] = contents ? CONTENT_ORDER : ['received', 'partial', 'pending']
@@ -316,12 +331,14 @@ function WarehouseFlow() {
         <h2 className="font-display text-base font-semibold">Issue → Receive tracking</h2>
         <span className="text-xs text-muted-foreground">Accessories Warehouse</span>
         <div className="ml-auto flex flex-wrap gap-1.5">
-          <div className="flex overflow-hidden rounded-lg border text-[12.5px] font-semibold">
-            {([['out', 'From main →'], ['in', '→ Into main']] as const).map(([d, label]) => (
-              <button key={d} onClick={() => setDirection(d)}
-                className={cn('px-3 py-1 transition',
+          <div role="group" aria-label="Direction" className="flex overflow-hidden rounded-lg border text-[12.5px] font-semibold">
+            {([['out', 'From main'], ['in', 'Into main']] as const).map(([d, label]) => (
+              <button key={d} type="button" onClick={() => setDirection(d)} aria-pressed={direction === d}
+                className={cn('inline-flex items-center gap-1 px-3 py-1 transition',
                   direction === d ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-accent/50')}>
+                {d === 'in' && <ArrowRight size={13} aria-hidden="true" />}
                 {label}
+                {d === 'out' && <ArrowRight size={13} aria-hidden="true" />}
               </button>
             ))}
           </div>
@@ -351,18 +368,23 @@ function WarehouseFlow() {
           </span>
         )}
         {(data?.partners || []).slice(0, 6).map((p) => (
-          <span key={p.name} className="rounded-full border bg-secondary/40 px-2.5 py-1 text-muted-foreground">
-            {direction === 'out' ? '→' : '←'} {p.name} <b className="text-foreground tabular-nums">{num(p.qty)}</b>
+          <span key={p.name} className="inline-flex items-center gap-1 rounded-full border bg-secondary/40 px-2.5 py-1 text-muted-foreground">
+            {direction === 'out'
+              ? <ArrowRight size={12} className="shrink-0" aria-label="to" />
+              : <ArrowLeft size={12} className="shrink-0" aria-label="from" />}
+            {p.name} <b className="text-foreground tabular-nums">{num(p.qty)}</b>
           </span>
         ))}
       </div>
-      {isLoading ? (
+      {flowState === 'loading' ? (
         <Skeleton className="h-64" />
-      ) : isError ? (
-        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the transfers." />
+      ) : flowState === 'error' ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the issue and receive tracking." />
       ) : (
-        <DataTable rows={data?.rows || []} cols={contents ? FLOW_COLS_CONTENTS : FLOW_COLS} exportName="stock-flow"
-          empty="No issue vouchers in this window." />
+        <div className={cn('transition-opacity duration-200', isFetching && isPlaceholderData && 'opacity-60')}>
+          <DataTable rows={data?.rows || []} cols={contents ? FLOW_COLS_CONTENTS : FLOW_COLS} exportName="stock-flow"
+            resetKey={`${direction}|${days}`} empty="No issue vouchers in this window." />
+        </div>
       )}
       {!isError && data && data.shown !== undefined && data.shown < data.count && (
         <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
@@ -398,36 +420,35 @@ function VanCard({ v, ledger }: { v: Van; ledger: boolean }) {
        ['On hand', v.on_hand_qty, false], ['To check', toCheck, (toCheck ?? 0) > 0]]
     : [['Issued in', v.transferred_in_qty, false], ['Sold', v.sold_qty, false], ['On hand', v.on_hand_qty, false],
        ['Gap', gap, gap > 0]]
+  // no entrance of its own (it replayed on every visit): the grid fades in over its skeleton, once (FadeIn below)
   return (
-    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-      <Card className={cn('p-4', hasShortage && 'border-rose-300 dark:border-rose-500/40')}>
-        <div className="flex items-center gap-2">
-          <div className={cn('grid h-9 w-9 place-items-center rounded-xl',
-            hasShortage ? 'bg-rose-100 text-rose-600 dark:bg-rose-500/15' : 'bg-accent text-accent-foreground')}>
-            {v.is_van ? <Truck size={17} /> : <Warehouse size={17} />}
-          </div>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">{v.salesman}</div>
-            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{v.warehouse_type.replace('_', ' ')}</div>
-          </div>
-          {hasShortage && (
-            <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300">
-              <AlertTriangle size={11} /> {bhd(v.shortage_value_bhd)} short
-            </span>
-          )}
+    <Card className={cn('p-4', hasShortage && 'border-rose-300 dark:border-rose-500/40')}>
+      <div className="flex items-center gap-2">
+        <div className={cn('grid h-9 w-9 place-items-center rounded-xl',
+          hasShortage ? 'bg-rose-100 text-rose-600 dark:bg-rose-500/15' : 'bg-accent text-accent-foreground')}>
+          {v.is_van ? <Truck size={17} /> : <Warehouse size={17} />}
         </div>
-        <div className={cn('mt-3 grid gap-2 border-t pt-3 text-center', ledger ? 'grid-cols-5' : 'grid-cols-4')}>
-          {cells.map(([label, val, warn]) => (
-            <div key={label}>
-              <div className={cn('font-display text-base font-bold tabular-nums', warn && 'text-amber-600')}>
-                {val === null ? '—' : num(Number(val))}
-              </div>
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold">{v.salesman}</div>
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{v.warehouse_type.replace('_', ' ')}</div>
+        </div>
+        {hasShortage && (
+          <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300">
+            <AlertTriangle size={11} /> {bhd(v.shortage_value_bhd)} short
+          </span>
+        )}
+      </div>
+      <div className={cn('mt-3 grid gap-2 border-t pt-3 text-center', ledger ? 'grid-cols-5' : 'grid-cols-4')}>
+        {cells.map(([label, val, warn]) => (
+          <div key={label}>
+            <div className={cn('font-display text-base font-bold tabular-nums', warn && 'text-amber-600')}>
+              {val === null ? '—' : num(Number(val))}
             </div>
-          ))}
-        </div>
-      </Card>
-    </motion.div>
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
   )
 }
 
@@ -436,23 +457,30 @@ export default function StockMovement() {
   const transfers = useQuery({
     queryKey: ['stock-transfers', days],
     queryFn: () => apiGet<{ transfers: Transfer[] }>(`/stock/transfers?days=${days}`),
+    // another window keeps the table on screen (dimmed) until its own answer is in
+    placeholderData: (prev) => prev,
   })
+  // a failed read is said, with Retry: it used to read "No transfers in this window"
+  const transfersState = panelState({ data: transfers.data, isError: transfers.isError })
   const recon = useQuery({
     queryKey: ['stock-recon'],
     queryFn: () => apiGet<{ vans: Van[]; as_of?: string | null }>('/stock/recon'),
   })
+  const reconState = panelState({ data: recon.data, isError: recon.isError })
+  // the van cards fade in over their skeleton when one was shown (they used to rise in on every visit)
+  const vanFade = useSkeletonFade(recon.data !== undefined)
 
   const vans = useMemo(() => (recon.data?.vans || []).filter((v) => v.is_van), [recon.data])
   const other = useMemo(() => (recon.data?.vans || []).filter((v) => !v.is_van), [recon.data])
   const totalShort = vans.reduce((s, v) => s + (v.shortage_value_bhd || 0), 0)
   // Only the phase 2b API's recon carries as_of: the view's new columns alone (an older API over the 2b view, as
-  // after a rollback of the API) never hide the interim notice
+  // after a rollback of the API) never hide the interim notice. A failed read says so below; it raises no notice.
   const ledgerRecon = useMemo(() => !!recon.data && 'as_of' in recon.data, [recon.data])
-  const showNotice = !recon.isLoading && !ledgerRecon
+  const showNotice = !!recon.data && !ledgerRecon
 
   return (
     <div>
-      <PageHeader title="Stock Movement" subtitle="Daily movement, warehouse → van transfers, and whether each route's stock adds up" />
+      <PageHeader title="Stock moves" subtitle="Daily movement, warehouse → van transfers, and whether each route's stock adds up" />
 
       {/* Interim notice (W1): Pending / Partial / van Gap are not reliable until the matching is corrected */}
       {showNotice && (
@@ -479,24 +507,26 @@ export default function StockMovement() {
       <WarehouseFlow />
 
       {/* Van reconciliation */}
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 mt-8 flex items-center gap-2">
         <PackageCheck size={16} className="text-primary" />
         <h2 className="font-display text-base font-semibold">Salesman van reconciliation</h2>
         {totalShort > 0 && (
           <span className="text-xs font-semibold text-rose-600">{bhd(totalShort)} in counted shortages</span>
         )}
       </div>
-      {recon.isLoading ? (
+      {reconState === 'loading' ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32" />)}
         </div>
-      ) : recon.isError ? (
+      ) : reconState === 'error' ? (
         <LoadError error={recon.error} onRetry={() => recon.refetch()} isRetrying={recon.isFetching}
           fallback="Could not load the van reconciliation." />
+      ) : vans.length === 0 ? (
+        <p className="rounded-xl border px-4 py-6 text-center text-sm text-muted-foreground">No van in the latest reconciliation.</p>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <FadeIn on={vanFade} className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {vans.map((v) => <VanCard key={v.salesman} v={v} ledger={ledgerRecon} />)}
-        </div>
+        </FadeIn>
       )}
       <p className="mt-2 text-xs text-muted-foreground">
         {ledgerRecon
@@ -529,11 +559,16 @@ export default function StockMovement() {
           ))}
         </div>
       </div>
-      {transfers.isLoading ? (
+      {transfersState === 'loading' ? (
         <Skeleton className="h-64" />
+      ) : transfersState === 'error' ? (
+        <LoadError error={transfers.error} onRetry={() => transfers.refetch()} isRetrying={transfers.isFetching}
+          fallback="Could not load the transfers." />
       ) : (
-        <DataTable rows={transfers.data?.transfers || []} cols={COLS} exportName="stock-transfers"
-          empty="No transfers in this window." />
+        <div className={cn('transition-opacity duration-200', transfers.isFetching && transfers.isPlaceholderData && 'opacity-60')}>
+          <DataTable rows={transfers.data?.transfers || []} cols={COLS} exportName="stock-transfers" resetKey={days}
+            empty="No transfers in this window." />
+        </div>
       )}
     </div>
   )

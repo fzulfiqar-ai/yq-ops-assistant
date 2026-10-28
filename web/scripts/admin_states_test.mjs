@@ -216,5 +216,14 @@ await check('Customer orders: a failed read shows the error with Retry, never "N
   ok(drawer.includes('flow.isError'), "the drawer's skeleton ends when its read fails")
 })
 
+await check('Stock moves: the daily chart and the transfers say when they did not load; the menu label; icons for direction', () => {
+  const sm = text('pages/StockMovement.tsx')
+  ok(sm.includes('<PageHeader title="Stock moves"'), 'the menu label')
+  ok(!sm.includes('if (!isLoading && (!data?.months?.length)) return null'), 'the daily chart does not vanish on a failure')
+  ok(sm.includes("dailyState === 'error'") && sm.includes('fallback="Could not load the daily movement."'), 'the daily chart')
+  ok(sm.includes("transfersState === 'error'") && sm.includes('fallback="Could not load the transfers."'), 'the transfers table')
+  ok(!sm.includes("'From main →'") && !sm.includes("'→ Into main'") && !/\? '→' : '←'/.test(sm), 'direction controls draw icons')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
