@@ -61,6 +61,7 @@ import {
   type MiReportBasis,
   type ReadyPhoto,
 } from '@/lib/marketIntel'
+import { useScrollDirection } from '@/market/shell/useScrollDirection'
 import { useCustomers, useSelectedCustomer, useShopBook } from '@/pages/sales/lib'
 
 /**
@@ -143,6 +144,14 @@ const CAPTURE_POSITION: CSSProperties = {
 }
 /** What the button covers at the foot of a page (52 px + 14 px): the shell pads its main by it. */
 const CAPTURE_ROOM = '66px'
+/**
+ * Scrolling down, the button steps aside: it sat on each catalog row's Qty and "+". Scrolling up, near
+ * the top, or at the end of the page (useScrollDirection) it is back; a keyboard focus brings it back at
+ * once. Transform and opacity only, 200 ms, out on the exit curve and in on the enter curve; still under
+ * reduced motion.
+ */
+const TUCKED = 'pointer-events-none translate-y-4 opacity-0 ease-[cubic-bezier(.4,0,1,1)] focus-visible:pointer-events-auto focus-visible:translate-y-0 focus-visible:opacity-100'
+const SHOWN = 'ease-[cubic-bezier(.22,1,.36,1)]'
 
 const CHIP =
   'inline-flex h-11 items-center gap-1.5 rounded-full px-4 text-[13.5px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60 disabled:cursor-default'
@@ -211,6 +220,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
   const [voiceLang, setVoiceLang] = useState<DictationLang>(() => (readCaptureLang() === 'ar' ? 'ar-SA' : 'en-US'))
   const dict = useDictation()
   const S = CAPTURE_STRINGS[lang]
+  const tucked = useScrollDirection() === 'down'
 
   // the admin's lists (issue chips, brands, categories): an API or a database without them leaves the v1 sheet
   const listsQ = useQuery({ queryKey: ['mi-lists'], queryFn: () => fetchLists(), enabled: open, staleTime: 60_000, retry: (n, e) => !notReady(e) && n < 1 })
@@ -457,7 +467,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
           type="button"
           onClick={start}
           aria-label={waiting ? S.buttonWaiting(waiting) : S.buttonAria}
-          className={`fixed z-30 flex h-[52px] items-center gap-2 rounded-full bg-gradient-to-br from-[#824FAB] to-[#6D4091] pl-4 pr-5 text-[14px] font-bold text-white shadow-[0_12px_28px_-10px_rgba(109,64,145,.75)] ring-1 ring-white/20 transition active:scale-[.97] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#824FAB]/40 [--yq-capture-edge:16px] lg:[--yq-capture-edge:32px]${office ? ' [--yq-tabbar:0px]' : ''}`}
+          className={`fixed z-30 flex h-[52px] items-center gap-2 rounded-full bg-gradient-to-br from-[#824FAB] to-[#6D4091] pl-4 pr-5 text-[14px] font-bold text-white shadow-[0_12px_28px_-10px_rgba(109,64,145,.75)] ring-1 ring-white/20 transition-[transform,opacity] duration-200 active:scale-[.97] active:duration-[120ms] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#824FAB]/40 motion-reduce:transition-none [--yq-capture-edge:16px] lg:[--yq-capture-edge:32px]${office ? ' [--yq-tabbar:0px]' : ''} ${tucked ? TUCKED : SHOWN}`}
           style={CAPTURE_POSITION}
         >
           <Camera size={20} strokeWidth={2.2} aria-hidden="true" />

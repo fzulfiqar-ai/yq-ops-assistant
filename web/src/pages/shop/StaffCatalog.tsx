@@ -516,7 +516,9 @@ export function StaffCatalog() {
   const cats = ['All', ...(data?.categories || []).filter((c) => (catCounts.get(c) || 0) > 0 || c === cat)]
 
   return (
-    <div className="bg-[#F9F7F3] text-[#1A1428]" style={hasCart ? { paddingBottom: '8.5rem' } : undefined}>
+    // the foot of the list keeps room for the order bar (its measured height, --yq-dock-bottom) on top
+    // of the shell's own room for the tab bar and the Spotted button: the last row is never under them
+    <div className="bg-[#F9F7F3] text-[#1A1428]" style={{ paddingBottom: 'var(--yq-dock-bottom, 0px)' }}>
       <div className="mx-auto max-w-[1600px] px-4 lg:px-6 xl:grid xl:grid-cols-[minmax(0,1fr)_360px] xl:gap-6 xl:pb-10">
         <div className="min-w-0">
           {/* ── who this order is for (the slip carries it from 1280 px) ── */}
