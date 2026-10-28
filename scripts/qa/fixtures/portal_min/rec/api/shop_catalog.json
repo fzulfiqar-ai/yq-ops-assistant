@@ -1,0 +1,19 @@
+{
+ "company": "QA Example Co",
+ "mode": "salesman",
+ "prices_updated": "2026-01-14",
+ "stock_as_of": "2026-01-14",
+ "stock_fresh": true,
+ "categories": ["QA Cables", "QA Chargers"],
+ "items": [
+  {"item_code": "QA-CBL-1", "display_name": "QA Example Cable 1m", "category": "QA Cables", "brand": "QA", "price_bhd": 1.0, "stock_status": "in_stock", "stock_qty": 50, "moq": 1},
+  {"item_code": "QA-CHG-1", "display_name": "QA Example Charger", "category": "QA Chargers", "brand": "QA", "price_bhd": 2.0, "stock_status": "low_stock", "stock_qty": 5, "moq": 1},
+  {"item_code": "QA-CBL-2", "display_name": "QA Example Cable 2m", "category": "QA Cables", "brand": "QA", "price_bhd": 1.5, "stock_status": "out_of_stock", "stock_qty": 0, "moq": 1}
+ ],
+ "salesmen": [],
+ "offers": [],
+ "campaigns": [],
+ "pairs": [],
+ "settings": {"min_order_bhd": 0, "allow_backorder": true},
+ "me": {"salesman_id": 9001, "salesman_name": "QA Rep One", "is_admin": false}
+}

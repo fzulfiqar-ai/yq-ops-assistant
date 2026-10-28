@@ -1,0 +1,17 @@
+{
+ "rows": [
+  {"item_name": "QA Example Cable 1m", "category_name": "QA Category", "net_amount_bhd": 110.0, "net_ex_vat_bhd": 100.0, "cogs_bhd": 60.0, "gp_computed_bhd": 40.0, "gp_ex_vat_bhd": 40.0, "margin_ex_vat_pct": 40.0, "is_below_cost": false, "ex_vat_source": "day_book"},
+  {"item_name": "QA Example Charger", "category_name": "QA Category", "net_amount_bhd": 55.0, "net_ex_vat_bhd": 50.0, "cogs_bhd": 55.0, "gp_computed_bhd": -5.0, "gp_ex_vat_bhd": -5.0, "margin_ex_vat_pct": -10.0, "is_below_cost": true, "ex_vat_source": "day_book"}
+ ],
+ "count": 2,
+ "negative_count": 1,
+ "total_net_bhd": 165.0,
+ "total_net_ex_vat_bhd": 150.0,
+ "total_gp_bhd": 35.0,
+ "gp_pct": 23.3,
+ "basis": "view",
+ "official": {"pct": 23.3, "gp_bhd": 35.0, "coverage_pct": 100.0, "items": 2, "below_cost": 1},
+ "landed": null,
+ "check_cost": [],
+ "returns_note": "QA fixture: returns not deducted."
+}

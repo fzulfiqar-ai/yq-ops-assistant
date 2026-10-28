@@ -1,0 +1,16 @@
+{
+ "rows": [
+  {"account": "QA Example Shop A", "group_name": "QA Group", "outstanding_bhd": 100.0, "overdue_bhd": 25.0, "over_90_bhd": 0.0},
+  {"account": "QA Example Shop B", "group_name": "QA Group", "outstanding_bhd": 50.0, "overdue_bhd": 0.0, "over_90_bhd": 10.0},
+  {"account": "QA Example Shop C", "group_name": "QA Other", "outstanding_bhd": 20.0, "overdue_bhd": 0.0, "over_90_bhd": 0.0}
+ ],
+ "total": 170.0,
+ "over_90": 10.0,
+ "count": 3,
+ "overdue_count": 1,
+ "buckets": {"b_0_30": 120.0, "b_31_60": 25.0, "b_61_90": 15.0, "b_over_210": 10.0},
+ "focus_total": null,
+ "focus_over_90": null,
+ "focus_as_of": null,
+ "focus_gap": null
+}
