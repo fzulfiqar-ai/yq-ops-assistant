@@ -100,7 +100,7 @@ function eq(a, b, what = '') {
 
 const HOUR = 3_600_000
 const NOW = Date.UTC(2026, 9, 28, 8, 0)
-const shopA = { key: 'f:ALPHA MOBILE', name: 'Contact A', shop: 'Alpha Mobile', phone: '97333000001', area: 'Area One' }
+const shopA = { key: 'f:ALPHA MOBILE', name: 'Contact A', shop: 'Alpha Mobile', phone: '97300000001', area: 'Area One' }
 
 /* ── 1. the shop being ordered for: localStorage, 12 hours ── */
 check('the shop picked survives the app closing (a WhatsApp detour), for 12 hours from the pick', () => {
@@ -140,7 +140,7 @@ check("signing out clears every rep cart (each shop's and 'no shop yet'), the pi
   const stored = [
     'yq-shop-cart:staff',
     'yq-shop-cart:staff:f:ALPHA MOBILE',
-    'yq-shop-cart:staff:m:97333000002',
+    'yq-shop-cart:staff:m:97300000002',
     'yq-shop-cart:staffer',            // a customer's share-link token that happens to start with "staff"
     'yq-shop-cart:tok123',             // a customer's cart from a share link: not the rep's
     'yq-shop-cart:anon',
@@ -152,7 +152,7 @@ check("signing out clears every rep cart (each shop's and 'no shop yet'), the pi
     'yq-mi-lang',
     'sb-xyz-auth-token',               // the session: the sign-out itself handles it
   ]
-  eq(keysOf(stored), ['yq-shop-cart:staff', 'yq-shop-cart:staff:f:ALPHA MOBILE', 'yq-shop-cart:staff:m:97333000002', 'yq-staff-customer', D.BROWSE_KEY])
+  eq(keysOf(stored), ['yq-shop-cart:staff', 'yq-shop-cart:staff:f:ALPHA MOBILE', 'yq-shop-cart:staff:m:97300000002', 'yq-staff-customer', D.BROWSE_KEY])
   eq(keysOf([]), [])
   eq(keysOf([null, undefined, '']), [], 'a storage that hands back holes')
 })
@@ -198,7 +198,7 @@ check('the sign-out question counts the orders in progress on this phone (non-em
   eq(open([
     ['yq-shop-cart:staff:f:ALPHA MOBILE', cart([{ item_code: 'C18', qty: 3 }, { item_code: 'UK15', qty: 6 }])],
     ['yq-shop-cart:staff', cart([{ item_code: 'PD20', qty: 1 }])],
-    ['yq-shop-cart:staff:m:97333000002', cart([])],
+    ['yq-shop-cart:staff:m:97300000002', cart([])],
     ['yq-shop-cart:tok123', cart([{ item_code: 'C18', qty: 9 }])],
     ['yq-shop-cart:staff:f:BETA', '{broken'],
   ]), { orders: 2, lines: 3 })
