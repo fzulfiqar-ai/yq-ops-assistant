@@ -118,6 +118,20 @@ await check('the sideways hint: a fade on the side that has more to scroll to, n
   eq(W.edgeFade({ scrollLeft: 0, clientWidth: 300, scrollWidth: 301 }), { left: false, right: false }, 'one pixel over is a fit')
 })
 
+await check('DataTable: a solid sticky header, a viewport sentinel instead of onScroll, a reset only on search/sort/filter', () => {
+  const dt = text('components/DataTable.tsx')
+  ok(!dt.includes('backdrop-blur') && !dt.includes('bg-secondary/90'), 'no blur over a see-through header')
+  ok(dt.includes('<thead className="sticky top-0 z-10 bg-secondary">'), 'a solid sticky header')
+  ok(!dt.includes('onScroll={'), 'no scroll handler mounting 150 rows per event')
+  ok(dt.includes('new IntersectionObserver(') && dt.includes('{ root: null }'), 'an IntersectionObserver on the viewport')
+  ok(!dt.includes('[query, sort, rows]'), 'no reset on every new rows array')
+  ok(dt.includes('windowKey(query, sort,') && dt.includes('resetKey?: string | number'), "the window's key: search, sort, the caller's filter")
+  ok(dt.includes('style={mouse ? ({ maxHeight } as CSSProperties) : undefined}'), 'its own vertical scroller only with a mouse')
+  ok(dt.includes('const wide = useMediaQuery(WIDE_QUERY, true)') && dt.includes(') : !wide ? ('), 'one layout mounted, never both')
+  ok(dt.includes('pinLast') && dt.includes('sticky right-0'), 'the pinned last column stays (R7d)')
+  ok(dt.includes('export function ScrollX(') && dt.includes('<EdgeFades'), 'ScrollX and the sideways hint')
+})
+
 // ── lib/orderList.ts ─────────────────────────────────────────────────────────────────────────────
 const L = await load('lib/orderList.ts')
 const page = (n, count, from = 0) => ({ orders: Array.from({ length: n }, (_, i) => ({ id: 10_000 - from - i })), count })
