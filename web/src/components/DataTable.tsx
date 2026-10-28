@@ -153,9 +153,9 @@ export function DataTable<T extends object>({
   const more = hasMore(limit, view.length)
   const grow = () => setWin({ key, limit: grownLimit(limit, view.length, page) })
 
-  // The next page mounts when the sentinel comes within SENTINEL_LEAD_PX of the screen (it sits that far above
-  // the last row). A new observer per page: its first callback says whether the sentinel is STILL near — a
-  // short page keeps growing, one page per frame, until it is not.
+  // The next page mounts when the sentinel (over the list's last SENTINEL_LEAD_PX) comes on screen. A new
+  // observer per page: its first callback says whether the sentinel is STILL in view — a short page keeps
+  // growing, one page per frame, until it is not.
   const sentinel = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const el = sentinel.current
