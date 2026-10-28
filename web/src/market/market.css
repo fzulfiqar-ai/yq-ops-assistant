@@ -143,12 +143,17 @@
     --m-font-sans: 'Instrument Sans', 'Instrument Sans Fallback', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --m-font-display: 'Sora', 'Sora Fallback', var(--m-font-sans);
 
-    /* motion */
+    /* motion (one language with the portal, 28-Oct-2026): only transform and opacity move */
     --m-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-    --m-ease-spring: cubic-bezier(0.22, 1.18, 0.36, 1);
+    --m-ease-spring: cubic-bezier(0.22, 1.18, 0.36, 1); /* small pops only — never a sheet */
+    --m-ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* enter: arrives fast, settles */
+    --m-ease-in: cubic-bezier(0.4, 0, 1, 1); /* exit */
+    --m-ease-sheet: cubic-bezier(0.32, 0.72, 0, 1); /* sheets: settle without a bounce */
     --m-d-1: 120ms;
     --m-d-2: 200ms;
     --m-d-3: 320ms;
+    --m-d-sheet: 280ms;
+    --m-d-4: 420ms;
 
     color-scheme: only light;
   }
@@ -355,6 +360,21 @@
   to {
     transform: translateX(100%);
   }
+}
+/* page glide (shell/RouteOutlet): the next page fades up the moment it mounts; never on the first
+ * page of a visit. `both` leaves transform: none behind, so nothing stays a containing block. */
+@keyframes m-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.m-page-in {
+  animation: m-page-in var(--m-d-2) var(--m-ease-out) both;
 }
 @keyframes m-fade-in {
   from {

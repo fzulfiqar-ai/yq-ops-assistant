@@ -266,12 +266,17 @@ def lazy_open(page: Page, url: str, look_at: int = 900) -> list[Finding]:
     boot = set(re.findall(r'(?:src|href)="(/assets/[^"]+\.js)"', html))
     cdp = page.context.new_cdp_session(page)
     held: list[str] = []
-    release = {"now": False}
+    release = {"now": False, "closed": False}
 
     def paused(ev: dict) -> None:
+        if release["closed"]:
+            return  # a pause that raced Fetch.disable: the request goes on by itself
         path = urlparse(ev["request"]["url"]).path
         if release["now"] or path in boot:
-            cdp.send("Fetch.continueRequest", {"requestId": ev["requestId"]})
+            try:
+                cdp.send("Fetch.continueRequest", {"requestId": ev["requestId"]})
+            except PWError:
+                pass
         else:
             held.append(ev["requestId"])
 
@@ -288,6 +293,7 @@ def lazy_open(page: Page, url: str, look_at: int = 900) -> list[Finding]:
                 cdp.send("Fetch.continueRequest", {"requestId": rid})
             except PWError:
                 pass
+        release["closed"] = True
         try:
             cdp.send("Fetch.disable")
             cdp.detach()

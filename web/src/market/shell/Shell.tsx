@@ -1,17 +1,23 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { splashDue } from '../lib/splashGate'
 import { useMarket } from '../MarketContext'
+import { DesktopShellSkeleton } from '../ui/Skeleton'
 import { CartDock } from './CartDock'
 import { FloatingNav } from './FloatingNav'
 import { PhoneHeader } from './PhoneHeader'
+import { RouteOutlet } from './RouteOutlet'
 import { ShellProvider, useShell } from './ShellContext'
 import { useScrollDirection } from './useScrollDirection'
 import { isPhoneLike } from './useViewport'
 
-const DesktopShell = lazy(() => import('./DesktopShell'))
-const ProductPanel = lazy(() => import('../components/ProductPanel'))
+const loadDesktop = () => import('./DesktopShell')
+// a laptop needs the desktop chrome on its first paint: fetch it with the app, not at first render
+if (typeof window !== 'undefined' && window.matchMedia?.('(min-width: 1024px)').matches) void loadDesktop()
+const DesktopShell = lazy(loadDesktop)
+const loadPanel = () => import('../components/ProductPanel')
+const ProductPanel = lazy(loadPanel)
 const loadSplash = () => import('../components/Splash')
 // A load that will play the opening (at most once a week per device and once per tab session —
 // lib/splashGate.ts, the same predicate as Splash.tsx): start fetching it with the app itself (not at
@@ -22,7 +28,32 @@ const loadSplash = () => import('../components/Splash')
 const NEEDS_SPLASH = splashDue()
 if (NEEDS_SPLASH) void loadSplash()
 const Splash = lazy(() => loadSplash().then((mod) => ({ default: mod.Splash })))
-const SearchPalette = lazy(() => import('../components/SearchPalette'))
+const loadPalette = () => import('../components/SearchPalette')
+const SearchPalette = lazy(loadPalette)
+
+/**
+ * The first tap on a card used to wait a round trip for the product panel's code (and ⌘K for the
+ * palette's). Fetch both once the first page has painted and the phone is idle; a pointer going
+ * down anywhere fetches the panel at once if that has not happened yet.
+ */
+function useWarmOverlays(phoneLike: boolean) {
+  useEffect(() => {
+    let done = false
+    const warm = () => {
+      if (done) return
+      done = true
+      void loadPanel()
+      if (!phoneLike) void loadPalette()
+    }
+    const idle = typeof window.requestIdleCallback === 'function' ? window.requestIdleCallback(warm, { timeout: 4000 }) : window.setTimeout(warm, 2500)
+    window.addEventListener('pointerdown', warm, { once: true, passive: true })
+    return () => {
+      if (typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(idle)
+      else window.clearTimeout(idle)
+      window.removeEventListener('pointerdown', warm)
+    }
+  }, [phoneLike])
+}
 
 /**
  * The layout route. Picks the phone/tablet shell (this file) or the desktop shell (lazy — phones
@@ -62,13 +93,14 @@ function Hotkeys() {
 function ShellBody() {
   const { viewport, panelCode, paletteOpen } = useShell()
   const phoneLike = isPhoneLike(viewport)
+  useWarmOverlays(phoneLike)
   return (
     <>
       <Hotkeys />
       {phoneLike ? (
         <MobileShell />
       ) : (
-        <Suspense fallback={<div className="min-h-screen bg-canvas" />}>
+        <Suspense fallback={<DesktopShellSkeleton />}>
           <DesktopShell />
         </Suspense>
       )}
@@ -118,7 +150,7 @@ function MobileShell() {
     <div className="min-h-screen bg-canvas text-ink">
       <PhoneHeader />
       <main id="main" className="pb-[calc(var(--m-bottom-stack)+var(--m-safe-b)+16px)]">
-        <Outlet />
+        <RouteOutlet />
       </main>
       <div
         ref={stackRef}
