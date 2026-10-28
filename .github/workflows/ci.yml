@@ -276,6 +276,17 @@ jobs:
       # (lib/dailySales.ts)
       - name: Portal number wording (node, no browser)
         run: node scripts/numbers_ui_test.mjs
+      # the portal polish (28-Oct-2026): the rep's field-proofing (the shop kept 12 h, no order on an
+      # unchecked price, Undo, 16 px fields), and the office's honest states (loading / error / empty
+      # never confused), table windows and paging, and motion that plays once per session
+      - name: Rep field-proofing (node, no browser)
+        run: node scripts/rep_field_test.mjs
+      - name: Office honest states (node, no browser)
+        run: node scripts/admin_states_test.mjs
+      - name: Office tables and paging (node, no browser)
+        run: node scripts/admin_tables_test.mjs
+      - name: Office motion, once per session (node, no browser)
+        run: node scripts/admin_motion_test.mjs
       # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
       # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
       # does not. Type errors fail it too: tsc -b runs inside `npm run build`.
