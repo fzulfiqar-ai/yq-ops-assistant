@@ -4,12 +4,14 @@ import { useQuery } from '@tanstack/react-query'
 import { apiGet, apiPost } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import type { StaffCustomer } from '@/lib/shopApi'
+import { legacySelection, readSelection, SELECTION_KEY, SELECTION_TTL_MS, selectionRecord, type Selection } from './repDevice'
 
 /**
  * Shared pieces of the salesman app (web/src/pages/sales/*, components/SalesmanShell.tsx):
  * the rep's own card (`/shop/me`), his book of shops (`/shop/customers`), the shop he is
- * currently ordering for (session-scoped, so the catalog and the checkout agree), bearer-
- * protected images (the QR), and small formatting helpers.
+ * currently ordering for (kept on the phone for 12 hours, so the catalog and the checkout agree
+ * and an app closed on a WhatsApp detour comes back to it), bearer-protected images (the QR),
+ * and small formatting helpers.
  */
 
 /* ───────────────────────── /shop/me ───────────────────────── */
@@ -416,43 +418,77 @@ export function useNewOrderCount(): number {
 
 /* ───────────────────────── the shop I am ordering for ───────────────────────── */
 
-const SEL_KEY = 'yq-staff-customer'
+// localStorage for 12 hours from the pick (repDevice.ts says why): a phone that closes the app
+// during a WhatsApp detour reopens on the same shop and its cart. The window is also checked when
+// the app comes back to the front (a PWA can sit in memory overnight), and another tab's pick or
+// sign-out is followed through the storage event, so localStorage stays the one truth.
 const listeners = new Set<() => void>()
-let selected: StaffCustomer | null = read()
+let picked: Selection | null = readStored()
+let selected: StaffCustomer | null = picked?.c ?? null
 
-function read(): StaffCustomer | null {
+function readStored(): Selection | null {
   try {
-    const raw = sessionStorage.getItem(SEL_KEY)
-    return raw ? (JSON.parse(raw) as StaffCustomer) : null
+    const now = Date.now()
+    const kept = readSelection(localStorage.getItem(SELECTION_KEY), now)
+    if (kept) return kept
+    localStorage.removeItem(SELECTION_KEY) // expired or unreadable
+    // a pick made before this release lived in sessionStorage: a tab open across the update keeps it
+    const legacy = legacySelection(sessionStorage.getItem(SELECTION_KEY))
+    sessionStorage.removeItem(SELECTION_KEY)
+    if (!legacy) return null
+    localStorage.setItem(SELECTION_KEY, selectionRecord(legacy, now))
+    return { c: legacy, at: now }
   } catch {
     return null
   }
 }
 
-export function setSelectedCustomer(c: StaffCustomer | null) {
-  selected = c
-  try {
-    if (c) sessionStorage.setItem(SEL_KEY, JSON.stringify(c))
-    else sessionStorage.removeItem(SEL_KEY)
-  } catch {
-    /* ignore */
-  }
+function adopt(next: Selection | null) {
+  picked = next
+  selected = next?.c ?? null
   listeners.forEach((fn) => fn())
+}
+
+export function setSelectedCustomer(c: StaffCustomer | null) {
+  const now = Date.now()
+  try {
+    if (c) localStorage.setItem(SELECTION_KEY, selectionRecord(c, now))
+    else localStorage.removeItem(SELECTION_KEY)
+  } catch {
+    /* private mode: the pick lasts while the app is open */
+  }
+  adopt(c ? { c, at: now } : null)
 }
 
 export function getSelectedCustomer(): StaffCustomer | null {
   return selected
 }
 
+function onVisible() {
+  if (document.visibilityState === 'visible' && picked && Date.now() - picked.at >= SELECTION_TTL_MS) setSelectedCustomer(null)
+}
+
+function onStorage(e: StorageEvent) {
+  if (e.key === SELECTION_KEY || e.key === null) adopt(readStored())
+}
+
+function subscribe(fn: () => void) {
+  if (!listeners.size) {
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('storage', onStorage)
+  }
+  listeners.add(fn)
+  return () => {
+    listeners.delete(fn)
+    if (!listeners.size) {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('storage', onStorage)
+    }
+  }
+}
+
 export function useSelectedCustomer(): StaffCustomer | null {
-  return useSyncExternalStore(
-    (fn) => {
-      listeners.add(fn)
-      return () => listeners.delete(fn)
-    },
-    () => selected,
-    () => null,
-  )
+  return useSyncExternalStore(subscribe, () => selected, () => null)
 }
 
 /* ───────────────────────── bearer-protected images ───────────────────────── */
