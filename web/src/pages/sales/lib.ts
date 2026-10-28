@@ -4,7 +4,17 @@ import { useQuery } from '@tanstack/react-query'
 import { apiGet, apiPost } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import type { StaffCustomer } from '@/lib/shopApi'
-import { legacySelection, readSelection, SELECTION_KEY, SELECTION_TTL_MS, selectionRecord, type Selection } from './repDevice'
+import {
+  clearRepStorage,
+  legacySelection,
+  openRepOrders,
+  readSelection,
+  SELECTION_KEY,
+  SELECTION_TTL_MS,
+  selectionRecord,
+  storageEntries,
+  type Selection,
+} from './repDevice'
 
 /**
  * Shared pieces of the salesman app (web/src/pages/sales/*, components/SalesmanShell.tsx):
@@ -489,6 +499,34 @@ function subscribe(fn: () => void) {
 
 export function useSelectedCustomer(): StaffCustomer | null {
   return useSyncExternalStore(subscribe, () => selected, () => null)
+}
+
+/** Each storage area the browser lets us use (one switched off throws on access). */
+function stores(): Storage[] {
+  const out: Storage[] = []
+  for (const get of [() => localStorage, () => sessionStorage]) {
+    try {
+      out.push(get())
+    } catch {
+      /* storage switched off: nothing kept there */
+    }
+  }
+  return out
+}
+
+/** The orders in progress on this phone, for the sign-out question. */
+export function repOpenOrders(): { orders: number; lines: number } {
+  return openRepOrders(stores().flatMap(storageEntries))
+}
+
+/**
+ * Sign-out on a shared phone: every shop's cart, the shop being ordered for and the catalog's
+ * remembered search leave with the rep (repDevice.repDeviceKeys), so the next person starts clean.
+ * The device's own choices (list or grid, the sidebar) stay.
+ */
+export function clearRepDevice(): void {
+  for (const store of stores()) clearRepStorage(store)
+  setSelectedCustomer(null)
 }
 
 /* ───────────────────────── bearer-protected images ───────────────────────── */

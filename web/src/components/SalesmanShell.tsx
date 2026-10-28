@@ -6,6 +6,7 @@ import { MarketCapture } from '@/components/MarketCapture'
 import { navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
+import { SignOutSheet } from '@/pages/sales/SignOutSheet'
 
 /**
  * The shell a salesman lives in — a phone in one hand in a shop, a laptop in the evening.
@@ -173,7 +174,7 @@ function TopTabs({ tabs }: { tabs: Tab[] }) {
   )
 }
 
-function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle }: { tabs: Tab[]; more: Tab[]; name: string; onSignOut: () => void; signingOut: boolean; collapsed: boolean; onToggle: () => void }) {
+function Sidebar({ tabs, more, name, onSignOut, collapsed, onToggle }: { tabs: Tab[]; more: Tab[]; name: string; onSignOut: () => void; collapsed: boolean; onToggle: () => void }) {
   // 1024-1279: always the icon rail; 1280+: full width unless collapsed. Labels and the wide layout
   // are switched by CSS (xl:), so the first paint is already right — no media query in JS.
   const full = !collapsed
@@ -248,8 +249,8 @@ function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle 
               My account
             </Link>
           </span>
-          <button type="button" onClick={onSignOut} aria-label="Sign out" title="Sign out" className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground">
-            {signingOut ? <Loader2 size={17} className="animate-spin" /> : <LogOut size={17} />}
+          <button type="button" onClick={onSignOut} aria-label="Sign out" aria-haspopup="dialog" title="Sign out" className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground">
+            <LogOut size={17} />
           </button>
         </div>
       </div>
@@ -260,11 +261,12 @@ function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle 
 const CORE = new Set(['/today', '/shop', '/shop-orders', '/customers', '/account', '/settings', '/catalog'])
 
 export function SalesmanShell() {
-  const { me, session, signOut } = useAuth()
+  const { me, session } = useAuth()
   const outlet = useOutlet()
   const loc = useLocation()
   const newCount = useNewOrderCount()
-  const [signingOut, setSigningOut] = useState(false)
+  // sign-out asks first and clears this phone's carts and shop (pages/sales/SignOutSheet)
+  const [signOutOpen, setSignOutOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(readRail)
   useShellVars(collapsed)
   const toggleRail = () => {
@@ -299,16 +301,12 @@ export function SalesmanShell() {
     .filter((n) => !CORE.has(n.to) && n.to !== '/')
     .map((n) => ({ to: n.to, label: n.label, icon: n.icon }))
 
-  const onSignOut = async () => {
-    setSigningOut(true)
-    await signOut()
-    setSigningOut(false)
-  }
+  const onSignOut = () => setSignOutOpen(true)
 
   return (
     <div data-shell="sales" style={SALES_TOKENS} className="min-h-screen bg-background text-foreground">
       <div className="flex">
-        <Sidebar tabs={tabs} more={more} name={name} onSignOut={onSignOut} signingOut={signingOut} collapsed={collapsed} onToggle={toggleRail} />
+        <Sidebar tabs={tabs} more={more} name={name} onSignOut={onSignOut} collapsed={collapsed} onToggle={toggleRail} />
         {/* the sidebar is fixed: the page keeps its width clear (64 px rail, 240 px from 1280 unless collapsed) */}
         <div className={cn('min-w-0 flex-1 lg:pl-16', !collapsed && 'xl:pl-60')}>
           {/* top bar: phone + tablet (desktop has the sidebar) */}
@@ -326,8 +324,8 @@ export function SalesmanShell() {
                 <Bell size={19} aria-hidden="true" />
                 {newCount > 0 && <Badge count={newCount} className="absolute right-1 top-1" />}
               </Link>
-              <button type="button" onClick={onSignOut} aria-label="Sign out" title="Sign out" className="-mr-1.5 hidden h-11 w-11 shrink-0 place-items-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground md:grid">
-                {signingOut ? <Loader2 size={18} className="animate-spin" /> : <LogOut size={18} />}
+              <button type="button" onClick={onSignOut} aria-label="Sign out" aria-haspopup="dialog" title="Sign out" className="-mr-1.5 hidden h-11 w-11 shrink-0 place-items-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground md:grid">
+                <LogOut size={18} />
               </button>
             </div>
           </header>
@@ -351,6 +349,7 @@ export function SalesmanShell() {
       </div>
       <FloatingTabs tabs={tabs} />
       <MarketCapture />
+      <SignOutSheet open={signOutOpen} onClose={() => setSignOutOpen(false)} />
     </div>
   )
 }

@@ -140,6 +140,41 @@ check("signing out clears every rep cart (each shop's and 'no shop yet'), the pi
   eq(keysOf([null, undefined, '']), [], 'a storage that hands back holes')
 })
 
+/** A Storage like the browser's: key(i) follows the live order, so removing while walking skips one. */
+function fakeStorage(init) {
+  const data = { ...init }
+  return {
+    data,
+    get length() { return Object.keys(data).length },
+    key: (i) => Object.keys(data)[i] ?? null,
+    getItem: (k) => (k in data ? data[k] : null),
+    removeItem: (k) => { delete data[k] },
+  }
+}
+
+check('the sign-out sweep removes exactly those keys from a Storage (collected first: none skipped)', () => {
+  const sweep = need(D, 'clearRepStorage')
+  const store = fakeStorage({
+    'yq-shop-cart:staff:f:ALPHA MOBILE': '[{"item_code":"C18","qty":3}]',
+    'yq-shop-cart:staff:f:BETA': '[{"item_code":"UK15","qty":6}]',
+    'yq-shop-cart:staff': '[{"item_code":"PD20","qty":1}]',
+    'yq-shop-cart:tok123': '[{"item_code":"C18","qty":9}]',
+    'yq-staff-customer': '{}',
+    'yq-staff-view': 'grid',
+  })
+  eq(sweep(store), 4, 'removed')
+  eq(Object.keys(store.data).sort(), ['yq-shop-cart:tok123', 'yq-staff-view'], 'left')
+  const broken = { get length() { throw new Error('SecurityError') }, key: () => null, removeItem: () => {} }
+  eq(sweep(broken), 0, 'storage switched off: nothing to do, no throw')
+})
+
+check('the sign-out question reads the same Storage shape', () => {
+  const entries = need(D, 'storageEntries')
+  const store = fakeStorage({ 'yq-shop-cart:staff:f:ALPHA MOBILE': '[{"item_code":"C18","qty":3}]', 'yq-staff-view': 'list' })
+  eq(entries(store), [['yq-shop-cart:staff:f:ALPHA MOBILE', '[{"item_code":"C18","qty":3}]'], ['yq-staff-view', 'list']])
+  eq(entries({ get length() { throw new Error('SecurityError') } }), [])
+})
+
 check('the sign-out question counts the orders in progress on this phone (non-empty rep carts)', () => {
   const open = need(D, 'openRepOrders')
   const cart = (lines) => JSON.stringify(lines)

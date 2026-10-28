@@ -74,6 +74,39 @@ export function repDeviceKeys(keys: readonly (string | null | undefined)[]): str
   return keys.filter((k): k is string => typeof k === 'string' && (REP_CART.test(k) || k === SELECTION_KEY || k === BROWSE_KEY))
 }
 
+/** The part of a browser Storage the sweep and the question use. */
+export type StorageLike = Pick<Storage, 'length' | 'key'> & Partial<Pick<Storage, 'getItem' | 'removeItem'>>
+
+/** Every key of a storage area, read before anything is removed (key(i) follows the live order). */
+function keysOf(store: StorageLike): string[] {
+  const out: string[] = []
+  for (let i = 0; i < store.length; i += 1) {
+    const k = store.key(i)
+    if (k) out.push(k)
+  }
+  return out
+}
+
+/** Every [key, value] of a storage area; nothing when the browser has storage switched off. */
+export function storageEntries(store: StorageLike): [string, string | null][] {
+  try {
+    return keysOf(store).map((k) => [k, store.getItem ? store.getItem(k) : null])
+  } catch {
+    return []
+  }
+}
+
+/** Remove what leaves with the rep from one storage area; how many keys went. */
+export function clearRepStorage(store: StorageLike): number {
+  try {
+    const gone = repDeviceKeys(keysOf(store))
+    for (const k of gone) store.removeItem?.(k)
+    return gone.length
+  } catch {
+    return 0
+  }
+}
+
 /** The orders in progress on this phone (rep carts with lines), for the sign-out question. */
 export function openRepOrders(entries: readonly (readonly [string, string | null])[]): { orders: number; lines: number } {
   let orders = 0
