@@ -6,6 +6,8 @@ import { MarketCapture } from '@/components/MarketCapture'
 import { navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
+import { SignOutSheet } from '@/pages/sales/SignOutSheet'
+import { activeTab, tabAllowed } from '@/pages/sales/tabs'
 
 /**
  * The shell a salesman lives in — a phone in one hand in a shop, a laptop in the evening.
@@ -118,18 +120,20 @@ function TempPasswordBanner({ mustReset }: { mustReset: boolean }) {
   )
 }
 
+/** The tab the page is under; -1 (no tab lit) on any other page (pages/sales/tabs.ts). */
 function useActiveIndex(tabs: Tab[]): number {
   const { pathname } = useLocation()
-  const i = tabs.findIndex((t) => (t.end ? pathname === t.to : pathname === t.to || pathname.startsWith(t.to + '/') || pathname.startsWith(t.to + '?')))
-  return i < 0 ? 0 : i
+  return activeTab(pathname, tabs)
 }
 
 function FloatingTabs({ tabs }: { tabs: Tab[] }) {
   const active = useActiveIndex(tabs)
+  // as many columns as the rep has tabs; the lit pill hides on a page under none of them
+  const n = Math.max(1, tabs.length)
   return (
     <nav aria-label="Main" className="fixed inset-x-3 z-40 md:hidden" style={{ bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' }}>
-      <ul className="relative grid h-16 grid-cols-5 items-stretch rounded-3xl border border-border/80 bg-card/90 shadow-[0_12px_32px_-12px_rgba(25,20,36,.28)] backdrop-blur-xl" style={{ ['--i' as string]: active }}>
-        <li aria-hidden="true" className="pointer-events-none absolute inset-y-1.5 left-1.5 w-[calc((100%-0.75rem)/5)] rounded-2xl bg-accent transition-transform duration-300 ease-[cubic-bezier(.22,1.18,.36,1)] motion-reduce:transition-none" style={{ transform: 'translateX(calc(var(--i) * 100%))' }} />
+      <ul className="relative grid h-16 items-stretch rounded-3xl border border-border/80 bg-card/90 shadow-[0_12px_32px_-12px_rgba(25,20,36,.28)] backdrop-blur-xl" style={{ ['--i' as string]: Math.max(0, active), gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
+        <li aria-hidden="true" className={cn('pointer-events-none absolute inset-y-1.5 left-1.5 rounded-2xl bg-accent transition-transform duration-300 ease-[cubic-bezier(.22,1.18,.36,1)] motion-reduce:transition-none', active < 0 && 'opacity-0')} style={{ width: `calc((100% - 0.75rem) / ${n})`, transform: 'translateX(calc(var(--i) * 100%))' }} />
         {tabs.map((t, i) => {
           const Icon = t.icon
           const on = i === active
@@ -173,7 +177,7 @@ function TopTabs({ tabs }: { tabs: Tab[] }) {
   )
 }
 
-function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle }: { tabs: Tab[]; more: Tab[]; name: string; onSignOut: () => void; signingOut: boolean; collapsed: boolean; onToggle: () => void }) {
+function Sidebar({ tabs, more, name, onSignOut, collapsed, onToggle }: { tabs: Tab[]; more: Tab[]; name: string; onSignOut: () => void; collapsed: boolean; onToggle: () => void }) {
   // 1024-1279: always the icon rail; 1280+: full width unless collapsed. Labels and the wide layout
   // are switched by CSS (xl:), so the first paint is already right — no media query in JS.
   const full = !collapsed
@@ -248,8 +252,8 @@ function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle 
               My account
             </Link>
           </span>
-          <button type="button" onClick={onSignOut} aria-label="Sign out" title="Sign out" className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground">
-            {signingOut ? <Loader2 size={17} className="animate-spin" /> : <LogOut size={17} />}
+          <button type="button" onClick={onSignOut} aria-label="Sign out" aria-haspopup="dialog" title="Sign out" className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground">
+            <LogOut size={17} />
           </button>
         </div>
       </div>
@@ -260,11 +264,12 @@ function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle 
 const CORE = new Set(['/today', '/shop', '/shop-orders', '/customers', '/account', '/settings', '/catalog'])
 
 export function SalesmanShell() {
-  const { me, session, signOut } = useAuth()
+  const { me, session } = useAuth()
   const outlet = useOutlet()
   const loc = useLocation()
   const newCount = useNewOrderCount()
-  const [signingOut, setSigningOut] = useState(false)
+  // sign-out asks first and clears this phone's carts and shop (pages/sales/SignOutSheet)
+  const [signOutOpen, setSignOutOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(readRail)
   useShellVars(collapsed)
   const toggleRail = () => {
@@ -287,28 +292,27 @@ export function SalesmanShell() {
 
   const name = me?.full_name || me?.email?.split('@')[0] || ''
   const first = firstName(name)
-  const tabs: Tab[] = [
-    { to: '/today', label: 'Today', icon: House, end: true },
-    { to: '/shop', label: 'Catalog', icon: BookImage },
-    { to: '/shop-orders', label: 'Orders', icon: ClipboardList, badge: newCount },
-    { to: '/customers', label: 'Shops', icon: Users },
-    { to: '/account', label: 'Me', icon: CircleUserRound },
-  ]
+  // only the tabs whose page this login may open (the route's Gate in App.tsx; pages/sales/tabs.ts)
+  const tabs: Tab[] = (
+    [
+      { to: '/today', label: 'Today', icon: House, end: true },
+      { to: '/shop', label: 'Catalog', icon: BookImage },
+      { to: '/shop-orders', label: 'Orders', icon: ClipboardList, badge: newCount },
+      { to: '/customers', label: 'Shops', icon: Users },
+      { to: '/account', label: 'Me', icon: CircleUserRound },
+    ] satisfies Tab[]
+  ).filter((t) => tabAllowed(me, t.to))
   // everything else an admin granted this salesman (Finds, Leads, Field notes, Coach, Reports…)
   const more: Tab[] = navFor(me)
     .filter((n) => !CORE.has(n.to) && n.to !== '/')
     .map((n) => ({ to: n.to, label: n.label, icon: n.icon }))
 
-  const onSignOut = async () => {
-    setSigningOut(true)
-    await signOut()
-    setSigningOut(false)
-  }
+  const onSignOut = () => setSignOutOpen(true)
 
   return (
     <div data-shell="sales" style={SALES_TOKENS} className="min-h-screen bg-background text-foreground">
       <div className="flex">
-        <Sidebar tabs={tabs} more={more} name={name} onSignOut={onSignOut} signingOut={signingOut} collapsed={collapsed} onToggle={toggleRail} />
+        <Sidebar tabs={tabs} more={more} name={name} onSignOut={onSignOut} collapsed={collapsed} onToggle={toggleRail} />
         {/* the sidebar is fixed: the page keeps its width clear (64 px rail, 240 px from 1280 unless collapsed) */}
         <div className={cn('min-w-0 flex-1 lg:pl-16', !collapsed && 'xl:pl-60')}>
           {/* top bar: phone + tablet (desktop has the sidebar) */}
@@ -326,8 +330,8 @@ export function SalesmanShell() {
                 <Bell size={19} aria-hidden="true" />
                 {newCount > 0 && <Badge count={newCount} className="absolute right-1 top-1" />}
               </Link>
-              <button type="button" onClick={onSignOut} aria-label="Sign out" title="Sign out" className="-mr-1.5 hidden h-11 w-11 shrink-0 place-items-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground md:grid">
-                {signingOut ? <Loader2 size={18} className="animate-spin" /> : <LogOut size={18} />}
+              <button type="button" onClick={onSignOut} aria-label="Sign out" aria-haspopup="dialog" title="Sign out" className="-mr-1.5 hidden h-11 w-11 shrink-0 place-items-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground md:grid">
+                <LogOut size={18} />
               </button>
             </div>
           </header>
@@ -351,6 +355,7 @@ export function SalesmanShell() {
       </div>
       <FloatingTabs tabs={tabs} />
       <MarketCapture />
+      <SignOutSheet open={signOutOpen} onClose={() => setSignOutOpen(false)} />
     </div>
   )
 }

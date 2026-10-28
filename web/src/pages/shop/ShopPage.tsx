@@ -24,6 +24,7 @@ import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
 import { ProductSheet } from './ProductSheet'
 import { Select } from './Select'
+import { CatalogSkeleton } from './Skeletons'
 import { bhd, fmtDate, hasBadge, minQtyOf, RING, sessionId, useCountdown } from './shared'
 import { useQuote, type QuoteFetcher } from './useQuote'
 
@@ -153,7 +154,7 @@ const StaffCatalog = lazy(() => import('./StaffCatalog'))
 export function ShopPage({ mode = 'public' }: ShopPageProps) {
   if (mode === 'salesman') {
     return (
-      <Suspense fallback={<div className="grid h-[60vh] place-items-center text-[13px] text-[#6b6480]">Loading the catalog…</div>}>
+      <Suspense fallback={<CatalogSkeleton />}>
         <StaffCatalog />
       </Suspense>
     )
@@ -372,7 +373,7 @@ function LegacyShop({ mode = 'public' }: ShopPageProps) {
     (body, signal) => (staff ? postStaffQuote(body, signal) : postQuote(token, body, signal)),
     [staff, token],
   )
-  const { quote, quoting, error: quoteError } = useQuote(staff || Boolean(token), cart.lines, coupon, referralCode, fetchQuote)
+  const { quote, quoting, error: quoteError, fresh: quoteFresh, retry: retryQuote } = useQuote(staff || Boolean(token), cart.lines, coupon, referralCode, fetchQuote)
   const estimate = useMemo(
     () => cart.lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0),
     [cart.lines, itemsByCode],
@@ -526,7 +527,8 @@ function LegacyShop({ mode = 'public' }: ShopPageProps) {
               aria-label="Search the catalog"
               type="search"
               className={cn(
-                'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[14px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15',
+                // 16 px under a finger: an iPhone zooms into a field under 16 px on focus
+                'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[16px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [@media(pointer:fine)]:text-[14px]',
                 '[&::-webkit-search-cancel-button]:hidden',
               )}
             />
@@ -750,6 +752,8 @@ function LegacyShop({ mode = 'public' }: ShopPageProps) {
           quote={quote}
           quoting={quoting}
           quoteError={quoteError}
+          quoteFresh={quoteFresh}
+          onRetryQuote={retryQuote}
           coupon={coupon}
           onCouponChange={setCoupon}
           src={srcParam}

@@ -5,6 +5,7 @@ import { apiGet, apiPost } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import { HIT } from '@/pages/shop/shared'
 import { relTime, waLink } from './lib'
 
 /**
@@ -57,7 +58,8 @@ function originOf(link: string): string {
   }
 }
 
-const ICON_BTN = 'grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border hover:bg-muted disabled:opacity-50'
+// a 40 px button, 44 px under a finger (HIT)
+const ICON_BTN = `relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border hover:bg-muted disabled:opacity-50 ${HIT}`
 
 export function ComingSoon({ link }: { link: string }) {
   const qc = useQueryClient()
@@ -111,7 +113,7 @@ export function ComingSoon({ link }: { link: string }) {
         <h2 className="font-display text-[15px] font-bold">Coming soon · {brand}</h2>
         <span className="text-[12px] text-muted-foreground">{items.length} to pre-sell</span>
         {pageLink && (
-          <a href={pageLink} target="_blank" rel="noreferrer" className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted">
+          <a href={pageLink} target="_blank" rel="noreferrer" className={cn('relative ml-auto inline-flex h-9 items-center gap-1.5 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted', HIT)}>
             <Share2 size={13} aria-hidden="true" /> The range
           </a>
         )}
@@ -186,7 +188,7 @@ export function ComingSoon({ link }: { link: string }) {
                           <li key={p} className="flex items-center justify-between gap-3 py-1.5">
                             <span className="text-[13px] tabular-nums">{p}</span>
                             {wa && (
-                              <a href={wa} target="_blank" rel="noreferrer" aria-label={`WhatsApp ${p}`} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-[12.5px] font-semibold text-[#1d9e50] hover:bg-muted">
+                              <a href={wa} target="_blank" rel="noreferrer" aria-label={`WhatsApp ${p}`} className={cn('relative inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-[12.5px] font-semibold text-[#1d9e50] hover:bg-muted', HIT)}>
                                 <MessageCircle size={14} aria-hidden="true" /> WhatsApp
                               </a>
                             )}

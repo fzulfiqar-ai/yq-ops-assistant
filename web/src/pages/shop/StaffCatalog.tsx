@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { flushSync } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LayoutGrid, List, MessageCircle, RotateCcw, Search, ShoppingBag, SlidersHorizontal, X } from 'lucide-react'
@@ -8,7 +9,8 @@ import { cn } from '@/lib/utils'
 import { peekCart, useCart, writeCart } from '@/lib/cart'
 import { useSeo } from '@/lib/seo'
 import { getStaffCatalog, postStaffQuote, type OrderResponse, type ShopItem, type StaffCustomer } from '@/lib/shopApi'
-import { buildIndex, searchItems } from '@/market/lib/search'
+import { buildIndex, searchItems, type SearchIndex } from '@/market/lib/search'
+import { useScrollDirection } from '@/market/shell/useScrollDirection'
 import { parseToken, resolveQuick, splitList } from '@/market/lib/quickParse'
 import { codeKey } from '@/market/lib/format'
 import {
@@ -25,11 +27,14 @@ import {
   type TodayData,
 } from '@/pages/sales/lib'
 import { CartDrawer } from './CartDrawer'
+import { mergeUsual, replaceLines, restoreLine, usualText } from './cartEdits'
 import { FiltersSheet } from './FiltersSheet'
 import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
+import { BROWSE_KEY } from '@/pages/sales/repDevice'
+import { browseRecord, plainSearch, rememberedFor, whenIdle } from './staffBrowse'
 import { FILTER_CHIPS, isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
-import { carryCart } from './staffOrder'
+import { afterOrderKeys, carryCart, minimumOf, orderBarLine } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
 import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
@@ -39,7 +44,9 @@ import { QtySheet } from './QtySheet'
 import { ShopPickerSheet, ShopPill } from './ShopPicker'
 import { ShopSheet } from './ShopSheet'
 import { SoldOutDivider } from './SoldOut'
-import { bhd, hasBadge, isSoldOut, minQtyOf, RING, stepOf } from './shared'
+import { bhd, hasBadge, HIT, isSoldOut, minQtyOf, RING, SKELETON, stepOf } from './shared'
+import { ListSkeleton } from './Skeletons'
+import { UndoToast, type UndoOffer } from './UndoToast'
 import { useQuote, type QuoteFetcher } from './useQuote'
 
 /**
@@ -66,10 +73,20 @@ import { useQuote, type QuoteFetcher } from './useQuote'
 
 const TOPBAR = 'var(--yq-topbar, 56px)'
 const TABBAR = 'calc(var(--yq-tabbar, 64px) + env(safe-area-inset-bottom, 0px))'
-const GRID_CHUNK = 48
+/** Lines drawn at a time, in the list and in the grid (the next 48 come as the end nears). */
+const CHUNK = 48
 const VIEW_KEY = 'yq-staff-view'
 
 type View = 'list' | 'grid'
+
+/** A sessionStorage value, or null where the browser has storage switched off. */
+function readSession(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
 
 function readView(): View {
   try {
@@ -147,7 +164,14 @@ export function StaffCatalog() {
   const data = catalogQ.data || null
   const items = useMemo(() => data?.items || [], [data])
   const itemsByCode = useMemo(() => new Map(items.map((i) => [i.item_code, i])), [items])
-  const index = useMemo(() => (items.length ? buildIndex(items) : null), [items])
+  // the search index (MiniSearch) is built when the phone is idle, not in the first paint after the
+  // catalog lands; a search typed before it is ready is a plain filter (staffBrowse.plainSearch)
+  const [built, setBuilt] = useState<{ items: ShopItem[]; index: SearchIndex } | null>(null)
+  useEffect(() => {
+    if (!items.length) return
+    return whenIdle(() => setBuilt({ items, index: buildIndex(items) }))
+  }, [items])
+  const index = built && built.items === items ? built.index : null
   const settings = data?.settings || {}
   const allowBackorder = settings.allow_backorder !== false
   const minBhd = Number(settings.min_order_bhd) || 0
@@ -157,6 +181,40 @@ export function StaffCatalog() {
   const shopKey = shopKeyOf(sel)
   const cartKey = shopKey ? `staff:${shopKey}` : 'staff'
   const cart = useCart(cartKey)
+  const { set: setCartQty, remove: removeCartLine, clear: clearCart } = cart
+  const cartEdit = useMemo(() => ({ set: setCartQty, clear: clearCart }), [setCartQty, clearCart])
+  // the cart as it is now: an Undo can be taken up after later edits (cartEdits.restoreLine)
+  const linesRef = useRef(cart.lines)
+  useEffect(() => {
+    linesRef.current = cart.lines
+  })
+
+  /* ── Undo (UndoToast): the last edit that can be taken back, for the cart it was made in ── */
+  const [undo, setUndo] = useState<(UndoOffer & { cartKey: string }) | null>(null)
+  const undoSeq = useRef(0)
+  const offerUndo = useCallback(
+    (text: string, fn: () => void) => {
+      undoSeq.current += 1
+      setUndo({ id: undoSeq.current, text, undo: fn, cartKey })
+    },
+    [cartKey],
+  )
+  const dropUndo = useCallback((id: number) => setUndo((u) => (u && u.id === id ? null : u)), [])
+  // every way a line leaves the cart (the keypad's Remove, the steppers' bin, a typed 0, the slip's ×,
+  // the checkout) comes through here, so each one can be put back where it was
+  const removeLine = useCallback(
+    (code: string) => {
+      const before = linesRef.current
+      const at = before.findIndex((l) => l.item_code === code)
+      removeCartLine(code)
+      if (at < 0) return
+      const line = before[at]
+      offerUndo(`Removed ${code} × ${line.qty}`, () => replaceLines(cartEdit, restoreLine(linesRef.current, line, at)))
+    },
+    [removeCartLine, offerUndo, cartEdit],
+  )
+  // a list row's quantity (0 takes the line out): one handler for every row, so the rows stay memo'd
+  const setRowQty = useCallback((code: string, n: number) => (n > 0 ? setCartQty(code, n) : removeLine(code)), [setCartQty, removeLine])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [shopSheetOpen, setShopSheetOpen] = useState(false)
   const [returnToCart, setReturnToCart] = useState(false)
@@ -165,15 +223,41 @@ export function StaffCatalog() {
   const basketKey = shopKey && !shopKey.startsWith('n:') ? shopKey : null
   const basketQ = useShopBasket(basketKey)
 
-  /* ── browse state ── */
-  const [cat, setCat] = useState('All')
-  const [q, setQ] = useState('')
+  /* ── browse state: this tab's last search, category, filters and sort come back (staffBrowse);
+     a link that says what to show (Today's price drops) starts clean ── */
+  const [remembered] = useState(() => rememberedFor(location.search, readSession(BROWSE_KEY)))
+  const [cat, setCat] = useState(remembered?.cat ?? 'All')
+  // what is typed (the field), and what the list is searched for: the typing 150 ms after the last
+  // key, so a word typed fast runs the search and the filters once, not on every letter
+  const [qRaw, setQRaw] = useState(remembered?.q ?? '')
+  const [q, setQ] = useState(remembered?.q ?? '')
+  useEffect(() => {
+    if (qRaw === q) return
+    const t = setTimeout(() => setQ(qRaw), 150)
+    return () => clearTimeout(t)
+  }, [qRaw, q])
+  /** Set the search now, without the wait (clear, Escape, what a quick add leaves in the field). */
+  const setSearch = useCallback((text: string) => {
+    setQRaw(text)
+    setQ(text)
+  }, [])
   // Today's "See all" price drops lands here as /shop?f=drops
-  const [filters, setFilters] = useState<StaffFilters>(() => (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
-  const [sort, setSort] = useState<StaffSort>('featured')
+  const [filters, setFilters] = useState<StaffFilters>(() => remembered?.filters ?? (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
+  const [sort, setSort] = useState<StaffSort>(remembered?.sort ?? 'featured')
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(BROWSE_KEY, browseRecord({ q, cat, filters, sort }))
+    } catch {
+      /* private mode: the catalog opens fresh next time */
+    }
+  }, [q, cat, filters, sort])
   const [filtersOpen, setFiltersOpen] = useState(false)
+  // the tools step out of the way while the list scrolls down — never while the field has the keyboard
+  const scrollDir = useScrollDirection()
+  const [typing, setTyping] = useState(false)
+  const toolsTucked = scrollDir === 'down' && !typing
   const [view, setViewState] = useState<View>(readView)
-  const [gridN, setGridN] = useState({ key: '', n: GRID_CHUNK })
+  const [pageN, setPageN] = useState({ key: '', n: CHUNK })
   const [highlight, setHighlight] = useState(0)
   const [sheetCode, setSheetCode] = useState<string | null>(null)
   const [qtyCode, setQtyCode] = useState<string | null>(null)
@@ -218,28 +302,26 @@ export function StaffCatalog() {
     [cart, cartKey, returnToCart, toast],
   )
 
-  /* ── Order again: the shop's suggested repeat into its cart; sold-out lines left out and named ── */
+  /* ── Order again: the shop's suggested repeat MERGED into its cart (cartEdits.mergeUsual) — every
+     quantity already typed stays, only the missing usual lines are added; sold-out lines are left
+     out and named. The toast takes it back (the whole cart as it was). ── */
   const preload = useCallback(
     (b: ShopBasket) => {
-      let added = 0
-      const soldOut: string[] = []
-      for (const ln of b.suggested) {
-        const it = itemsByCode.get(ln.item_code)
-        if (!it) continue
-        if (isSoldOut(it)) {
-          soldOut.push(ln.item_code)
-          continue
-        }
-        cart.set(it.item_code, Math.max(minQtyOf(it), ln.qty))
-        added += 1
-      }
+      const before = linesRef.current
+      const m = mergeUsual(before, b.suggested, (code) => itemsByCode.get(code))
+      for (const l of m.lines.slice(before.length)) setCartQty(l.item_code, l.qty)
+      const text = usualText(m, b.suggested_from)
+      if (text) offerUndo(text, () => replaceLines(cartEdit, before))
+      // what the toast does not say: the sold-out lines (named, to tell the shop), or nothing to add
       setNotice(
-        added
-          ? { tone: soldOut.length ? 'warn' : 'ok', text: `Added ${added} ${added === 1 ? 'line' : 'lines'} from ${b.suggested_from === 'last_order' ? 'their last order' : 'their usual order'} — check the quantities, then Review.`, soldOut }
-          : { tone: 'warn', text: 'Nothing to add — every line of their usual order is sold out right now.', soldOut },
+        m.soldOut.length
+          ? { tone: 'warn', text: m.added.length || m.kept.length ? 'Part of their usual order is sold out right now.' : 'Nothing to add — every line of their usual order is sold out right now.', soldOut: m.soldOut }
+          : !m.added.length
+            ? { tone: 'ok', text: m.kept.length ? 'Their usual lines are already in this order — your quantities are kept.' : 'Nothing to add from their usual order.' }
+            : null,
       )
     },
-    [cart, itemsByCode],
+    [itemsByCode, setCartQty, offerUndo, cartEdit],
   )
 
   // "Order again" from Today or Customers lands here with the shop picked and { again: key } in the state
@@ -264,7 +346,8 @@ export function StaffCatalog() {
   const codeKeys = useMemo(() => new Set(items.map((i) => codeKey(i.item_code))), [items])
   const quick = isQuickList(q, (word) => codeKeys.has(codeKey(word)))
   const quickRows = useMemo<QuickRow[]>(() => {
-    if (!quick || !index) return []
+    // exact codes need no index (resolveQuick reads the codes); the index only adds near matches
+    if (!quick) return []
     return splitList(q).map((raw) => {
       const { query, qty } = parseToken(raw)
       const r = resolveQuick(query, items, index)
@@ -280,24 +363,23 @@ export function StaffCatalog() {
       // matches, so the rep picks one with "+" instead of retyping it
       const out = quickRows.map((r) => r.item || r.soldOut).filter((x): x is ShopItem => Boolean(x))
       const seen = new Set(out.map((i) => i.item_code))
-      if (index) {
-        for (const r of quickRows) {
-          if (r.item || r.soldOut) continue
-          for (const hit of searchItems(index, items, parseToken(r.raw).query, 6)) {
-            if (!seen.has(hit.item_code)) {
-              seen.add(hit.item_code)
-              out.push(hit)
-            }
+      for (const r of quickRows) {
+        if (r.item || r.soldOut) continue
+        const query = parseToken(r.raw).query
+        for (const hit of index ? searchItems(index, items, query, 6) : plainSearch(items, query).slice(0, 6)) {
+          if (!seen.has(hit.item_code)) {
+            seen.add(hit.item_code)
+            out.push(hit)
           }
         }
       }
       return out
     }
-    if (!index) return items
     // an exact code (or its start) first — "x05 uc" and "X05UC" both find X05 UC-1Mtr — then the index
+    // (or, while the index is still being built, the plain filter: never the whole catalog)
     const key = codeKey(s)
     const exact = key.length >= 2 ? items.filter((i) => codeKey(i.item_code).startsWith(key)) : []
-    const hits = searchItems(index, items, s, 500)
+    const hits = index ? searchItems(index, items, s, 500) : plainSearch(items, s)
     const seen = new Set(exact.map((i) => i.item_code))
     return [...exact, ...hits.filter((i) => !seen.has(i.item_code))]
   }, [items, index, q, quick, quickRows])
@@ -321,7 +403,8 @@ export function StaffCatalog() {
   }, [searched, cat])
 
   const shown = useMemo(() => {
-    let r = searched.filter((i) => passFilters(i) && (cat === 'All' || (i.category || 'OTHER') === cat))
+    // a typed list adds exact codes: the category row is not on screen then, so it does not apply
+    let r = searched.filter((i) => passFilters(i) && (quick || cat === 'All' || (i.category || 'OTHER') === cat))
     const order = new Map(items.map((i, n) => [i.item_code, n]))
     const shelf = (a: ShopItem, b: ShopItem) => (order.get(a.item_code) ?? 0) - (order.get(b.item_code) ?? 0)
     if (sort === 'price_asc') r = r.slice().sort((a, b) => byPrice(1)(a, b) || shelf(a, b))
@@ -330,12 +413,23 @@ export function StaffCatalog() {
     else if (sort === 'newest') r = r.slice().sort((a, b) => Number(hasBadge(b, 'new')) - Number(hasBadge(a, 'new')) || shelf(a, b))
     // stable partition: what can be sold today, then the sold-out lines, each in the order above
     return [...r.filter((i) => !isSoldOut(i)), ...r.filter((i) => isSoldOut(i))]
-  }, [searched, passFilters, cat, sort, items])
+  }, [searched, passFilters, quick, cat, sort, items])
 
   const firstOut = shown.findIndex((i) => isSoldOut(i))
   const soldCount = firstOut < 0 ? 0 : shown.length - firstOut
   const filterKey = `${cat}|${q}|${JSON.stringify(filters)}|${sort}`
-  const gridLimit = gridN.key === filterKey ? gridN.n : GRID_CHUNK
+  // the list and the grid both draw 48 lines at a time (all ~180 at once was the slow part); the next
+  // 48 come as the end nears (the sentinel below), and a new search starts again at 48
+  const limit = pageN.key === filterKey ? pageN.n : CHUNK
+  const showMore = useCallback(() => setPageN((p) => ({ key: filterKey, n: (p.key === filterKey ? p.n : CHUNK) + CHUNK })), [filterKey])
+  const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!sentinel || typeof IntersectionObserver === 'undefined') return
+    // watched again after each page (limit), so a sentinel still in view asks for the next one
+    const io = new IntersectionObserver((entries) => entries.some((x) => x.isIntersecting) && showMore(), { rootMargin: '0px 0px 800px 0px' })
+    io.observe(sentinel)
+    return () => io.disconnect()
+  }, [sentinel, showMore, limit])
   // the highlighted row follows the search: a new query starts on its best line
   const [hlKey, setHlKey] = useState(filterKey)
   if (hlKey !== filterKey) {
@@ -343,29 +437,36 @@ export function StaffCatalog() {
     setHighlight(0)
   }
   const activeFilters = Number(filters.inStock) + Number(filters.drops) + Number(filters.clearance) + Number(filters.best) + Number(sort !== 'featured')
+  // a key that acts on the list acts on what is typed: the handler reads the list as it is after a
+  // search still in its 150 ms wait has been run (onSearchKey flushes it first)
+  const latest = useRef({ shown, quick, quickRows, highlight })
+  useLayoutEffect(() => {
+    latest.current = { shown, quick, quickRows, highlight }
+  })
 
   /* ── the live quote (the bar, the slip and the checkout all show the server's total) ── */
   const [coupon, setCoupon] = useState('')
   const fetchQuote = useCallback<QuoteFetcher>((body, signal) => postStaffQuote(body, signal), [])
-  const { quote, quoting, error: quoteError } = useQuote(true, cart.lines, coupon, '', fetchQuote)
+  const { quote, quoting, error: quoteError, fresh: quoteFresh, retry: retryQuote } = useQuote(true, cart.lines, coupon, '', fetchQuote)
   const estimate = useMemo(() => cart.lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0), [cart.lines, itemsByCode])
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
+  const minimum = minimumOf(total, minBhd, quote)
 
   /* ── actions ── */
   const addLine = useCallback((it: ShopItem, qty?: number | null) => cart.set(it.item_code, Math.max(minQtyOf(it), qty || 0)), [cart])
 
-  const runQuickAdd = () => {
+  const runQuickAdd = (rows: QuickRow[]) => {
     const added: string[] = []
     const soldOut: string[] = []
     const left: string[] = []
-    for (const r of quickRows) {
+    for (const r of rows) {
       if (r.item) {
         addLine(r.item, r.qty)
         added.push(r.item.item_code)
       } else if (r.soldOut) soldOut.push(r.soldOut.item_code)
       else left.push(r.raw)
     }
-    setQ(left.join(', '))
+    setSearch(left.join(', '))
     setNotice({
       tone: soldOut.length || left.length ? 'warn' : 'ok',
       text: [
@@ -379,33 +480,38 @@ export function StaffCatalog() {
   }
 
   const onSearchKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    const acts = e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'ArrowUp'
+    // typed faster than the 150 ms wait: run the search now, so Enter adds what is on screen for it
+    if (acts && qRaw !== q) flushSync(() => setQ(qRaw))
+    const { shown: list, quick: isQuick, quickRows: rows, highlight: at } = latest.current
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
-      const max = view === 'list' ? shown.length - 1 : -1
+      const max = view === 'list' ? list.length - 1 : -1
       if (max < 0) return
-      const next = Math.max(0, Math.min(max, highlight + (e.key === 'ArrowDown' ? 1 : -1)))
+      const next = Math.max(0, Math.min(max, at + (e.key === 'ArrowDown' ? 1 : -1)))
       setHighlight(next)
-      document.querySelector(`[data-code="${CSS.escape(shown[next].item_code)}"]`)?.scrollIntoView({ block: 'nearest' })
+      if (next >= limit) showMore() // the line is on a page not drawn yet
+      requestAnimationFrame(() => document.querySelector(`[data-code="${CSS.escape(list[next].item_code)}"]`)?.scrollIntoView({ block: 'nearest' }))
       return
     }
     if (e.key === 'Escape') {
-      setQ('')
+      setSearch('')
       return
     }
     if (e.key !== 'Enter') return
     e.preventDefault()
-    if (quick) {
-      runQuickAdd()
+    if (isQuick) {
+      runQuickAdd(rows)
       return
     }
-    if (!q.trim()) return
+    if (!qRaw.trim()) return
     // Enter adds the highlighted line only at the desk (the table, where the highlight is drawn). On a
     // phone the keyboard's Go / Search key is how the keyboard is put away — it must not add anything.
     if (!window.matchMedia('(min-width: 1280px)').matches) {
       e.currentTarget.blur()
       return
     }
-    const it = shown[highlight]
+    const it = list[at]
     if (!it) return
     if (isSoldOut(it)) {
       setNotice({ tone: 'warn', text: `${it.item_code} is sold out — not added. Open it to take a backorder.` })
@@ -416,7 +522,7 @@ export function StaffCatalog() {
     const next = cur > 0 ? Math.min(9999, cur + stepOf(it)) : minQtyOf(it)
     cart.set(it.item_code, next)
     setNotice({ tone: 'ok', text: `${cur > 0 ? 'Now' : 'Added'} ${it.item_code} × ${next}` })
-    setQ('')
+    setSearch('')
   }
 
   // "/" anywhere on the page (not while typing) jumps to the search — the desk's first key
@@ -484,7 +590,9 @@ export function StaffCatalog() {
   const cats = ['All', ...(data?.categories || []).filter((c) => (catCounts.get(c) || 0) > 0 || c === cat)]
 
   return (
-    <div className="bg-[#F9F7F3] text-[#1A1428]" style={hasCart ? { paddingBottom: '8.5rem' } : undefined}>
+    // the foot of the list keeps room for the order bar (its measured height, --yq-dock-bottom) on top
+    // of the shell's own room for the tab bar and the Spotted button: the last row is never under them
+    <div className="bg-[#F9F7F3] text-[#1A1428]" style={{ paddingBottom: 'var(--yq-dock-bottom, 0px)' }}>
       <div className="mx-auto max-w-[1600px] px-4 lg:px-6 xl:grid xl:grid-cols-[minmax(0,1fr)_360px] xl:gap-6 xl:pb-10">
         <div className="min-w-0">
           {/* ── who this order is for (the slip carries it from 1280 px) ── */}
@@ -526,7 +634,7 @@ export function StaffCatalog() {
                 {notice.text}
                 {notice.soldOut?.length ? <> · <b className="font-semibold">Sold out, not added: {notice.soldOut.join(', ')}</b></> : null}
               </span>
-              <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className="-my-1 -mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-black/5">
+              <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className={cn('relative -my-1 -mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-black/5', HIT)}>
                 <X size={13} aria-hidden="true" />
               </button>
             </div>
@@ -534,25 +642,38 @@ export function StaffCatalog() {
 
           {age && <p className={cn('mt-2 text-[11.5px]', age.stale ? 'font-semibold text-amber-700' : 'text-[#6b6480]')}>{age.label}{age.stale ? ' — check before promising a quantity' : ''}</p>}
 
-          {/* ── the tools, pinned: one field for search and quick add, one chip row ── */}
-          <div className="sticky z-20 -mx-4 mt-2 border-b border-[#E9E4EF] bg-[#F9F7F3]/95 px-4 pb-2 pt-2 backdrop-blur-md lg:-mx-6 lg:px-6 xl:mx-0 xl:rounded-b-2xl xl:px-0" style={{ top: TOPBAR }}>
+          {/* ── the tools, pinned: one field for search and quick add, one chip row. Under 1280 px they
+              step up behind the header while the list scrolls down and come back on scroll up (never
+              while the field has the keyboard): transform and opacity, no height animation, so the
+              rows get the room. Solid on a touch screen (a blur recomputed every scroll frame, for a
+              95% opaque bar); a mouse keeps the translucent glass. ── */}
+          <div
+            className={cn(
+              'sticky z-20 -mx-4 mt-2 border-b border-[#E9E4EF] bg-[#F9F7F3] px-4 pb-2 pt-2 transition-[transform,opacity] duration-200 motion-reduce:transition-none lg:-mx-6 lg:px-6 xl:mx-0 xl:rounded-b-2xl xl:px-0 [@media(pointer:fine)]:bg-[#F9F7F3]/95 [@media(pointer:fine)]:backdrop-blur-md',
+              toolsTucked ? 'ease-[cubic-bezier(.4,0,1,1)] max-xl:pointer-events-none max-xl:-translate-y-full max-xl:opacity-0' : 'ease-[cubic-bezier(.22,1,.36,1)]',
+            )}
+            style={{ top: TOPBAR }}
+          >
             <div className="relative">
               <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#a8a2bb]" aria-hidden="true" />
               <input
                 ref={searchRef}
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
+                value={qRaw}
+                onChange={(e) => setQRaw(e.target.value)}
                 onKeyDown={onSearchKey}
+                onFocus={() => setTyping(true)}
+                onBlur={() => setTyping(false)}
                 placeholder="Search, or add a list: C18 3, UK15 6"
                 aria-label="Search the catalog, or type codes and quantities to add them"
                 aria-describedby="yq-staff-search-hint"
                 type="search"
                 enterKeyHint={quick ? 'done' : 'search'}
                 autoComplete="off"
-                className="h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[15px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [&::-webkit-search-cancel-button]:hidden"
+                // 16 px under a finger (an iPhone zooms into a field under 16 px on focus), 15 px with a mouse
+                className="h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[16px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [&::-webkit-search-cancel-button]:hidden [@media(pointer:fine)]:text-[15px]"
               />
-              {q ? (
-                <button type="button" onClick={() => setQ('')} aria-label="Clear search" className={cn('absolute right-1 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-lg text-[#6b6480] hover:bg-[#F3F0F6]', RING)}>
+              {qRaw ? (
+                <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className={cn('absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-xl text-[#6b6480] hover:bg-[#F3F0F6]', RING)}>
                   <X size={15} />
                 </button>
               ) : (
@@ -562,26 +683,29 @@ export function StaffCatalog() {
             <p id="yq-staff-search-hint" className="sr-only">
               Enter adds the highlighted line; a list like C18 3, UK15 6 adds every exact code. Arrow keys move the highlight.
             </p>
-            {quick && (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-live="polite">
+            {quick ? (
+              // a list being typed takes the chip row's place, in one row that scrolls sideways and is
+              // exactly as tall: the bar never grows while the rep types (it wrapped, line after line).
+              // The list ignores the category while it is a list: it adds exact codes.
+              <div className="-mx-4 mt-0.5 flex h-[50px] items-center gap-1.5 overflow-x-auto px-4 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0" aria-live="polite">
                 {quickRows.map((r, n) => (
                   <span
                     key={`${r.raw}-${n}`}
                     className={cn(
-                      'rounded-lg px-2 py-1 text-[11.5px] font-semibold tabular-nums',
+                      'shrink-0 whitespace-nowrap rounded-lg px-2 py-1 text-[11.5px] font-semibold tabular-nums',
                       r.item ? 'bg-[#EEE8F4] text-[#5A3478]' : r.soldOut ? 'bg-[#fdecef] text-[#9f1239]' : 'bg-[#f4f3f8] text-[#6b6480]',
                     )}
                   >
                     {r.item ? `${r.item.item_code} × ${Math.max(minQtyOf(r.item), r.qty || 0)}` : r.soldOut ? `${r.soldOut.item_code} sold out` : `${r.raw} — not a code`}
                   </span>
                 ))}
-                <span className="text-[11.5px] text-[#6b6480]">
+                <span className="shrink-0 whitespace-nowrap pr-4 text-[11.5px] text-[#6b6480]">
                   {quickRows.some((r) => r.item) ? 'Enter adds the exact codes' : 'No exact code yet — pick from the list below'}
                 </span>
               </div>
-            )}
-
-            <div className="-mx-4 mt-2 flex items-center gap-1.5 overflow-x-auto px-4 pb-0.5 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0">
+            ) : (
+            /* py-1.5: the scroll box clips, and each chip's 44 px hit area (HIT) reaches past its 36 px */
+            <div className="-mx-4 mt-0.5 flex items-center gap-1.5 overflow-x-auto px-4 py-1.5 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0">
               {cats.map((c) => (
                 <button
                   key={c}
@@ -589,7 +713,8 @@ export function StaffCatalog() {
                   onClick={() => setCat(c)}
                   aria-pressed={cat === c}
                   className={cn(
-                    'inline-flex h-9 shrink-0 items-center gap-1 rounded-full border px-3.5 text-[12px] font-medium capitalize transition duration-150 ease-out',
+                    'relative inline-flex h-9 shrink-0 items-center gap-1 rounded-full border px-3.5 text-[12px] font-medium capitalize transition duration-150 ease-out',
+                    HIT,
                     RING,
                     cat === c ? 'border-[#6D4091] bg-[#6D4091] text-white' : 'border-[#E2DCEA] bg-white text-[#6b6480] hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                   )}
@@ -603,7 +728,8 @@ export function StaffCatalog() {
                 onClick={() => setFiltersOpen(true)}
                 aria-haspopup="dialog"
                 className={cn(
-                  'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-semibold transition duration-150 ease-out',
+                  'relative inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-semibold transition duration-150 ease-out',
+                  HIT,
                   RING,
                   activeFilters ? 'border-[#6D4091] bg-[#EEE8F4] text-[#5A3478]' : 'border-[#E2DCEA] bg-white text-[#1A1428] hover:bg-[#f7f5fb]',
                 )}
@@ -619,13 +745,15 @@ export function StaffCatalog() {
                     aria-pressed={view === v}
                     aria-label={v === 'list' ? 'List' : 'Grid'}
                     title={v === 'list' ? 'List — for ordering' : 'Grid — for showing a customer'}
-                    className={cn('grid h-8 w-9 place-items-center rounded-full transition duration-150 ease-out', RING, view === v ? 'bg-[#6D4091] text-white' : 'text-[#6b6480] hover:text-[#1A1428]')}
+                    // side by side, each is 44 px wide under a finger (a centred hit area would reach into its neighbour); HIT adds the height
+                    className={cn('relative grid h-8 w-9 place-items-center rounded-full transition duration-150 ease-out [@media(pointer:coarse)]:w-11', HIT, RING, view === v ? 'bg-[#6D4091] text-white' : 'text-[#6b6480] hover:text-[#1A1428]')}
                   >
                     {v === 'list' ? <List size={15} aria-hidden="true" /> : <LayoutGrid size={15} aria-hidden="true" />}
                   </button>
                 ))}
               </span>
             </div>
+            )}
           </div>
 
           {/* ── results ── */}
@@ -640,7 +768,11 @@ export function StaffCatalog() {
                     {shown.length !== items.length ? ` of ${items.length}` : ''}
                   </>
                 ) : (
-                  'Loading the price list…'
+                  // the count's place holds a bar like the rest of the page; the words are for a screen reader
+                  <>
+                    <span aria-hidden="true" className={cn(SKELETON, 'inline-block h-3 w-24 rounded align-middle')} />
+                    <span className="sr-only">Loading the price list…</span>
+                  </>
                 )}
               </p>
               {data && FILTER_CHIPS.filter((c) => filters[c.key]).map((c) => (
@@ -649,7 +781,7 @@ export function StaffCatalog() {
                   type="button"
                   onClick={() => setFilters((f) => ({ ...f, [c.key]: false }))}
                   aria-label={`${c.label} filter on — remove it`}
-                  className={cn('inline-flex h-7 items-center gap-1 rounded-full border border-[#6D4091] bg-[#EEE8F4] pl-2.5 pr-2 text-[11.5px] font-semibold text-[#5A3478] transition duration-150 ease-out hover:bg-[#E4DAEE]', RING)}
+                  className={cn('relative inline-flex h-7 items-center gap-1 rounded-full border border-[#6D4091] bg-[#EEE8F4] pl-2.5 pr-2 text-[11.5px] font-semibold text-[#5A3478] transition duration-150 ease-out hover:bg-[#E4DAEE]', HIT, RING)}
                 >
                   {c.label}
                   <X size={12} aria-hidden="true" />
@@ -658,17 +790,7 @@ export function StaffCatalog() {
             </div>
 
             {!data ? (
-              <div className="overflow-hidden rounded-2xl border border-[#E9E4EF] bg-white">
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <div key={i} className="flex h-[72px] items-center gap-3 border-b border-[#F3F0F6] px-3 last:border-0">
-                    <div className="h-14 w-14 animate-pulse rounded-xl bg-[#F3F0F6]" />
-                    <div className="flex-1 space-y-2">
-                      <div className="h-3 w-1/3 animate-pulse rounded bg-[#f0eef6]" />
-                      <div className="h-2.5 w-2/3 animate-pulse rounded bg-[#F3F0F6]" />
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <ListSkeleton />
             ) : shown.length === 0 ? (
               <div className="rounded-2xl border border-[#E9E4EF] bg-white px-6 py-14 text-center">
                 <p className="font-display text-[15px] font-bold text-[#1A1428]">{quick ? 'No exact code in that list' : 'Nothing matches that'}</p>
@@ -676,7 +798,7 @@ export function StaffCatalog() {
                 <button
                   type="button"
                   onClick={() => {
-                    setQ('')
+                    setSearch('')
                     setCat('All')
                     setFilters(NO_FILTERS)
                     setSort('featured')
@@ -696,8 +818,10 @@ export function StaffCatalog() {
                   <span className="text-center">Qty</span>
                   <span />
                 </div>
+                {/* the rows are memo'd: one stable handler each (by code), so a keystroke or one line's
+                    change redraws only the rows whose own props changed */}
                 <div className="divide-y divide-[#F3F0F6]">
-                  {shown.map((it, i) => (
+                  {shown.slice(0, limit).map((it, i) => (
                     <div key={it.item_code}>
                       {i === firstOut && <SoldOutDivider count={soldCount} className="bg-[#FBFAF7] px-4" />}
                       <ProductRow
@@ -706,9 +830,9 @@ export function StaffCatalog() {
                         allowBackorder={allowBackorder}
                         highlighted={Boolean(q.trim()) && !quick && i === highlight}
                         eagerImage={i < 8}
-                        onOpen={() => setSheetCode(it.item_code)}
-                        onSetQty={(n) => (n > 0 ? cart.set(it.item_code, n) : cart.remove(it.item_code))}
-                        onQtyClick={() => setQtyCode(it.item_code)}
+                        onOpen={setSheetCode}
+                        onSetQty={setRowQty}
+                        onQtyClick={setQtyCode}
                       />
                     </div>
                   ))}
@@ -717,7 +841,7 @@ export function StaffCatalog() {
             ) : (
               <>
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-5 min-[1800px]:grid-cols-6">
-                  {shown.slice(0, gridLimit).flatMap((it, i) => {
+                  {shown.slice(0, limit).flatMap((it, i) => {
                     const card = (
                       <ProductCard
                         key={it.item_code}
@@ -729,21 +853,22 @@ export function StaffCatalog() {
                         onOpen={() => setSheetCode(it.item_code)}
                         onAdd={() => addLine(it)}
                         onSetQty={(n) => cart.set(it.item_code, n)}
-                        onRemove={() => cart.remove(it.item_code)}
+                        onRemove={() => removeLine(it.item_code)}
                         onQtyClick={() => setQtyCode(it.item_code)}
                       />
                     )
                     return i === firstOut ? [<SoldOutDivider key="sold-out" count={soldCount} grid />, card] : [card]
                   })}
                 </div>
-                {gridLimit < shown.length && (
-                  <div className="mt-6 text-center">
-                    <button type="button" onClick={() => setGridN({ key: filterKey, n: gridLimit + GRID_CHUNK })} className={cn('h-11 rounded-xl border border-[#E2DCEA] bg-white px-6 text-[13px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb]', RING)}>
-                      Show more ({shown.length - gridLimit} left)
-                    </button>
-                  </div>
-                )}
               </>
+            )}
+            {/* the next 48 load as this comes within 800 px; the button is there for a keyboard */}
+            {data && limit < shown.length && (
+              <div ref={setSentinel} className="mt-6 text-center">
+                <button type="button" onClick={showMore} className={cn('h-11 rounded-xl border border-[#E2DCEA] bg-white px-6 text-[13px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb]', RING)}>
+                  Show more ({shown.length - limit} left)
+                </button>
+              </div>
             )}
             <p className="py-8 text-center text-[11px] text-[#6b6480]">Trade prices · the exact free-to-sell number is in each product&apos;s sheet</p>
           </main>
@@ -762,26 +887,27 @@ export function StaffCatalog() {
             minBhd={minBhd}
             onPickShop={() => (sel ? setShopSheetOpen(true) : setPickerOpen(true))}
             onPlace={() => setCartOpen(true)}
+            onRemove={removeLine}
           />
         </div>
       </div>
 
-      {/* ── the order bar, in the thumb zone (under 1280 px) ── */}
+      {/* ── the order bar, in the thumb zone (under 1280 px): one row, 53 px — the total, one line under
+          it (how far from the minimum while short of it, else the shop and the order's size) and
+          Review; the minimum itself is a 3 px line along the top edge. Solid: no blur on a phone. ── */}
       {hasCart && (
-        <div ref={setOrderBar} className="fixed right-0 z-30 border-t border-[#E9E4EF] bg-white/95 px-4 pb-2.5 pt-2 backdrop-blur-md xl:hidden" style={{ bottom: TABBAR, left: 'var(--yq-sidebar, 0px)' }}>
-          <div className="mx-auto max-w-[1600px]">
-            <MinimumRuler total={total} minBhd={minBhd} quote={quote} className="mb-2" />
-            <div className="flex items-center gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[11.5px] text-[#6b6480]">
-                  {sel ? <b className="font-semibold text-[#1A1428]">{sel.shop || sel.name}</b> : 'No shop picked yet'} · <span className="tabular-nums">{cart.items}</span> {cart.items === 1 ? 'line' : 'lines'} · <span className="tabular-nums">{cart.units}</span> pcs
-                </div>
-                <div className="font-display text-[17px] font-extrabold leading-tight tracking-[-0.015em] tabular-nums text-[#1A1428]">{bhd(total)}</div>
+        <div ref={setOrderBar} className="fixed right-0 z-30 border-t border-[#E9E4EF] bg-white px-4 py-1 xl:hidden" style={{ bottom: TABBAR, left: 'var(--yq-sidebar, 0px)' }}>
+          <MinimumRuler total={total} minBhd={minBhd} quote={quote} compact className="absolute inset-x-0 -top-px" />
+          <div className="mx-auto flex max-w-[1600px] items-center gap-3">
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="font-display text-[16px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1A1428]">{bhd(total)}</div>
+              <div className={cn('truncate text-[11px] tabular-nums', minimum && !minimum.met ? 'font-medium text-[#1A1428]' : 'text-[#6b6480]')}>
+                {orderBarLine({ shop: sel ? sel.shop || sel.name : '', lines: cart.items, units: cart.units, minimum })}
               </div>
-              <button type="button" onClick={() => setCartOpen(true)} className={cn('flex h-12 shrink-0 items-center gap-2 rounded-xl bg-[#6D4091] px-5 text-[14px] font-semibold text-white hover:bg-[#5A3478] active:scale-[.99]', RING)}>
-                <ShoppingBag size={17} aria-hidden="true" /> Review
-              </button>
             </div>
+            <button type="button" onClick={() => setCartOpen(true)} className={cn('flex h-11 shrink-0 items-center gap-2 rounded-xl bg-[#6D4091] px-5 text-[14px] font-semibold text-white transition-transform duration-[120ms] hover:bg-[#5A3478] active:scale-[.98] motion-reduce:transition-none', RING)}>
+              <ShoppingBag size={17} aria-hidden="true" /> Review
+            </button>
           </div>
         </div>
       )}
@@ -810,7 +936,7 @@ export function StaffCatalog() {
         pairs={sheetPairs}
         onAdd={(it) => addLine(it)}
         onSetQty={(it, n) => cart.set(it.item_code, n)}
-        onRemove={(it) => cart.remove(it.item_code)}
+        onRemove={(it) => removeLine(it.item_code)}
         onOpenItem={setSheetCode}
         onClose={() => setSheetCode(null)}
         onQtyClick={(it) => setQtyCode(it.item_code)}
@@ -820,7 +946,7 @@ export function StaffCatalog() {
           item={qtyItem}
           value={cart.qtyOf(qtyItem.item_code)}
           onApply={(n) => cart.set(qtyItem.item_code, n)}
-          onRemove={() => cart.remove(qtyItem.item_code)}
+          onRemove={() => removeLine(qtyItem.item_code)}
           onClose={() => setQtyCode(null)}
         />
       )}
@@ -837,6 +963,9 @@ export function StaffCatalog() {
           quote={quote}
           quoting={quoting}
           quoteError={quoteError}
+          quoteFresh={quoteFresh}
+          onRetryQuote={retryQuote}
+          onRemoveLine={removeLine}
           coupon={coupon}
           onCouponChange={setCoupon}
           src="salesman"
@@ -852,14 +981,17 @@ export function StaffCatalog() {
             cart.clear()
             setCoupon('')
             setNotice(null)
-            void qc.invalidateQueries({ queryKey: ['shop-today'] })
-            void qc.invalidateQueries({ queryKey: ['shop-book'] })
-            void qc.invalidateQueries({ queryKey: ['shop-orders-new-count'] })
+            setUndo(null) // the order is placed: nothing on screen to take back
+            // the Orders list, Today, the book, the stock shown here and this shop's usual basket
+            for (const queryKey of afterOrderKeys(basketKey)) void qc.invalidateQueries({ queryKey })
             if (o.duplicate) toast('This order had already been placed — here it is.', 'success')
             window.scrollTo({ top: 0 })
           }}
         />
       )}
+
+      {/* an offer made for another shop's cart is not this one's to take back */}
+      <UndoToast offer={undo && undo.cartKey === cartKey ? undo : null} onDone={dropUndo} />
     </div>
   )
 }

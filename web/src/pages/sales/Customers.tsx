@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ClipboardList, Loader2, MessageCircle, Phone, RotateCcw, Search, Send, ShoppingBag, Users, X } from 'lucide-react'
+import { ClipboardList, MessageCircle, Phone, RotateCcw, Search, Send, ShoppingBag, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CreditChip, StatusBadge } from '@/pages/shop/ShopPicker'
 import { ShopSheet } from '@/pages/shop/ShopSheet'
+import { HIT, SKELETON } from '@/pages/shop/shared'
+import { LoadFailed } from './LoadFailed'
 import { customerOf, dayLabel, initials, phoneLabel, setSelectedCustomer, telLink, useFollowups, useOrderAgain, useShopBook, waLink, type BookShop } from './lib'
 import { FollowupRow } from './FollowUps'
 
@@ -21,6 +23,8 @@ type View = 'all' | 'due' | 'lapsed'
 function norm(s?: string | null): string {
   return String(s || '').toLowerCase().replace(/[^0-9a-z؀-ۿ]+/g, '')
 }
+
+const ICON = cn('relative grid h-10 w-10 place-items-center rounded-xl border border-border bg-card hover:bg-muted', HIT)
 
 function ShopCard({ s, onRestock }: { s: BookShop; onRestock: (s: BookShop) => void }) {
   const navigate = useNavigate()
@@ -45,9 +49,11 @@ function ShopCard({ s, onRestock }: { s: BookShop; onRestock: (s: BookShop) => v
           {s.credit && <CreditChip credit={s.credit} className="mt-1.5" />}
         </div>
       </div>
+      {/* 40 px buttons, 44 px under a finger (HIT; the 6 px gaps take the 2 px each side reaches) */}
       <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] gap-1.5">
-        <button type="button" onClick={() => orderAgain(customerOf(s))} className="inline-flex h-10 min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap rounded-xl bg-primary px-2 text-[12.5px] font-semibold text-primary-foreground">
-          <RotateCcw size={14} aria-hidden="true" /> Order again
+        <button type="button" onClick={() => orderAgain(customerOf(s))} className={cn('relative inline-flex h-10 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl bg-primary px-2 text-[12.5px] font-semibold text-primary-foreground', HIT)}>
+          {/* the text clips itself: overflow-hidden on the button would cut its own hit area */}
+          <RotateCcw size={14} aria-hidden="true" className="shrink-0" /> <span className="min-w-0 truncate">Order again</span>
         </button>
         <button
           type="button"
@@ -57,26 +63,73 @@ function ShopCard({ s, onRestock }: { s: BookShop; onRestock: (s: BookShop) => v
           }}
           aria-label={`New order for ${s.name}`}
           title="New order"
-          className="grid h-10 w-10 place-items-center rounded-xl border border-border bg-card text-primary hover:bg-muted"
+          className={cn(ICON, 'text-primary')}
         >
           <ShoppingBag size={16} aria-hidden="true" />
         </button>
-        <button type="button" onClick={() => onRestock(s)} aria-label={`Send ${s.name} a restock link`} title="Send restock link" className="grid h-10 w-10 place-items-center rounded-xl border border-border bg-card text-[#137a48] hover:bg-muted">
+        <button type="button" onClick={() => onRestock(s)} aria-label={`Send ${s.name} a restock link`} title="Send restock link" className={cn(ICON, 'text-[#137a48]')}>
           <Send size={16} aria-hidden="true" />
         </button>
-        <a href={wa || '#'} target="_blank" rel="noreferrer" aria-label="WhatsApp" title="WhatsApp" className={cn('grid h-10 w-10 place-items-center rounded-xl border border-border bg-card text-[#1d9e50] hover:bg-muted', !wa && 'pointer-events-none opacity-40')}>
+        <a href={wa || '#'} target="_blank" rel="noreferrer" aria-label="WhatsApp" title="WhatsApp" className={cn(ICON, 'text-[#1d9e50]', !wa && 'pointer-events-none opacity-40')}>
           <MessageCircle size={16} aria-hidden="true" />
         </a>
-        <a href={tel || '#'} aria-label="Call" title="Call" className={cn('grid h-10 w-10 place-items-center rounded-xl border border-border bg-card text-foreground hover:bg-muted', !tel && 'pointer-events-none opacity-40')}>
+        <a href={tel || '#'} aria-label="Call" title="Call" className={cn(ICON, 'text-foreground', !tel && 'pointer-events-none opacity-40')}>
           <Phone size={16} aria-hidden="true" />
         </a>
       </div>
       {s.sources.includes('app') && s.phone && (
-        <button type="button" onClick={() => navigate(`/shop-orders?q=${encodeURIComponent(s.phone || '')}&bucket=done`)} className="mt-2 inline-flex h-9 items-center gap-1.5 rounded-lg px-1 text-[12px] font-semibold text-primary hover:underline">
+        <button type="button" onClick={() => navigate(`/shop-orders?q=${encodeURIComponent(s.phone || '')}&bucket=done`)} className={cn('relative mt-2 inline-flex h-9 items-center gap-1.5 rounded-lg px-1 text-[12px] font-semibold text-primary hover:underline', HIT)}>
           <ClipboardList size={13} aria-hidden="true" /> Their app orders
         </button>
       )}
     </li>
+  )
+}
+
+/** The book while it loads: shop cards (a circle, three lines, the action row) in the one loading look. */
+function CardsSkeleton() {
+  return (
+    <div role="status">
+      <span className="sr-only">Loading your shops…</span>
+      <ul aria-hidden="true" className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {Array.from({ length: 6 }, (_, i) => (
+          <li key={i} className="min-w-0 rounded-2xl border border-border bg-card p-3.5">
+            <div className="flex items-start gap-3">
+              <div className={cn(SKELETON, 'h-11 w-11 shrink-0 rounded-full')} />
+              <div className="min-w-0 flex-1 space-y-2 pt-1">
+                <div className={cn(SKELETON, 'h-3.5 w-2/3 rounded')} />
+                <div className={cn(SKELETON, 'h-3 w-1/2 rounded')} />
+                <div className={cn(SKELETON, 'h-2.5 w-1/3 rounded')} />
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] gap-1.5">
+              <div className={cn(SKELETON, 'h-10 rounded-xl')} />
+              {[0, 1, 2, 3].map((n) => (
+                <div key={n} className={cn(SKELETON, 'h-10 w-10 rounded-xl')} />
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Due / Lapsed while they load: the list's rows (a name, a reason, the product chips, the actions). */
+function RowsSkeleton() {
+  return (
+    <div role="status">
+      <span className="sr-only">Loading your Focus book…</span>
+      <ul aria-hidden="true" className="mt-4 divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card">
+        {Array.from({ length: 4 }, (_, i) => (
+          <li key={i} className="space-y-2 px-4 py-3.5">
+            <div className={cn(SKELETON, 'h-3.5 w-1/2 rounded')} />
+            <div className={cn(SKELETON, 'h-3 w-3/4 rounded')} />
+            <div className={cn(SKELETON, 'mt-2.5 h-10 rounded-xl')} />
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -130,7 +183,7 @@ export default function Customers() {
       <div role="tablist" aria-label="Which shops" className="mt-4 inline-grid grid-cols-3 rounded-xl border border-border bg-card p-1">
         {tabs.map((t) => (
           <button key={t.key} role="tab" type="button" aria-selected={view === t.key} onClick={() => setView(t.key)}
-            className={cn('inline-flex h-9 items-center justify-center gap-1.5 rounded-lg px-3 text-[13px] font-semibold', view === t.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')}>
+            className={cn('relative inline-flex h-9 items-center justify-center gap-1.5 rounded-lg px-3 text-[13px] font-semibold', HIT, view === t.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')}>
             {t.label}
             {t.n != null && <span className={cn('rounded-full px-1.5 text-[11px] tabular-nums', view === t.key ? 'bg-primary-foreground/20' : 'bg-muted')}>{t.n}</span>}
           </button>
@@ -141,7 +194,7 @@ export default function Customers() {
         <Search size={16} className="text-muted-foreground" aria-hidden="true" />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={view === 'all' ? 'Shop, contact, area or phone…' : 'Search shop or item code…'} aria-label="Search shops" className="h-full w-full bg-transparent text-[16px] outline-none placeholder:text-muted-foreground/70" />
         {q && (
-          <button type="button" onClick={() => setQ('')} aria-label="Clear" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-muted">
+          <button type="button" onClick={() => setQ('')} aria-label="Clear" className={cn('relative grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-muted', HIT)}>
             <X size={15} />
           </button>
         )}
@@ -149,11 +202,9 @@ export default function Customers() {
 
       {view !== 'all' ? (
         fu.isLoading ? (
-          <div className="grid h-40 place-items-center text-muted-foreground">
-            <Loader2 size={20} className="animate-spin" />
-          </div>
+          <RowsSkeleton />
         ) : fu.isError ? (
-          <p className="mt-6 text-[13px] text-destructive">Could not load your Focus book. Try again in a moment.</p>
+          <LoadFailed className="mt-6" title="Your Focus book did not load" onRetry={() => void fu.refetch()} retrying={fu.isFetching} />
         ) : fu.data?.hint ? (
           <p className="mt-6 rounded-2xl border border-border bg-card px-4 py-5 text-[13px] text-muted-foreground">{fu.data.hint}</p>
         ) : focusRows.length === 0 ? (
@@ -174,11 +225,9 @@ export default function Customers() {
           </>
         )
       ) : book.isLoading ? (
-        <div className="grid h-40 place-items-center text-muted-foreground">
-          <Loader2 size={20} className="animate-spin" />
-        </div>
+        <CardsSkeleton />
       ) : book.isError ? (
-        <p className="mt-6 text-[13px] text-destructive">Could not load your shops. Try again in a moment.</p>
+        <LoadFailed className="mt-6" title="Your shops did not load" onRetry={() => void book.refetch()} retrying={book.isFetching} />
       ) : (
         <>
           {book.data?.error && <p className="mt-4 rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12.5px] text-[#96600d]">{book.data.error}</p>}

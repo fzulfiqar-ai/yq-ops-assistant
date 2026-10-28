@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react'
-import { ChevronDown, Loader2, Plus, Search, Store, X } from 'lucide-react'
+import { ChevronDown, Plus, RefreshCw, Search, Store, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
 import type { StaffCustomer } from '@/lib/shopApi'
 import { customerOf, dayLabel, initials, phoneLabel, useShopBook, type BookShop, type CreditChip as Credit } from '@/pages/sales/lib'
-import { RING } from './shared'
+import { HIT, RING, SKELETON } from './shared'
 
 /**
  * The one shop picker (Sprint 5) — it replaces the old CustomerBar and the checkout's "recent
@@ -174,7 +174,7 @@ export function ShopPickerSheet({
             className="h-full w-full bg-transparent text-[16px] outline-none placeholder:text-[#a8a2bb]"
           />
           {q && (
-            <button type="button" onClick={() => setQ('')} aria-label="Clear" className="grid h-9 w-9 place-items-center rounded-lg text-[#6b6480]">
+            <button type="button" onClick={() => setQ('')} aria-label="Clear" className={cn('relative grid h-9 w-9 place-items-center rounded-lg text-[#6b6480]', HIT)}>
               <X size={15} />
             </button>
           )}
@@ -189,11 +189,33 @@ export function ShopPickerSheet({
         {book.data?.hint && <p className="rounded-xl bg-[#F9F7F3] px-3 py-2 text-[12px] text-[#6b6480]">{book.data.hint}</p>}
         <div className="max-h-[52vh] overflow-y-auto overscroll-contain rounded-xl border border-[#E9E4EF] bg-white">
           {book.isLoading ? (
-            <p className="flex items-center justify-center gap-2 px-3 py-8 text-[12.5px] text-[#6b6480]">
-              <Loader2 size={15} className="animate-spin" aria-hidden="true" /> Loading your shops…
-            </p>
+            // the rows as they will be (a circle, a name, a line), in the one loading look
+            <div role="status">
+              <span className="sr-only">Loading your shops…</span>
+              <ul aria-hidden="true" className="divide-y divide-[#F3F0F6]">
+                {Array.from({ length: 5 }, (_, i) => (
+                  <li key={i} className="flex items-center gap-3 px-3 py-2.5">
+                    <div className={cn(SKELETON, 'h-9 w-9 shrink-0 rounded-full')} />
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className={cn(SKELETON, 'h-3 w-1/2 rounded')} />
+                      <div className={cn(SKELETON, 'h-2.5 w-2/3 rounded')} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : book.isError ? (
-            <p className="px-3 py-8 text-center text-[12.5px] text-[#9f1239]">Your shops did not load. Close this and try again.</p>
+            <div role="alert" className="px-3 py-8 text-center">
+              <p className="text-[12.5px] text-[#9f1239]">Your shops did not load.</p>
+              <button
+                type="button"
+                onClick={() => void book.refetch()}
+                disabled={book.isFetching}
+                className={cn('mt-3 inline-flex h-11 items-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white px-4 text-[13px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb] disabled:opacity-60', RING)}
+              >
+                <RefreshCw size={14} aria-hidden="true" /> {book.isFetching ? 'Trying again…' : 'Try again'}
+              </button>
+            </div>
           ) : rows.length === 0 ? (
             <p className="px-3 py-8 text-center text-[12.5px] text-[#6b6480]">{q ? 'No shop matches.' : 'No shops yet — they appear after your first order.'}</p>
           ) : (

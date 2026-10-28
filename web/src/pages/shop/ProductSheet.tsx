@@ -318,7 +318,8 @@ export function ProductSheet({
                   type="button"
                   onClick={() => onOpenItem(p.item_code)}
                   className={cn(
-                    'w-[8.5rem] shrink-0 overflow-hidden rounded-[16px] border border-[#E9E4EF] bg-white text-left transition duration-200 ease-out hover:border-[#e2ddef] hover:shadow-[0_10px_24px_-16px_rgba(24,16,48,.32)]',
+                    // the lift only where there is hover (a tap leaves :hover stuck on a phone), and not animated
+                    'w-[8.5rem] shrink-0 overflow-hidden rounded-[16px] border border-[#E9E4EF] bg-white text-left [@media(hover:hover)]:hover:border-[#e2ddef] [@media(hover:hover)]:hover:shadow-[0_10px_24px_-16px_rgba(24,16,48,.32)]',
                     RING,
                   )}
                 >

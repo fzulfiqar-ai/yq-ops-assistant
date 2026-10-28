@@ -6,7 +6,7 @@ import { getStaffCatalog, type ShopItem } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { dropShareText, dropsOf, productShareUrl } from '@/pages/shop/priceDrops'
-import { bhd, isSoldOut } from '@/pages/shop/shared'
+import { bhd, HIT, isSoldOut } from '@/pages/shop/shared'
 
 /**
  * Today's "N products got a lower price" (R7e): the price book's genuine cuts (priceDrops — the
@@ -19,7 +19,8 @@ import { bhd, isSoldOut } from '@/pages/shop/shared'
  */
 
 const TOP = 5
-const ICON_BTN = 'grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border hover:bg-muted'
+// a 40 px button, 44 px under a finger (HIT)
+const ICON_BTN = `relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border hover:bg-muted ${HIT}`
 
 /** The row's second word: the name when it is not just the code, else the first spec line (as ProductRow). */
 function nameOf(i: ShopItem): string {
@@ -40,7 +41,7 @@ export function PriceDrops({ link }: { link: string }) {
         <h2 className="min-w-0 font-display text-[15px] font-bold leading-tight">
           {n} {n === 1 ? 'product' : 'products'} got a lower price
         </h2>
-        <Link to="/shop?f=drops" className="-mr-2 ml-auto inline-flex h-10 shrink-0 items-center gap-0.5 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted">
+        <Link to="/shop?f=drops" className={cn('relative -mr-2 ml-auto inline-flex h-10 shrink-0 items-center gap-0.5 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted', HIT)}>
           See all <ChevronRight size={14} aria-hidden="true" />
         </Link>
       </div>

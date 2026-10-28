@@ -8,8 +8,13 @@ import { cn } from '@/lib/utils'
  *
  * Sizes are the shop's three tap targets: 40 (dense rows), 44 (cards — it takes
  * the place of the Add button, so it must be exactly as tall), 48 (the primary
- * action in a sheet footer).
+ * action in a sheet footer). Under a finger every −/+ answers on 44 px whatever it
+ * is drawn at (HIT: an invisible ::after centred on the button); the gap between
+ * the parts is what the small sizes' areas reach into, never a neighbour.
  */
+
+/** A 44 px hit area on a touch screen (pointer: coarse) around a button drawn at 36 / 40 px. */
+const HIT = '[@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-[min(0px,calc(50%_-_22px))]'
 
 export interface StepperProps {
   value: number
@@ -88,8 +93,9 @@ export function Stepper({
         onClick={dec}
         aria-label={willRemove ? `Remove ${label}` : `Decrease ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-[#6b6480] transition duration-150 ease-out hover:bg-[#F3F0F6] hover:text-[#1A1428] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70 active:scale-95',
+          'relative grid shrink-0 place-items-center text-[#6b6480] transition-transform duration-[120ms] ease-out motion-reduce:transition-none hover:bg-[#F3F0F6] hover:text-[#1A1428] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70 active:scale-95',
           willRemove && 'hover:bg-[#fdecef] hover:text-[#9f1239]',
+          HIT,
           BTN[size],
         )}
       >
@@ -124,7 +130,8 @@ export function Stepper({
         disabled={atMax}
         aria-label={`Increase ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-[#6D4091] transition duration-150 ease-out hover:bg-[#EEE8F4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40',
+          'relative grid shrink-0 place-items-center text-[#6D4091] transition-transform duration-[120ms] ease-out motion-reduce:transition-none hover:bg-[#EEE8F4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40',
+          HIT,
           BTN[size],
         )}
       >

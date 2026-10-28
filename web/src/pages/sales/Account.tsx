@@ -6,14 +6,17 @@ import { navFor } from '@/lib/nav'
 import { changeOwnPassword } from '@/lib/password'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
+import { SKELETON } from '@/pages/shop/shared'
 import { bhd3, bhdStr, dayLabel, initials, monthName, useAuthedBlob, useShopMe } from './lib'
+import { SignOutSheet } from './SignOutSheet'
 
 /**
  * /account — who I am, my storefront link and QR, my target, my password, everything else the
- * office has switched on for me, and sign out. Deliberately short: a salesman opens this once.
+ * office has switched on for me, and sign out (asked first: SignOutSheet clears this phone's carts
+ * and shop). Deliberately short: a salesman opens this once.
  */
 export default function Account() {
-  const { me, session, signOut, refreshMe } = useAuth()
+  const { me, session, refreshMe } = useAuth()
   const toast = useToast()
   const meQ = useShopMe()
   // On a temporary password the API does not ask for the current one (the rep typed it a minute
@@ -23,7 +26,7 @@ export default function Account() {
   const [p1, setP1] = useState('')
   const [p2, setP2] = useState('')
   const [busy, setBusy] = useState(false)
-  const [signingOut, setSigningOut] = useState(false)
+  const [signOutOpen, setSignOutOpen] = useState(false)
   const [qrOpen, setQrOpen] = useState(false)
   const { blobUrl: qr } = useAuthedBlob(qrOpen ? meQ.data?.qr_url : null)
   const name = me?.full_name || meQ.data?.salesman?.name || me?.email?.split('@')[0] || ''
@@ -151,7 +154,7 @@ export default function Account() {
         </div>
         {qrOpen && (
           <div className="grid place-items-center border-t border-border bg-white p-4">
-            {qr ? <img src={qr} alt="QR code for my link" width={240} height={240} className="h-60 w-60" /> : <Loader2 size={18} className="my-24 animate-spin text-muted-foreground" />}
+            {qr ? <img src={qr} alt="QR code for my link" width={240} height={240} className="h-60 w-60" /> : <div role="img" aria-label="Loading the QR code" className={cn(SKELETON, 'h-60 w-60 rounded-lg')} />}
           </div>
         )}
       </section>
@@ -202,17 +205,16 @@ export default function Account() {
         </form>
       </section>
 
+      {/* asks first, then clears this phone's carts and shop before the session ends */}
       <button
         type="button"
-        onClick={async () => {
-          setSigningOut(true)
-          await signOut()
-          setSigningOut(false)
-        }}
+        onClick={() => setSignOutOpen(true)}
+        aria-haspopup="dialog"
         className={cn('mt-4 inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-border bg-card text-[14px] font-semibold text-destructive hover:bg-muted')}
       >
-        {signingOut ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out
+        <LogOut size={16} aria-hidden="true" /> Sign out
       </button>
+      <SignOutSheet open={signOutOpen} onClose={() => setSignOutOpen(false)} />
     </div>
   )
 }

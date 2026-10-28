@@ -5,35 +5,42 @@ import type { Quote, ShopItem, StaffCustomer } from '@/lib/shopApi'
 import type { BookShop } from '@/pages/sales/lib'
 import { ProductImage } from './ProductImage'
 import { ShopPill } from './ShopPicker'
-import { bhd, money, RING } from './shared'
+import { bhd, HIT, money, RING } from './shared'
+import { minimumOf } from './staffOrder'
 
 /**
  * The wholesale minimum as a ruler: how far this cart is from it (the server's quote.minimum when
- * there is one, the list-price estimate until the first quote lands), and "reached" once it is.
+ * there is one, the list-price estimate until the first quote lands; staffOrder.minimumOf), and
+ * "reached" once it is. `compact` is the phone's order bar: only a 3 px line along its top edge (the
+ * words share the bar's one line). The fill grows by scaling, not by its width: transform only.
  */
-export function MinimumRuler({ total, minBhd, quote, className }: { total: number; minBhd: number; quote: Quote | null; className?: string }) {
-  const value = Number(quote?.minimum?.value_bhd ?? minBhd) || 0
-  if (value <= 0) return null
-  const remaining = quote?.minimum ? Number(quote.minimum.remaining_bhd) || 0 : Math.max(0, value - total)
-  const met = quote?.minimum ? Boolean(quote.minimum.met) : remaining <= 0
-  const pct = Math.max(0, Math.min(100, ((value - remaining) / value) * 100))
+export function MinimumRuler({ total, minBhd, quote, className, compact = false }: { total: number; minBhd: number; quote: Quote | null; className?: string; compact?: boolean }) {
+  const m = minimumOf(total, minBhd, quote)
+  if (!m) return null
+  const bar = (
+    <div
+      className={cn('w-full overflow-hidden bg-[#E9E4EF]', compact ? 'h-[3px]' : 'mt-1.5 h-1.5 rounded-full')}
+      role="progressbar"
+      aria-valuenow={Math.round(m.pct)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label={m.met ? `Minimum ${bhd(m.value)} reached` : `${bhd(m.remaining)} to the ${bhd(m.value)} minimum`}
+    >
+      <div
+        className={cn('h-full w-full origin-left transition-transform duration-200 ease-[cubic-bezier(.22,1,.36,1)] motion-reduce:transition-none', !compact && 'rounded-full', m.met ? 'bg-[#137a48]' : 'bg-[#6D4091]')}
+        style={{ transform: `scaleX(${m.pct / 100})` }}
+      />
+    </div>
+  )
+  if (compact) return <div className={className}>{bar}</div>
   return (
     <div className={className}>
       <div className="flex items-baseline justify-between gap-2 text-[11.5px]">
-        <span className={cn('font-medium', met ? 'text-[#137a48]' : 'text-[#1A1428]')}>
-          {met ? `Minimum ${bhd(value)} reached` : `${bhd(remaining)} to the ${bhd(value)} minimum`}
+        <span className={cn('font-medium', m.met ? 'text-[#137a48]' : 'text-[#1A1428]')}>
+          {m.met ? `Minimum ${bhd(m.value)} reached` : `${bhd(m.remaining)} to the ${bhd(m.value)} minimum`}
         </span>
       </div>
-      <div
-        className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[#E9E4EF]"
-        role="progressbar"
-        aria-valuenow={Math.round(met ? 100 : pct)}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-label="Progress to the wholesale minimum"
-      >
-        <div className={cn('h-full rounded-full transition-[width] duration-500 ease-out', met ? 'bg-[#137a48]' : 'bg-[#6D4091]')} style={{ width: `${met ? 100 : pct}%` }} />
-      </div>
+      {bar}
     </div>
   )
 }
@@ -54,6 +61,7 @@ export function OrderSlip({
   minBhd,
   onPickShop,
   onPlace,
+  onRemove,
 }: {
   selected: StaffCustomer | null
   row: BookShop | null
@@ -65,6 +73,8 @@ export function OrderSlip({
   minBhd: number
   onPickShop: () => void
   onPlace: () => void
+  /** take a line out (the catalog offers Undo) */
+  onRemove: (code: string) => void
 }) {
   const quoteLines = new Map((quote?.lines || []).map((l) => [l.item_code, l]))
   return (
@@ -102,7 +112,7 @@ export function OrderSlip({
                     </span>
                   </span>
                   <span className="shrink-0 font-display text-[12.5px] font-bold tabular-nums text-[#1A1428]">{q?.unavailable ? '—' : money(q?.line_total_bhd ?? (Number(it?.price_bhd) || 0) * l.qty)}</span>
-                  <button type="button" onClick={() => cart.remove(l.item_code)} aria-label={`Remove ${l.item_code}`} className={cn('grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#a8a2bb] hover:bg-[#fdecef] hover:text-[#9f1239]', RING)}>
+                  <button type="button" onClick={() => onRemove(l.item_code)} aria-label={`Remove ${l.item_code}`} className={cn('relative grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#a8a2bb] hover:bg-[#fdecef] hover:text-[#9f1239]', HIT, RING)}>
                     <X size={14} aria-hidden="true" />
                   </button>
                 </li>
