@@ -13,7 +13,8 @@ import { DURATION, ENTER_EASE, useChartMotion, type ChartSeriesMotion } from '@/
 export function ChartBox({ id, height, children }: {
   /** the chart's name for the session memory: one per chart, e.g. "dashboard.daily" */
   id: string
-  height: number
+  /** pixels, or a percentage of a sized parent ("100%"), as ResponsiveContainer takes it */
+  height: number | `${number}%`
   children: (series: ChartSeriesMotion) => ReactElement
 }) {
   const { series, debounce } = useChartMotion(id)
