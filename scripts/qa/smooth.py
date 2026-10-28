@@ -192,11 +192,29 @@ FOLLOW_LINK = r"""
 """
 
 
+ANCHOR = r"""
+(label) => {
+  // the card the merchant was looking at: the first quick-view button below the sticky chrome
+  const btns = [...document.querySelectorAll('main button[aria-label]')]
+    .filter((b) => /:/.test(b.getAttribute('aria-label') || ''));
+  if (label == null) {
+    const hit = btns.find((b) => { const r = b.getBoundingClientRect(); return r.width > 20 && r.top > 160 && r.top < innerHeight - 160; });
+    return hit ? { label: hit.getAttribute('aria-label'), top: Math.round(hit.getBoundingClientRect().top) } : null;
+  }
+  const same = btns.filter((b) => b.getAttribute('aria-label') === label && b.getBoundingClientRect().width > 20);
+  return same.length ? same.map((b) => Math.round(b.getBoundingClientRect().top)) : null;
+}
+"""
+
+
 def back_scroll(page: Page, y: int = 1600, link: str = r"^/(shop|t/)") -> list[Finding]:
-    """S4: scroll, follow an in-app link, press Back, and compare the scroll position."""
+    """S4: scroll, follow an in-app link, press Back, and compare what is on screen: the same card at
+    the same height (within 24 px), else the scroll position. Chrome's scroll anchoring may move
+    scrollY when content above finishes rendering, while keeping exactly this card in place."""
     page.evaluate("(y) => window.scrollTo(0, y)", y)
     page.wait_for_timeout(700)
     before = _scroll_y(page)
+    anchor = page.evaluate(ANCHOR, None)
     url0 = page.url
     href = page.evaluate(FOLLOW_LINK, link)
     if not href:
@@ -209,7 +227,13 @@ def back_scroll(page: Page, y: int = 1600, link: str = r"^/(shop|t/)") -> list[F
     page.go_back(wait_until="commit")
     page.wait_for_timeout(1500)
     after = _scroll_y(page)
-    vals = {"before": before, "after": after, "via": href}
+    vals: dict = {"before": before, "after": after, "via": href}
+    if anchor:
+        tops = page.evaluate(ANCHOR, anchor["label"]) or []
+        shift = min((abs(t - anchor["top"]) for t in tops), default=None)
+        vals.update({"card": anchor["label"][:60], "card_top_before": anchor["top"], "card_tops_after": tops[:3]})
+        if shift is not None and shift <= 24:
+            return [("note", "back-scroll", f"S4: Back from {href} put the same card back on screen ({shift}px off; page at {after}px)", vals)]
     if abs(after - before) > 24:
         return [("fail", "back-scroll", f"S4: Back from {href} landed at {after}px, not where the page was ({before}px)", vals)]
     return [("note", "back-scroll", f"S4: Back from {href} returned to {after}px", vals)]

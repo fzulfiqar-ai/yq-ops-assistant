@@ -13,6 +13,7 @@ import { cartStore } from '@/market/store/cart'
 import { locale } from '@/market/strings'
 import { ErrorBoundary } from '@/market/ui/ErrorBoundary'
 import { ToastProvider } from '@/market/ui/Toast'
+import { useScrollKeeper } from '@/lib/scrollKeeper'
 
 const ShopPage = lazy(() => import('@/market/pages/ShopPage'))
 const CategoryPage = lazy(() => import('@/market/pages/CategoryPage'))
@@ -45,8 +46,9 @@ const BrandPage = lazy(() => import('@/market/pages/BrandPage'))
 export const RESERVED = new Set(['search', 'cart', 'checkout', 'orders', 'p', 't', 'o', 'c', 'join', 'shop', 'me', 'quick', 'about', 'help', 'ask', 'saved', 'brands', 'wekome', 'coming-soon'])
 
 /**
- * Reads ?ref / ?src on any entry URL (shared product links and rep links carry them); scrolls to
- * top on page changes (not overlays). A valid ?ref is remembered for later visits AND becomes this
+ * Reads ?ref / ?src on any entry URL (shared product links and rep links carry them); a new page
+ * opens at the top and Back lands where the page was (lib/scrollKeeper; a panel or a filter on the
+ * same page leaves the scroll alone). A valid ?ref is remembered for later visits AND becomes this
  * session's ref at once (MarketApp seeds it on the first render; this covers a later in-app
  * navigation), so the rep's card, the WhatsApp asks and every notify / restock / order POST carry
  * it on the very first visit. A /{slug} storefront keeps its own slug: Home confirms it with the
@@ -80,11 +82,7 @@ function EntryParams() {
       }
     }
   }, [params, location.pathname, navigate, setRef])
-  useEffect(() => {
-    const st = location.state as { panel?: string } | null
-    if (st?.panel) return // product panel over the same page: keep the scroll position
-    window.scrollTo({ top: 0 })
-  }, [location.pathname, location.state])
+  useScrollKeeper()
   return null
 }
 
