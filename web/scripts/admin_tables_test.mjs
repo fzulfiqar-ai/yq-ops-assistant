@@ -124,6 +124,9 @@ await check('DataTable: a solid sticky header, a viewport sentinel instead of on
   ok(dt.includes('<thead className="sticky top-0 z-10 bg-secondary">'), 'a solid sticky header')
   ok(!dt.includes('onScroll={'), 'no scroll handler mounting 150 rows per event')
   ok(dt.includes('new IntersectionObserver(') && dt.includes('{ root: null }'), 'an IntersectionObserver on the viewport')
+  // the sentinel SPANS the list's last 600 px (taking no room): a jump straight to the bottom of a scroller shorter
+  // than that still meets it — a one-pixel marker 600 px up was skipped, and the table stopped at 150 rows
+  ok(dt.includes('style={{ marginTop: -SENTINEL_LEAD_PX, height: SENTINEL_LEAD_PX }}'), 'the sentinel spans the lead')
   ok(!dt.includes('[query, sort, rows]'), 'no reset on every new rows array')
   ok(dt.includes('windowKey(query, sort,') && dt.includes('resetKey?: string | number'), "the window's key: search, sort, the caller's filter")
   ok(dt.includes('style={mouse ? ({ maxHeight } as CSSProperties) : undefined}'), 'its own vertical scroller only with a mouse')

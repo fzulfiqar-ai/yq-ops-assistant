@@ -1,8 +1,8 @@
 /**
  * DataTable's rules for how many rows it mounts and when it starts again (polish stream, 28-Oct-2026).
  *
- * The table mounts a page of rows and grows by a page each time its sentinel (a 1-px marker under the last row,
- * watched by an IntersectionObserver on the viewport) comes near the screen. It used to start again from the
+ * The table mounts a page of rows and grows by a page each time its sentinel (an invisible block over the list's
+ * last SENTINEL_LEAD_PX, watched by an IntersectionObserver on the viewport) comes on screen. It used to start again from the
  * first page — and jump its scroll back to the top — whenever the `rows` array changed identity, so a page that
  * rebuilt its rows on every render (Customer orders, on opening or closing an order) threw the office back to
  * the top of the list. Now only what the person changed starts it again: the table's own search, its sort, or a
@@ -13,7 +13,8 @@
 export const TABLE_PAGE = 150
 /** phone cards per page (a card is the height of three rows) */
 export const CARD_PAGE = 60
-/** how far ahead of the screen the sentinel starts the next page, so the rows are there before they are needed */
+/** how far before the end of the list the sentinel starts the next page, so the rows are there before they are
+ *  needed; the sentinel SPANS that distance, so a jump straight to the bottom still meets it */
 export const SENTINEL_LEAD_PX = 600
 
 export interface SortState { key: string; dir: 'asc' | 'desc' }

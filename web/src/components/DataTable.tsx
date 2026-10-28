@@ -8,8 +8,8 @@ import {
   type SortState, type WindowState,
 } from '@/lib/tableWindow'
 
-// Render rows incrementally: mount a page, grow by a page as the end of the list comes near. A 1-px sentinel
-// under the last row is watched by an IntersectionObserver on the VIEWPORT (root = null): it fires the same
+// Render rows incrementally: mount a page, grow by a page as the end of the list comes near. A sentinel over
+// the list's last rows is watched by an IntersectionObserver on the VIEWPORT (root = null): it fires the same
 // whether the page scrolls in the shell's <main>, in the window, or in this table's own scroller, and it only
 // fires once per page (the old onScroll handler mounted 150 rows on every scroll event near the end). Keeps
 // natural table layout (no fixed row heights) while avoiding thousand-row DOM mounts. When it starts again
@@ -198,9 +198,13 @@ export function DataTable<T extends object>({
     const v = (row as Record<string, unknown>)[c.key]
     return c.render ? c.render(v, row) : c.money ? bhd(Number(v ?? 0)) : v == null ? '—' : String(v)
   }
-  // 1 px, invisible, SENTINEL_LEAD_PX above the end of the list: the next page is mounted before it is needed
+  // Invisible, over the LAST SENTINEL_LEAD_PX of the list (a negative top margin: it takes no room). Any view of
+  // the list's end meets it — scrolling near it mounts the next page before it is needed, and so does a jump
+  // straight to the bottom (a dragged scrollbar), which would skip a one-pixel marker in a scroller shorter
+  // than the lead.
   const sentinelEl = more && (
-    <div ref={sentinel} aria-hidden="true" className="pointer-events-none relative h-px" style={{ top: -SENTINEL_LEAD_PX }} />
+    <div ref={sentinel} aria-hidden="true" className="pointer-events-none"
+      style={{ marginTop: -SENTINEL_LEAD_PX, height: SENTINEL_LEAD_PX }} />
   )
   const moreLine = more && (
     <div className="flex flex-wrap items-center justify-center gap-x-2 border-t py-2 text-center text-xs text-muted-foreground">
