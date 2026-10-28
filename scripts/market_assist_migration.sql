@@ -1,8 +1,10 @@
 -- YQ Assist (28-Oct-2026): the marketplace chat's turns and what merchants suggest.
 --   Apply:    python -m scripts.apply_sql scripts/market_assist_migration.sql ; python -m scripts.audit_grants
 --   Reverse:  drop table if exists shop_feedback; drop table if exists shop_ask_turns;
---             delete from app_settings where key = 'shop_ai_daily_cap';
--- Additive and idempotent: two new tables and one setting; nothing existing changes. Service role
+--             delete from app_settings where key in ('shop_ai_daily_cap', 'shop_ai_voice_enabled', 'shop_ai_photo_enabled');
+--   Rehearsed 28-Oct-2026 on a throwaway Postgres with Supabase's default grants imitated: applied,
+--   applied again, reversed, re-applied; self-check verified each time.
+-- Additive and idempotent: two new tables and three settings; nothing existing changes. Service role
 -- only (RLS on, no policies, anon/authenticated revoked), exactly like shop_restock_requests.
 -- Text is stored MASKED (app/market_assist.mask: runs of 7+ digits and e-mail addresses removed
 -- before the row is written); order numbers are the merchant's own reference and stay.
@@ -59,7 +61,11 @@ comment on table shop_feedback is
 -- ── 3. the daily budget of model-backed chat turns (app/shop.py SETTING_DEFAULTS) ────────────
 insert into app_settings (key, value, description) values
   ('shop_ai_daily_cap', '800',
-   'YQ Assist: model-backed chat turns per day before the chat falls back to plain search (0 = no cap)')
+   'YQ Assist: model-backed chat turns per day before the chat falls back to plain search (0 = no cap)'),
+  ('shop_ai_voice_enabled', '1',
+   'YQ Assist: the microphone in the chat (speech to text); needs shop_market_ai_enabled'),
+  ('shop_ai_photo_enabled', '1',
+   'YQ Assist: the camera in the chat (a product, its box or a written order list); needs shop_market_ai_enabled')
 on conflict (key) do nothing;
 
 -- ── 4. self-check ────────────────────────────────────────────────────────────────────────────

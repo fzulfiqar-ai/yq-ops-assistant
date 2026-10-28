@@ -25,10 +25,13 @@ and demonstrate capability to management.
   (docs/DEPLOY_RENDER.md).
 
 ## AI (NO Anthropic, NO paid APIs)
-All model calls go through `app/llm_router.py` — a rotation of ~10 **FREE** providers:
-GLM-5.2 via OpenRouter, Groq, Cerebras, more OpenRouter free models, Scaleway, Together.
-- On **403 / quota**: skip that provider immediately.
-- On **429**: wait `2^n` seconds and retry the **same** provider.
+All model calls go through `app/llm_router.py` — a rotation of **FREE** providers, each joining when its key is set.
+Re-measured 28-Oct-2026: Groq (qwen3.8-27b, gpt-oss-120b/20b; Whisper for speech) is the backbone, then Mistral and
+Gemini; Cerebras, OpenRouter, NVIDIA and SambaNova only when their keys answer. Free model IDs move: run
+`python -m scripts.probe_models` (read-only) after any "All AI providers are busy" and before a release.
+- On **401 / 402 / 403 / quota**: bench that provider (until UTC midnight for quota, else 5 minutes) and move on.
+- On **429**: `chat()` waits `2^n` seconds and retries the **same** provider (callers cap it); `chat_json()` and
+  `chat_tools()` move on at once. The SDK's own retries are off (`max_retries=0`).
 - **Tier 1** (parsing / classification / intent): use the full rotation.
 - **Tier 2** (final answers): use the strongest free models first.
 - **Redaction is mandatory:** customer / account names are tokenized before any external call

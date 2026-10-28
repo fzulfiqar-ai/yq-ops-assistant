@@ -56,6 +56,7 @@ class Provider:
     reasoning: bool = False     # chain-of-thought model: great for synthesis, BAD for route/sql
                                 # (it spends tokens thinking and may emit empty content for JSON)
     extra: dict = field(default_factory=dict)   # provider-specific request fields (reasoning_effort)
+    vision: bool = False        # reads images (measured 28-Oct-2026: a product box and a written list)
     # circuit breaker
     disabled_until: float = 0.0
     failures: int = 0
@@ -80,7 +81,7 @@ def _providers() -> list[Provider]:
         p.append(Provider(
             "cerebras:qwen3-27b", base, k, _env("CEREBRAS_FAST_MODEL", "qwen-3.8-27b"),
             caps={"code": 2, "math": 2, "reason": 2, "write": 3, "multilingual": 3, "speed": 3},
-            quality=2, fast_host=True, tier2=True))
+            quality=2, fast_host=True, tier2=True, vision=True))
         p.append(Provider(
             "cerebras:gpt-oss-120b", base, k, _env("CEREBRAS_OSS_MODEL", "gpt-oss-120b"),
             caps={"code": 3, "math": 2, "reason": 2, "write": 3, "multilingual": 1, "speed": 3},
@@ -93,7 +94,7 @@ def _providers() -> list[Provider]:
         p.append(Provider(
             "groq:qwen3-27b", base, k, _env("GROQ_FAST_MODEL", "qwen/qwen3.8-27b"),
             caps={"code": 2, "math": 2, "reason": 2, "write": 3, "multilingual": 3, "speed": 3},
-            quality=2, fast_host=True, tier2=True))
+            quality=2, fast_host=True, tier2=True, vision=True))
         p.append(Provider(
             "groq:gpt-oss-120b", base, k, _env("GROQ_STRONG_MODEL", "openai/gpt-oss-120b"),
             caps={"code": 3, "math": 3, "reason": 3, "write": 3, "multilingual": 2, "speed": 2},
@@ -110,7 +111,7 @@ def _providers() -> list[Provider]:
             "gemini:flash-lite", "https://generativelanguage.googleapis.com/v1beta/openai/",
             settings.gemini_api_key, _env("GEMINI_MODEL", "gemini-flash-lite-latest"),
             caps={"code": 2, "math": 2, "reason": 2, "write": 3, "multilingual": 3, "speed": 1},
-            quality=2, tier2=True))
+            quality=2, tier2=True, vision=True))
 
     # ---- SambaNova: very fast free host (Llama 3.3 70B etc.) ----
     if settings.sambanova_api_key:
@@ -171,12 +172,12 @@ def _providers() -> list[Provider]:
             "mistral:medium", "https://api.mistral.ai/v1",
             settings.mistral_api_key, _env("MISTRAL_MODEL", "mistral-medium-latest"),
             caps={"code": 2, "math": 2, "reason": 2, "write": 3, "multilingual": 3, "speed": 2},
-            quality=3, fast_host=True, tier2=True))
+            quality=3, fast_host=True, tier2=True, vision=True))
         p.append(Provider(
             "mistral:ministral", "https://api.mistral.ai/v1",
             settings.mistral_api_key, _env("MISTRAL_FAST_MODEL", "ministral-8b-latest"),
             caps={"code": 1, "math": 1, "reason": 1, "write": 2, "multilingual": 2, "speed": 3},
-            quality=1, fast_host=True))
+            quality=1, fast_host=True, vision=True))
     if settings.cohere_api_key:
         p.append(Provider(
             "cohere:command", "https://api.cohere.ai/compatibility/v1",
@@ -444,16 +445,17 @@ def parse_json_object(text: str | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def chat_json(messages: list[dict[str, str]], *, validate=None, tier: int = 1, task: str = "assist",
+def chat_json(messages: list[dict], *, validate=None, tier: int = 1, task: str = "assist",
               temperature: float = 0.0, max_tokens: int = 300, request_timeout: float = 10.0,
-              max_providers: int = 3) -> tuple[dict, str]:
+              max_providers: int = 3, vision: bool = False) -> tuple[dict, str]:
     """One structured answer: `(object, provider name)` from the first provider whose reply parses
     as a JSON object and passes `validate`. A reply that is not the JSON asked for moves on to the
     next provider instead of failing the call. No 429 backoff and never a throttled host: the
-    caller has a deterministic fallback. Caller redacts PII."""
+    caller has a deterministic fallback. `vision=True`: only models that read images (the messages
+    carry an image_url part). Caller redacts PII."""
     if not _ROTATION:
         raise AllProvidersFailed("No LLM providers configured.")
-    cands = [p for p in _candidates(tier, None, task) if not p.throttled][:max_providers]
+    cands = [p for p in _candidates(tier, None, task) if not p.throttled and (p.vision or not vision)][:max_providers]
     last_err: Exception | None = None
     for prov in cands:
         client = _client(prov, request_timeout)
@@ -570,6 +572,46 @@ def chat_stream(messages: list[dict[str, str]], *, tier: int = 2,
             prov.disabled_until = time.time() + _CB_COOLDOWN
             continue
     yield "\n(All AI providers are busy right now — please try again.)"
+
+
+# --------------------------------------------------------------------------- speech to text
+# Whisper on Groq first (free, ~0.3 s), Voxtral on Mistral second. Measured 28-Oct-2026.
+# Whisper "hears" these in silence or noise: a transcript that is only one of them is no speech.
+_WHISPER_GHOSTS = frozenset({
+    "thank you", "thank you.", "thanks for watching", "thanks for watching!", "you", "bye", "bye.",
+    "شكرا", "شكراً", "شكرا لكم", "ترجمة نانسي قنقر", "اشتركوا في القناة", "مرحبا",
+})
+
+
+def _transcribers() -> list[tuple[str, str, str, str]]:
+    out = []
+    if settings.groq_api_key:
+        out.append(("groq:whisper", "https://api.groq.com/openai/v1", settings.groq_api_key,
+                    _env("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")))
+    if settings.mistral_api_key:
+        out.append(("mistral:voxtral", "https://api.mistral.ai/v1", settings.mistral_api_key,
+                    _env("MISTRAL_STT_MODEL", "voxtral-mini-latest")))
+    return out
+
+
+def transcribe(audio: bytes, filename: str, content_type: str, *, prompt: str | None = None,
+               request_timeout: float = 20.0) -> tuple[str, str]:
+    """Speech to text: `(text, provider)`. '' when the recording holds no speech. Raises
+    AllProvidersFailed when no transcriber answers. The audio is sent, never stored."""
+    hosts = _transcribers()
+    if not hosts:
+        raise AllProvidersFailed("No speech-to-text provider configured.")
+    last_err: Exception | None = None
+    for name, base, key, model in hosts:
+        client = OpenAI(base_url=base, api_key=key, timeout=request_timeout, max_retries=0)
+        try:
+            kw = {"prompt": prompt} if prompt and name.startswith("groq") else {}
+            r = client.audio.transcriptions.create(model=model, file=(filename, audio, content_type), **kw)
+            text = str(getattr(r, "text", "") or "").strip()
+            return ("" if text.lower().strip(" .!") in {g.strip(" .!") for g in _WHISPER_GHOSTS} else text), name
+        except Exception as exc:  # noqa: BLE001 — the next host
+            last_err = exc
+    raise AllProvidersFailed(f"speech: all providers failed. Last error: {last_err}")
 
 
 def health() -> list[dict]:

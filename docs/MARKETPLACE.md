@@ -580,17 +580,29 @@ and the page shows nothing while it is off.
 | The turn: understand → handle → answer | `app/market_assist.py` |
 | Server search (a port of `lib/search.ts`, synonyms held equal by a test) | `app/market_search.py` |
 | JSON answers, the `assist` routing task, usage per provider per day (`GET /llm/health`) | `app/llm_router.py` |
-| `POST /public/market/ask`, `POST /public/market/feedback` | `app/shop_api.py` |
+| `POST /public/market/ask`, `/voice` (speech to text), `/photo` (a product, a box or a written list), `/feedback` | `app/shop_api.py` |
+| Speech to text (Whisper on Groq, Voxtral on Mistral), image-reading models (`vision`) | `app/llm_router.py` |
 | Portal reads: `GET /shop/assist/turns`, `GET /shop/feedback`, `PATCH /shop/feedback/{id}` (Shop Admin) | `app/shop_api.py` |
-| Tables `shop_ask_turns`, `shop_feedback`; setting `shop_ai_daily_cap` | `scripts/market_assist_migration.sql` |
-| The bubble, the panel, `/ask` | `web/src/market/assist/` |
+| Portal page **Merchant voice**: ideas and problems, what merchants asked (misses = sourcing leads), free AI today | `web/src/pages/MerchantVoice.tsx` |
+| Tables `shop_ask_turns`, `shop_feedback`; settings `shop_ai_daily_cap`, `shop_ai_voice_enabled`, `shop_ai_photo_enabled` | `scripts/market_assist_migration.sql` |
+| The bubble, the panel, `/ask`, the microphone, the camera, the list review | `web/src/market/assist/` |
 | Tests | `tests/test_market_assist.py` |
 
-**One message, at most two model calls.** (1) `chat_json` reads the intent (find, fit, add,
+**One message, at most two model calls.** (1) `chat_json` reads the intent (find, fit, add, list,
 order_status, usual, handoff, feedback, chat) and the product in the catalogue's English words, in
 any language. (2) Python handles it on public data only. (3) For find, fit, add and chat a second
-call writes one to three sentences in the merchant's language; order status, "my usual", the
+call writes one to three sentences in the merchant's language; lists, order status, "my usual", the
 hand-off and feedback answer from templates (en/ar) with no second call.
+
+**Lists** (pasted, typed in one line, spoken, or photographed) come back as `lines`: each line
+`matched` (a product code was written), `pick` (every word matched: the best item plus up to two
+alternatives for the merchant to confirm) or `missing` (only part matched: the hits are suggestions,
+nothing is added). Quantities are raised to the item's minimum. A pasted list still works when no
+model answers (`parse_list`: codes and English words). **Voice** returns text to check before
+sending; Whisper's "Thank you." on silence counts as no speech; the recording is never stored.
+**Photos** are read by one vision call (Groq's qwen3.8-27b, then Mistral, then Gemini; measured
+0.4–2.4 s) and never stored; a box from another brand is said plainly ("That looks like a … product.
+These are the closest items YQ stocks.").
 
 **Guardrails.** The model reads the PUBLIC payload bytes only (`public_catalog()`), so it can see
 nothing the marketplace does not already show; it is never given a price, and `_scrub_prices()`

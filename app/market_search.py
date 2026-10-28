@@ -145,11 +145,18 @@ def search(items: list[dict], query: str, limit: int = 6) -> list[dict]:
     """The best public items for `query`: AND over the query's words (synonyms live in each item),
     then OR with a looser fuzzy budget when AND finds nothing. Sold-out items rank after
     everything that can be had today, as in the browser."""
+    return search_ex(items, query, limit)[0]
+
+
+def search_ex(items: list[dict], query: str, limit: int = 6) -> tuple[list[dict], bool]:
+    """search() plus whether every word of the query matched (True) or only some did (the looser OR
+    pass: "hdmi cable" finds cables, not an HDMI cable, so the caller calls it a suggestion)."""
     terms = query_terms(query)
     if not terms or not items:
-        return []
+        return [], False
     docs = [(n, it, _doc(it)) for n, it in enumerate(items)]
     scored = [(s, n, it) for n, it, d in docs if (s := _score(d, terms, 0.2, True)) > 0]
+    strict = bool(scored)
     if not scored:
         scored = [(s, n, it) for n, it, d in docs if (s := _score(d, terms, 0.3, False)) > 0]
 
@@ -165,4 +172,4 @@ def search(items: list[dict], query: str, limit: int = 6) -> list[dict]:
         return (_STOCK_RANK.get(str(it.get("stock_status") or ""), 0), band, -s if band else 0, hot(it), n)
 
     scored.sort(key=key)
-    return [it for _, _, it in scored[:limit]]
+    return [it for _, _, it in scored[:limit]], strict

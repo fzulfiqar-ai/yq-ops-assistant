@@ -298,6 +298,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     class FeedbackStatus(BaseModel):
         status: str = Field(max_length=8)
 
+    class PhotoRequest(BaseModel):
+        image: str = Field(max_length=2_200_000)      # a data URL; app/market_assist.photo checks type and size
+        lang: str | None = Field(default=None, max_length=8)
+        device_id: str | None = Field(default=None, max_length=64)
+        session_id: str | None = Field(default=None, max_length=64)
+        referral_code: str | None = Field(default=None, max_length=32)
+
     class RestockResolve(BaseModel):
         ids: list[int] = Field(max_length=200)
 
@@ -616,8 +623,10 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return {"ok": ok}
 
     # ── public: YQ Assist, the marketplace chat (off until shop_market_ai_enabled = 1) ──
-    def _assist_open() -> None:
-        if not shop.market_enabled() or not shop._flag(shop.context()["settings"], "shop_market_ai_enabled"):
+    def _assist_open(feature: str | None = None) -> None:
+        vals = shop.context()["settings"]
+        if (not shop.market_enabled() or not shop._flag(vals, "shop_market_ai_enabled")
+                or (feature and not shop._flag(vals, feature))):
             raise HTTPException(status_code=404, detail="The assistant is not available.")
 
     @app.post("/public/market/ask")
@@ -630,6 +639,36 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         _assist_open()
         from app import market_assist
         return market_assist.ask(body.model_dump(), ip=_ip(request))
+
+    @app.post("/public/market/voice")
+    @limiter.limit("20/minute")                              # per address: the net
+    @limiter.limit("6/minute", key_func=device_key)          # per address + device (x-device-id header)
+    @limiter.limit("40/day", key_func=device_key)
+    async def market_voice(request: Request, file: UploadFile = File(...)) -> dict:
+        """A spoken order or question to text (Whisper on Groq, Voxtral on Mistral); the page shows the
+        text to check before it is sent. The recording is never stored."""
+        _assist_open("shop_ai_voice_enabled")
+        from starlette.concurrency import run_in_threadpool
+        from app import market_assist
+        audio = await file.read(market_assist.AUDIO_MAX_BYTES + 1)
+        try:
+            return await run_in_threadpool(market_assist.voice, audio, file.content_type or "")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.post("/public/market/photo")
+    @limiter.limit("20/minute")
+    @limiter.limit("4/minute", key_func=device_key)
+    @limiter.limit("30/day", key_func=device_key)
+    def market_photo(request: Request, body: PhotoRequest) -> dict:
+        """A photo of a product, its box or a written order list: the nearest catalogue items, or the
+        list's lines to check. The photo is sent to a model and never stored."""
+        _assist_open("shop_ai_photo_enabled")
+        from app import market_assist
+        try:
+            return market_assist.photo(body.model_dump(), ip=_ip(request))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @app.post("/public/market/feedback")
     @limiter.limit("30/minute")
