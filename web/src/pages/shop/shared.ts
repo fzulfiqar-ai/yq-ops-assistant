@@ -251,6 +251,10 @@ export const BTN_GHOST =
 export const BTN_PRIMARY =
   'inline-flex items-center justify-center gap-2 rounded-xl bg-[#6D4091] font-semibold text-white transition duration-150 ease-out hover:bg-[#5A3478] active:scale-[.99] disabled:pointer-events-none'
 
+/** The one loading look of the rep's screens: a quiet block shaped like what it stands for,
+ *  pulsing on opacity only (still under reduced motion). Size and radius come with each use. */
+export const SKELETON = 'animate-pulse bg-[#F0ECF5] motion-reduce:animate-none'
+
 /** Card surface: 20px radius, hairline, a shadow you feel rather than see. */
 export const CARD =
   'rounded-[20px] border border-[#E9E4EF] bg-white shadow-[0_1px_2px_rgba(24,16,48,.04)]'

@@ -372,7 +372,7 @@ function LegacyShop({ mode = 'public' }: ShopPageProps) {
     (body, signal) => (staff ? postStaffQuote(body, signal) : postQuote(token, body, signal)),
     [staff, token],
   )
-  const { quote, quoting, error: quoteError } = useQuote(staff || Boolean(token), cart.lines, coupon, referralCode, fetchQuote)
+  const { quote, quoting, error: quoteError, fresh: quoteFresh, retry: retryQuote } = useQuote(staff || Boolean(token), cart.lines, coupon, referralCode, fetchQuote)
   const estimate = useMemo(
     () => cart.lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0),
     [cart.lines, itemsByCode],
@@ -750,6 +750,8 @@ function LegacyShop({ mode = 'public' }: ShopPageProps) {
           quote={quote}
           quoting={quoting}
           quoteError={quoteError}
+          quoteFresh={quoteFresh}
+          onRetryQuote={retryQuote}
           coupon={coupon}
           onCouponChange={setCoupon}
           src={srcParam}

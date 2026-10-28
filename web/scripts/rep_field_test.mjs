@@ -11,7 +11,9 @@
  * What it proves (synthetic codes and shops only):
  *   • the shop being ordered for survives the app closing on a WhatsApp detour, for 12 hours;
  *   • signing out takes this phone's rep carts, the shop picked and the catalog's remembered search
- *     with it, and nothing else of the device.
+ *     with it, and nothing else of the device;
+ *   • the checkout never shows BHD 0.000 / Free or lets an order go before the server has priced
+ *     this very cart; a failed check says so and offers Retry.
  */
 import { registerHooks } from 'node:module'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -62,6 +64,7 @@ function need(mod, name) {
 }
 
 const D = await load('pages/sales/repDevice.ts')
+const C = await load('pages/shop/checkout.ts')
 
 let passed = 0
 let failed = 0
@@ -186,6 +189,60 @@ check('the sign-out question counts the orders in progress on this phone (non-em
     ['yq-shop-cart:staff:f:BETA', '{broken'],
   ]), { orders: 2, lines: 3 })
   eq(open([]), { orders: 0, lines: 0 })
+})
+
+/* ── 2. the checkout's money: no Place order before the server has priced this cart ── */
+const quote = (extra = {}) => ({ subtotal_bhd: 12, delivery_bhd: 0, total_bhd: 12, can_submit: true, ...extra })
+const pick = (s) => [s.state, s.canPlace, s.showTotals]
+
+check('checkout: no price yet → "checking": placeholders, never BHD 0.000 / Free, and Place order off', () => {
+  const pc = need(C, 'priceCheck')
+  eq(pick(pc({ lines: 2, quote: null, fresh: false, quoting: true, error: '' })), ['checking', false, false], 'first quote in flight')
+  eq(pick(pc({ lines: 2, quote: null, fresh: false, quoting: false, error: '' })), ['checking', false, false], 'no answer and none asked: still no price')
+})
+
+check('checkout: a failed price check → the error, Retry, Place order off — even with an older price on screen', () => {
+  const pc = need(C, 'priceCheck')
+  const down = 'Could not reach the price server. Your cart is safe — please try again.'
+  const s1 = pc({ lines: 2, quote: null, fresh: false, quoting: false, error: down })
+  eq([...pick(s1), s1.error], ['failed', false, false, down])
+  // the old rule (`quote?.can_submit !== false`) let an older cart's price place this one
+  const s2 = pc({ lines: 2, quote: quote(), fresh: false, quoting: false, error: down })
+  eq(pick(s2), ['failed', false, false], 'an older cart\'s price is not this cart\'s')
+})
+
+check('checkout: the server says no → blocked with its reason, or the fallback words', () => {
+  const pc = need(C, 'priceCheck')
+  const s = pc({ lines: 1, quote: quote({ can_submit: false, block_reason: 'Remove X05 UL-1Mtr: sold out.' }), fresh: true, quoting: false, error: '' })
+  eq([...pick(s), s.reason], ['blocked', false, true, 'Remove X05 UL-1Mtr: sold out.'])
+  eq(pc({ lines: 1, quote: quote({ can_submit: false }), fresh: true, quoting: false, error: '' }).reason, 'This order cannot be submitted yet.')
+})
+
+check('checkout: re-pricing keeps the last price on screen (no flash to zero) and Place order waits for it', () => {
+  const pc = need(C, 'priceCheck')
+  eq(pick(pc({ lines: 3, quote: quote(), fresh: false, quoting: true, error: '' })), ['updating', false, true])
+  eq(pick(pc({ lines: 3, quote: quote(), fresh: true, quoting: true, error: '' })), ['updating', false, true], 'a Retry of the same cart')
+  const s = pc({ lines: 3, quote: quote({ can_submit: false, block_reason: 'Minimum order is BHD 20.000.' }), fresh: false, quoting: true, error: '' })
+  eq([s.state, s.reason], ['updating', 'Minimum order is BHD 20.000.'], 'the price on screen keeps its reason while it is checked again')
+})
+
+check('checkout: this cart priced and allowed → ready; an empty cart is nothing to price', () => {
+  const pc = need(C, 'priceCheck')
+  eq(pick(pc({ lines: 2, quote: quote(), fresh: true, quoting: false, error: '' })), ['ready', true, true])
+  eq(pick(pc({ lines: 2, quote: quote({ can_submit: undefined }), fresh: true, quoting: false, error: '' })), ['ready', true, true], 'an older API without the flag')
+  eq(pick(pc({ lines: 0, quote: null, fresh: false, quoting: false, error: '' })), ['empty', false, false])
+})
+
+check('useQuote: an error belongs to the request it answered; a new cart or a Retry is "checking" again', () => {
+  const view = need(C, 'quoteView')
+  const qA = quote()
+  const answeredA = { req: '0|A', cart: 'A', quote: qA, error: '' }
+  eq(view({ req: '', cart: '', quote: null, error: '' }, 'A', '0|A'), { quote: null, quoting: true, error: '', fresh: false }, 'first open')
+  eq(view(answeredA, 'A', '0|A'), { quote: qA, quoting: false, error: '', fresh: true }, 'A priced')
+  eq(view(answeredA, 'B', '0|B'), { quote: qA, quoting: true, error: '', fresh: false }, 'the cart became B: A stays on screen')
+  const failedB = { req: '0|B', cart: 'A', quote: qA, error: 'down' }
+  eq(view(failedB, 'B', '0|B'), { quote: qA, quoting: false, error: 'down', fresh: false }, "B's check failed")
+  eq(view(failedB, 'B', '1|B'), { quote: qA, quoting: true, error: '', fresh: false }, 'Retry: checking again, the old error gone')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

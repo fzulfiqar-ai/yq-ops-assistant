@@ -347,7 +347,7 @@ export function StaffCatalog() {
   /* ── the live quote (the bar, the slip and the checkout all show the server's total) ── */
   const [coupon, setCoupon] = useState('')
   const fetchQuote = useCallback<QuoteFetcher>((body, signal) => postStaffQuote(body, signal), [])
-  const { quote, quoting, error: quoteError } = useQuote(true, cart.lines, coupon, '', fetchQuote)
+  const { quote, quoting, error: quoteError, fresh: quoteFresh, retry: retryQuote } = useQuote(true, cart.lines, coupon, '', fetchQuote)
   const estimate = useMemo(() => cart.lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0), [cart.lines, itemsByCode])
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
 
@@ -837,6 +837,8 @@ export function StaffCatalog() {
           quote={quote}
           quoting={quoting}
           quoteError={quoteError}
+          quoteFresh={quoteFresh}
+          onRetryQuote={retryQuote}
           coupon={coupon}
           onCouponChange={setCoupon}
           src="salesman"

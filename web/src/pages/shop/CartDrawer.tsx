@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowLeftRight, Loader2, MessageCircle, ShieldCheck, Store, Tag, Trash2, UserRound } from 'lucide-react'
+import { AlertTriangle, ArrowLeftRight, Loader2, MessageCircle, RefreshCw, ShieldCheck, Store, Tag, Trash2, UserRound } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { Stepper } from '@/components/ui/stepper'
@@ -17,9 +17,10 @@ import {
   type StaffCustomer,
 } from '@/lib/shopApi'
 import { getSelectedCustomer, initials, saveShopPhone, setSelectedCustomer, useSelectedCustomer, useShopMe } from '@/pages/sales/lib'
+import { priceCheck, type PriceCheck } from './checkout'
 import { ProductImage } from './ProductImage'
 import { Select } from './Select'
-import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, stepOf } from './shared'
+import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, SKELETON, stepOf } from './shared'
 import { attemptKey, clientIdFor, newClientOrderId } from './staffOrder'
 
 const FORM_ID = 'yq-shop-order-form'
@@ -52,6 +53,13 @@ function selectedKey(c: StaffCustomer | null): string {
   return c ? [c.key, c.phone, c.name, c.shop].map((v) => v || '').join('|') : ''
 }
 
+/** Where a figure goes while this cart has no price of its own: a bar while it is checked, a dash
+ *  when the check failed (checkout.priceCheck) — never "BHD 0.000" or "Free". */
+function Pending({ check, wide = false }: { check: PriceCheck; wide?: boolean }) {
+  if (check.state === 'failed') return <span className="text-[#a8a2bb]">—</span>
+  return <span aria-hidden="true" className={cn(SKELETON, 'inline-block h-3 rounded align-middle', wide ? 'w-24' : 'w-16')} />
+}
+
 function readCustomer(): CustomerDraft {
   try {
     const raw = localStorage.getItem(CUSTOMER_KEY)
@@ -80,6 +88,10 @@ export interface CartDrawerProps {
   quote: Quote | null
   quoting: boolean
   quoteError: string
+  /** `quote` priced this very cart (useQuote) — else it is an older cart's price, still on screen */
+  quoteFresh: boolean
+  /** ask the price server again (the Retry beside a failed check) */
+  onRetryQuote: () => void
   coupon: string
   onCouponChange: (code: string) => void
   src: string
@@ -110,6 +122,8 @@ export function CartDrawer({
   quote,
   quoting,
   quoteError,
+  quoteFresh,
+  onRetryQuote,
   coupon,
   onCouponChange,
   src,
@@ -198,15 +212,9 @@ export function CartDrawer({
   const phoneOk = isPhone(customer.phone)
   const emailOk = !customer.email.trim() || isEmail(customer.email)
   const salesmanOk = !needsSalesman || salesmanId !== ''
-  const canSubmit =
-    cart.lines.length > 0 &&
-    nameOk &&
-    phoneOk &&
-    emailOk &&
-    salesmanOk &&
-    !quoting &&
-    !submitting &&
-    quote?.can_submit !== false
+  // the money: only a price the server gave for THIS cart lets the order go (checkout.priceCheck)
+  const check = priceCheck({ lines: cart.lines.length, quote, fresh: quoteFresh, quoting, error: quoteError })
+  const canSubmit = check.canPlace && nameOk && phoneOk && emailOk && salesmanOk && !submitting
 
   const set = (k: keyof CustomerDraft, v: string) => setCustomer((c) => ({ ...c, [k]: v }))
   const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }))
@@ -299,8 +307,8 @@ export function CartDrawer({
   const couponBad = Boolean(quote?.coupon && quote.coupon.valid === false)
   // The server says exactly what is in the way ("Remove X05 UL-1Mtr…", "Minimum
   // order is…"); the fallback only covers an older API that did not.
-  const blockedReason =
-    quote?.can_submit === false ? quote.block_reason || 'This order cannot be submitted yet.' : ''
+  const blockedReason = check.reason
+  const checking = check.state === 'checking'
 
   return (
     <Sheet
@@ -312,7 +320,20 @@ export function CartDrawer({
       footer={
         <div>
           {blockedReason && <p className="mb-2 text-[11.5px] font-medium text-[#9f1239]">{blockedReason}</p>}
-          {staff && !blockedReason && cart.lines.length > 0 && !phoneOk && (
+          {/* a failed price check: its words and Retry, here by the thumb (the body may be scrolled away) */}
+          {check.state === 'failed' && (
+            <div role="alert" className="mb-2 flex items-center gap-2 rounded-xl bg-[#fdecef] py-1 pl-3 pr-1 text-[11.5px] font-medium text-[#9f1239]">
+              <span className="min-w-0 flex-1 leading-snug">{check.error}</span>
+              <button
+                type="button"
+                onClick={onRetryQuote}
+                className={cn('inline-flex h-11 shrink-0 items-center gap-1.5 rounded-lg px-3 text-[12.5px] font-semibold text-[#9f1239] hover:bg-[#fbdde3]', RING)}
+              >
+                <RefreshCw size={13} aria-hidden="true" /> Retry
+              </button>
+            </div>
+          )}
+          {staff && !blockedReason && check.state !== 'failed' && cart.lines.length > 0 && !phoneOk && (
             <p className="mb-2 text-[11.5px] font-medium text-[#96600d]">Add the shop's phone above to place the order.</p>
           )}
           {submitError && (
@@ -328,7 +349,7 @@ export function CartDrawer({
           <div className="mb-2.5 flex items-baseline justify-between">
             <span className="text-[12px] font-medium text-[#6b6480]">Total</span>
             <span className="font-display text-[20px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1A1428]">
-              {bhd(quote?.total_bhd)}
+              {check.showTotals ? bhd(quote?.total_bhd) : <Pending check={check} wide />}
             </span>
           </div>
           <button
@@ -346,6 +367,10 @@ export function CartDrawer({
             {submitting ? (
               <>
                 <Loader2 size={16} className="animate-spin" aria-hidden="true" /> Sending…
+              </>
+            ) : checking ? (
+              <>
+                <Loader2 size={16} className="animate-spin" aria-hidden="true" /> Checking prices…
               </>
             ) : staff ? (
               'Place order for this shop'
@@ -527,7 +552,7 @@ export function CartDrawer({
             </ul>
 
             {/* ── progress toward a threshold ── */}
-            {progress?.label && (
+            {check.showTotals && progress?.label && (
               <div className="mt-4 rounded-[16px] border border-[#E9E4EF] bg-[#F9F7F3] p-3.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11.5px] font-medium text-[#1A1428]">{progress.label}</span>
@@ -594,8 +619,8 @@ export function CartDrawer({
             </div>
             )}
 
-            {/* ── server warnings ── */}
-            {(quote?.warnings || []).length > 0 && (
+            {/* ── server warnings (the price's own: not shown without one for this cart) ── */}
+            {check.showTotals && (quote?.warnings || []).length > 0 && (
               <ul className="mt-4 space-y-1.5">
                 {(quote?.warnings || []).map((w, i) => (
                   <li
@@ -608,46 +633,48 @@ export function CartDrawer({
                 ))}
               </ul>
             )}
-            {quoteError && (
-              <p className="mt-4 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] text-[#9f1239]">{quoteError}</p>
-            )}
-
-            {/* ── totals ── */}
+            {/* ── totals: the server's figures for this cart, placeholders until it has priced it ── */}
             <dl className="mt-4 space-y-2 rounded-[16px] border border-[#E9E4EF] bg-white p-4 text-[12.5px]">
-              <div className="flex justify-between">
+              <div className="flex items-center justify-between">
                 <dt className="text-[#6b6480]">Subtotal</dt>
-                <dd className="tabular-nums text-[#1A1428]">{bhd(quote?.subtotal_bhd)}</dd>
+                <dd className="tabular-nums text-[#1A1428]">{check.showTotals ? bhd(quote?.subtotal_bhd) : <Pending check={check} />}</dd>
               </div>
-              {(quote?.discounts || []).map((d, i) => (
-                <div key={d.rule_id ?? i} className="flex justify-between">
-                  <dt className="truncate pr-2 text-[#137a48]">{d.name || 'Discount'}</dt>
-                  <dd className="shrink-0 tabular-nums text-[#137a48]">−{bhd(d.amount_bhd)}</dd>
-                </div>
-              ))}
-              {!quote?.discounts?.length && Number(quote?.discount_bhd) > 0 && (
+              {check.showTotals &&
+                (quote?.discounts || []).map((d, i) => (
+                  <div key={d.rule_id ?? i} className="flex justify-between">
+                    <dt className="truncate pr-2 text-[#137a48]">{d.name || 'Discount'}</dt>
+                    <dd className="shrink-0 tabular-nums text-[#137a48]">−{bhd(d.amount_bhd)}</dd>
+                  </div>
+                ))}
+              {check.showTotals && !quote?.discounts?.length && Number(quote?.discount_bhd) > 0 && (
                 <div className="flex justify-between">
                   <dt className="text-[#137a48]">Discount</dt>
                   <dd className="tabular-nums text-[#137a48]">−{bhd(quote?.discount_bhd)}</dd>
                 </div>
               )}
-              <div className="flex justify-between">
+              <div className="flex items-center justify-between">
                 <dt className="text-[#6b6480]">Delivery</dt>
                 <dd className="tabular-nums text-[#1A1428]">
-                  {Number(quote?.delivery_bhd) > 0 ? bhd(quote?.delivery_bhd) : 'Free'}
+                  {!check.showTotals ? <Pending check={check} /> : Number(quote?.delivery_bhd) > 0 ? bhd(quote?.delivery_bhd) : 'Free'}
                 </dd>
               </div>
-              <div className="flex justify-between border-t border-[#F3F0F6] pt-2.5">
+              <div className="flex items-center justify-between border-t border-[#F3F0F6] pt-2.5">
                 <dt className="font-semibold text-[#1A1428]">Total</dt>
                 <dd className="font-display text-[15px] font-extrabold tabular-nums text-[#1A1428]">
-                  {bhd(quote?.total_bhd)}
+                  {check.showTotals ? bhd(quote?.total_bhd) : <Pending check={check} wide />}
                 </dd>
               </div>
-              {quoting && (
-                <div className="flex items-center gap-1.5 pt-0.5 text-[10.5px] text-[#6b6480]">
-                  <Loader2 size={11} className="animate-spin" aria-hidden="true" /> Updating…
-                </div>
-              )}
             </dl>
+            {/* always there, one line tall: the card never jumps while a price is checked */}
+            <p role="status" className="mt-1.5 flex h-4 items-center gap-1.5 px-1 text-[10.5px] text-[#6b6480]">
+              {checking || check.state === 'updating' ? (
+                <>
+                  <Loader2 size={11} className="animate-spin" aria-hidden="true" /> {checking ? 'Checking prices…' : 'Updating…'}
+                </>
+              ) : check.state === 'failed' ? (
+                'Prices not checked — Retry below.'
+              ) : null}
+            </p>
 
             {/* ── who is ordering ── */}
             <form id={FORM_ID} onSubmit={submit} className="mt-6" noValidate>
