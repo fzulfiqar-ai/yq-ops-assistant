@@ -153,3 +153,173 @@ available on `market_qa.py` directly.
 
 `npx tsc -b && npx eslint . && npm run build:market && npm run build` in `web/`,
 `python -m tests.test_shop`, and `python -m scripts.audit_grants` after any SQL.
+
+# Portal harness
+
+`portal_qa.py` does for the ops portal (the office AppShell and the salesman app) what
+`market_qa.py` does for the marketplace. Every portal screen sits behind a sign-in, so it works
+from a **recording**: the owner signs in once in a window the harness opens, the harness walks
+every page and saves what each page received from the API, and from then on every run
+**replays** that recording against any local build with a fake session. No login, no network, as
+often as needed: before/after design reviews, failure injection, smoothness timings.
+
+## The one sign-in (`--record`)
+
+```bash
+python scripts/qa/portal_qa.py --record --base https://ops.yqmarketplace.com \
+    --api https://api.yqmarketplace.com --out business_data/design_review/<date>/portal [--rep "<Focus name>"]
+```
+
+A Chrome window opens on the portal's login page. Sign in as usual (the harness waits up to 10
+minutes, `--wait-min`). The walk then starts by itself: every page in `--list` (42, a few seconds
+each, about five minutes in all), each loaded, given time to finish its requests, and scrolled to
+the bottom once so lazy sections load. Leave the window alone until it closes by itself. A detail page (a purchase order, a Market
+Intel case, a merchant profile) is the first one linked from its list page. `--only` records some
+pages again and merges them into an existing recording.
+
+`--rep "<Focus name>"` (or a salesman id) also fetches the reads the API lets an admin take as a rep
+(today `/shop/me/followups?rep=`, see `app/shop_api.py`) and files them under the plain key, so a
+`--as salesman` replay shows that rep's Due list.
+
+What is written, all under `<out>/rec/`:
+
+- `index.json` — when and where it was recorded, the signed-in role, every page walked with the
+  route it used and the requests it made, and the entries: `METHOD path?sorted-query` → body file,
+  status, content type. The query is sorted, a signed URL's `token` and cache busters are left out.
+- `api/<path>-<hash>.<ext>` — one file per distinct GET answer of the API; `supabase/…` for
+  Supabase storage GETs (the product photos and Finds pictures the pages show, so a replay draws
+  them) and REST GETs (the portal reads none today).
+
+### Safety
+
+- The browser context is **non-persistent** (a throw-away profile): no `storage_state`, no cookies,
+  no tokens are ever read out of it, and it is deleted when the window closes. `--rep`'s extra reads
+  are fetched inside the page, so the token never reaches Python.
+- Only GET answers are saved, never a request header. A signed URL's `token=` and any JWT inside a
+  recorded body are replaced with `qa-masked` before the file is written.
+- Every request that is not a GET is answered **inside the browser** (`{"ok": true, "qa": "not
+  sent"}`) — except Supabase's `POST /auth/v1/token`, the sign-in and the token refresh. Sign-out
+  and password changes are never sent (a sign-out would end the owner's other sessions). The
+  summary lists every write that was blocked.
+- Nothing is recorded before the sign-in is confirmed (`/me` answered and the page left `/login`).
+- `--out` must be inside a `business_data/` folder that Git ignores; the harness refuses anything
+  else. A replay of a real recording holds real data too, so its `--out` follows the same rule (only
+  the committed synthetic fixture may be replayed anywhere).
+
+## Replay (`--replay`)
+
+```bash
+# web/: npm run build   (the portal build goes to web/dist; web/.env must be present)
+python scripts/qa/portal_qa.py --replay --dist web/dist --rec business_data/design_review/<date>/portal \
+    --out business_data/design_review/<date>/after                      # admin · 390,1024,1440 · light,dark
+
+# the salesman app (SalesmanShell): the fake /me says salesman; a cart is seeded on phones
+python scripts/qa/portal_qa.py --replay --dist web/dist --rec … --out …/salesman --as salesman
+
+# failure injection: every API call of the page answers 500 (S10)
+python scripts/qa/portal_qa.py --replay --dist web/dist --rec … --out …/fail-api --fail-api
+
+# a few pages, one width, while iterating
+python scripts/qa/portal_qa.py --replay --dist web/dist --rec … --out …/quick --only orders,receivables --widths 390 --themes light
+
+# before/after: build each side, replay each against the SAME recording, one after the other
+python scripts/qa/portal_qa.py --replay --dist <before>/web/dist --rec … --out …/before --port 5175
+python scripts/qa/portal_qa.py --replay --dist web/dist          --rec … --out …/after  --port 5175
+```
+
+The build is served with `vite preview --strictPort` on `--port` (5175), started and stopped by
+the harness (`taskkill /T /F` on Windows); a busy port, or a port serving another build, is refused.
+Each context gets a fake Supabase session and a cached `/me` (the `perf_auth_check.py` approach);
+`--as` decides the role. Then, per request:
+
+| request | answer |
+|---|---|
+| the build's own files | served by `vite preview` |
+| API GET in the recording | the recorded status and body |
+| API GET not in it | the same path with the closest query (`near`, logged), else 404 JSON (`miss`, logged) |
+| API write | `{"ok": true, "qa": "not sent"}`; the cart quote is priced from the recorded staff catalog |
+| Supabase auth | a fake session / user, valid nowhere |
+| Supabase storage miss | a grey placeholder (`asset`, logged) |
+| anything else | never sent (`external`, logged) |
+
+The page's clock (`Date` only) starts at the recording's instant and runs, so "3 days old" and
+date-window queries read the same on every replay (`--clock real` to use today). Timers, animation
+frames and `performance.now()` stay real.
+
+Output in `--out`: `results.json`, `index.md` (hard failures, warnings, the S8 and S7 tables, the
+scroller per page, the misses, every screenshot), `misses.json`,
+`shots/<width>/<theme>/<page>.png` and `preview.log`. Exit 1 on any hard failure.
+
+Widths: under 768 a touch phone (`390` → 390×844, DPR 2: tap targets and input sizes are checked);
+1024 → 1024×768, 1440 → 1440×900, any other a desktop. The first phone and the first desktop are
+the "lead" viewports for S1 and S4, which run in the first theme only, as does the S8 menu chain.
+A page takes about 6 s per width and theme, so the default run (42 pages × 3 widths × 2 themes, plus
+the chains) is about half an hour: narrow it with `--only`, `--widths` and `--themes` while iterating.
+
+## What it checks
+
+**Hard (exit 1)**
+
+| check | rule |
+|---|---|
+| `horizontal-overflow` | the document's `scrollWidth ≤ innerWidth + 1`, the offenders named |
+| `console-error` / `page-error` | none — an error the harness caused on purpose (a miss, an injected 500, a recorded error) is not counted |
+| `request-failed` | no failed or ≥ 400 request other than those the harness answered on purpose |
+| `tap-target` | on touch every visible control ≥ 36 px (market_qa's measure: the box plus a hit-area expander) |
+| `input-font-size` | inputs ≥ 16 px on touch (iOS zooms below) |
+| `fail-api-no-error` / `fail-api-false-empty` | **S10**, `--fail-api` only: the page shows an error (couldn't load / could not load / try again / retry / something went wrong / server error, or a Retry · Try again · Reload button) and never a false empty state ("No orders yet", "Everything ordered has been received", "No transfers in this window") |
+| `error-boundary` | `--fail-api` only: the failure crashed the page into the portal's error screen (its "Something went wrong · Reload" would otherwise pass S10) |
+| `page-crash` / `harness-error` | Playwright could not drive the page, or the replay could not answer a request |
+
+**Warnings (reported, never fatal)**
+
+| check | rule |
+|---|---|
+| `tap-target` | between 36 and 44 px on touch |
+| `content-clipped` | content cut off at the right edge of a page-wide `overflow-x: hidden` frame (the office shell's `<main>` hides what a document would show as overflow) |
+| `first-paint-white` | **S7**: a screencast from the navigation on; a near-white, near-uniform frame before the app paints is a flash when the app it turns into is dark (one line per width and theme, the pages and milliseconds in the S7 table) |
+| `click-to-paint` | **S8**: in one tab, the menu from page to page (the office drawer is opened first on a phone); from the click to the new page's heading > 150 ms, or more than one loader (spinner, skeleton, `aria-busy`) on the way. API answers are instant here, so this is the app's own cost |
+| `inner-scroller` | **S9**: on a touch phone the page scrolls inside an `overflow: auto` box instead of the document (no collapsing address bar, no tap-the-top, no browser Back restore); the scroller of every page is in the S9 table |
+| `chrome-height` | **S12** (`--as salesman`, phones, a seeded cart): fixed and stuck-sticky chrome covers > 200 px after scrolling 400 px, overlaps counted once |
+| `scroll-jank` | **S1** (lead phone): frame times of a scripted scroll at 4× CPU — `smooth.scroll_jank` when the document scrolls, the same measure inside the box otherwise; p95 over 20 ms or any frame over 50 ms |
+| `back-scroll` | **S4** (lead viewports, the pages with a detail link): scroll, open the detail, Back — `smooth.back_scroll` for a document scroller, the box's `scrollTop` otherwise; more than 24 px off |
+| `recorded-error` | the recording itself holds an error answer (production answered so) |
+| `route-drift` | a route in `App.tsx` or a link in `lib/nav.ts` that the harness does not walk, or the reverse |
+
+`smooth.py` is used when this checkout has it; without it the document-scroller halves of S1 and S4
+are skipped with a note. `--no-smooth` and `--no-nav` skip S1/S4 and S8.
+
+## Self-test
+
+```bash
+python scripts/qa/portal_qa.py --selftest     # needs web/dist (npm run build); builds nothing
+```
+
+First it proves the record mode's write guard on this machine with nothing real: a throw-away
+listener on a free port plays the API, the recorder's own route sits in front of a headless
+browser, and every way a page can write — fetch POST/PUT/PATCH/DELETE, a keepalive fetch,
+`sendBeacon`, XHR, a form POST — is fired at it. The listener must receive GETs only, every write
+must be answered in the browser, and the GET must be saved under its sorted key with its signed-URL
+token and JWT masked and its `Authorization` header in no file.
+
+Then it replays the committed **synthetic** fixture (`fixtures/portal_min/rec/`: invented names,
+codes and round numbers only, `"synthetic": true`) against `web/dist` in three passes — admin at
+1440 light and dark, `--fail-api` with two canary pages the harness serves itself (one must fail
+S10, one must pass), and `--as salesman` on a 390 phone with a seeded cart — and checks the harness
+end to end: screenshots made, the deliberate miss logged (and not double-counted as a console
+error), S7, S8, S9, S4 and S12 measured, the failing canary caught and the honest one passed, the
+cart priced locally. It prints PASS or FAIL per check and what the replay found on the real pages
+(about three minutes). Output goes to a temp folder (or `--out`).
+
+## Known limits
+
+- The data is the admin's. A salesman replay shows the admin's answers for the caller-scoped reads
+  (`/shop/me`, `/shop/me/today`, `/shop/me/book`, …); only `/shop/me/followups` takes `?rep=`.
+- A recording is a snapshot: a newer build that asks for a new endpoint or a new query gets misses
+  (listed in `misses.json`, near matches used where the path is known) until it is recorded again.
+- Timings (S1, S7, S8) depend on the machine and on what else runs on it: compare before and after
+  back to back on the same machine, never in parallel.
+- The walk is recorded at 1440 px: a phone layout that asks for something the desktop did not gets
+  a miss (listed), not an answer.
+- Only page loads, the menu and Back are driven: dialogs, forms and sheets are not opened.
+- iOS safe-area insets cannot be simulated in Chromium.
