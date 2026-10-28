@@ -423,6 +423,28 @@ check('a short list never shows two lines that read the same: a colliding name c
   eq(names.get('T-PB'), F.productName(c), 'a unique name is untouched')
 })
 
+const G = await mod('market/lib/cartGate.ts').catch((e) => ({ missing: e }))
+check('the cart never offers a wholesale order on an unchecked price, and shows the minimum from the payload meanwhile (L9)', () => {
+  if (G.missing) throw new Error('market/lib/cartGate.ts did not load: ' + (G.missing.message || G.missing))
+  const settings = { min_order_bhd: 20, small_order_mode: 'request' }
+  // the price check has not answered yet: the gap comes from the payload, nothing can be placed
+  const waiting = G.cartGate({ lines: 1, quote: null, quoting: true, quoteError: '', settings, estimate: 5 })
+  eq([waiting.checking, waiting.failed, waiting.canCheckout], [true, false, false], 'waiting: checking, not orderable')
+  eq([waiting.minimum && waiting.minimum.remaining_bhd, waiting.minimum && waiting.minimum.mode, waiting.estimated], [15, 'request', true], 'waiting: BHD 15 away, request mode, an estimate')
+  // the price check failed: still the minimum from the payload, a retry, never "Place wholesale order"
+  const failed = G.cartGate({ lines: 1, quote: null, quoting: false, quoteError: 'Network error', settings, estimate: 5 })
+  eq([failed.checking, failed.failed, failed.canCheckout, failed.minimum && failed.minimum.met], [false, true, false, false], 'failed: retry, not orderable, under the minimum')
+  // a priced cart: the server's own minimum wins
+  const quote = { total_bhd: 5, can_submit: true, minimum: { value_bhd: 20, remaining_bhd: 15, met: false, mode: 'request', kind: 'small' } }
+  const priced = G.cartGate({ lines: 1, quote, quoting: false, quoteError: '', settings, estimate: 5 })
+  eq([priced.canCheckout, priced.estimated, priced.minimum.kind], [true, false, 'small'], 'priced: orderable as the server says')
+  // over the payload's minimum while waiting: the estimate says ready, but nothing goes before the price check
+  const over = G.cartGate({ lines: 2, quote: null, quoting: true, quoteError: '', settings, estimate: 24 })
+  eq([over.minimum.met, over.canCheckout], [true, false], 'over the minimum, still waiting: not orderable yet')
+  // no minimum configured: no gap at all
+  eq(G.cartGate({ lines: 1, quote: null, quoting: true, quoteError: '', settings: {}, estimate: 5 }).minimum, null, 'no minimum set')
+})
+
 // loaded here, not inside the check: check() is synchronous, and a missing module must FAIL its check
 const R = await mod('lib/preloadReload.ts').catch((e) => ({ missing: e }))
 check('a tab outlives two deploys: one reload per BUILD, never a loop on a broken one (T11)', () => {

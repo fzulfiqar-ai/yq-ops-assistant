@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ShopApiError, type Campaign, type CatalogPayload, type MyOrderSummary, type Quote, type RepCard, type ShopItem, type ShopSettings } from '@/lib/shopApi'
 import { useQuote, type QuoteFetcher } from '@/pages/shop/useQuote'
 import { currentRef, forgetRef, isRecognized, lastQty, readNote, rememberQty, rememberedOrders, writeNote } from './lib/device'
+import { cartGate, type CartGate } from './lib/cartGate'
 import { track } from './lib/events'
 import { fmtDateShort, isOut, minQtyOf, normalizeQty } from './lib/format'
 import { getMarket, postMarketQuote, postMyOrders } from './lib/marketApi'
@@ -72,6 +73,12 @@ export interface OrderValue {
   quote: Quote | null
   quoting: boolean
   quoteError: string
+  /** the minimum and whether the cart may be placed — from the quote, else from the payload */
+  gate: CartGate
+  /** ask the price server again (after a failed check) */
+  retryQuote: () => void
+  /** a retry is on its way */
+  retrying: boolean
   coupon: string
   setCoupon: (c: string) => void
   note: string
@@ -274,8 +281,30 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
 
   /* ── quote (subscribes to the lines here, not in every card) ── */
   const lines = useCartLines()
-  const fetchQuote = useCallback<QuoteFetcher>((body, signal) => postMarketQuote(body, signal), [])
+  // Retry after a failed price check: a new fetcher identity re-runs the shared hook's effect, so
+  // the hook (pages/shop/useQuote, shared with the portal) is not changed here
+  const [attempt, setAttempt] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+  const fetchQuote = useCallback<QuoteFetcher>(
+    (body, signal) => {
+      void attempt
+      return postMarketQuote(body, signal)
+    },
+    [attempt],
+  )
   const { quote, quoting, error: quoteError } = useQuote(Boolean(data), lines, coupon, ref || '', fetchQuote)
+  const retryQuote = useCallback(() => {
+    setAttempt((n) => n + 1)
+    setRetrying(true)
+    window.setTimeout(() => setRetrying(false), 1600) // the debounce (400 ms) and a slow answer
+  }, [])
+  // what the cart may offer: the minimum from the quote, else from the payload; nothing placed on
+  // an unchecked price (lib/cartGate, finding L9)
+  const estimate = useMemo(() => lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0), [lines, itemsByCode])
+  const gate = useMemo(
+    () => cartGate({ lines: lines.length, quote, quoting, quoteError, settings, estimate }),
+    [lines.length, quote, quoting, quoteError, settings, estimate],
+  )
 
   /* ── my orders (tokens this device holds) ──────────────────── */
   const refreshMyOrders = useCallback(() => {
@@ -332,8 +361,8 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
   const search = useMemo<SearchValue>(() => ({ index, ensureIndex }), [index, ensureIndex])
 
   const order = useMemo<OrderValue>(
-    () => ({ quote, quoting, quoteError, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
-    [quote, quoting, quoteError, coupon, note, setNote, myOrders, refreshMyOrders],
+    () => ({ quote, quoting, quoteError, gate, retryQuote, retrying, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
+    [quote, quoting, quoteError, gate, retryQuote, retrying, coupon, note, setNote, myOrders, refreshMyOrders],
   )
 
   return (

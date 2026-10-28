@@ -433,6 +433,8 @@ export const en = {
     free: 'Free',
     total: 'Total',
     place: 'Place wholesale order',
+    /** the price check is out (lib/cartGate): nothing is placed on an unchecked total */
+    checking: 'Checking prices…',
     review: 'Review restock',
     placeHint: (first: string) => `${first} confirms price, stock and delivery.`,
     placeHintGeneric: 'A YQ representative confirms price, stock and delivery.',

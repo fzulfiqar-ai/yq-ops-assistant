@@ -41,7 +41,7 @@ const FORM_ID = 'yq-market-checkout'
 export default function CheckoutPage() {
   const navigate = useNavigate()
   const m = useMarket()
-  const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
+  const { quote, quoting, gate, retryQuote, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
   const { rep, data, itemsByCode, recognized } = m
   const words = useServerWords()
   const { viewport } = useShell()
@@ -87,12 +87,13 @@ export default function CheckoutPage() {
   const phoneOk = Boolean(reuse) || isPhone(customer.phone)
   const emailOk = !customer.email.trim() || isEmail(customer.email)
   const formOk = nameOk && phoneOk && emailOk
-  const canSubmit = lines.length > 0 && formOk && !quoting && !submitting && quote?.can_submit !== false
+  // never on an unchecked price (lib/cartGate): a priced quote the server lets through
+  const canSubmit = lines.length > 0 && formOk && !submitting && gate.canCheckout
   // Why the send did not go through, once it has been attempted. The button stays solid plum and
   // takes the tap: a `disabled:opacity-50` plum slab is 2.5:1 against its own white label and reads
   // as a broken control, and nothing on the screen says what is missing.
   const invalid = tried && !formOk
-  const reason = invalid ? (!phoneOk && !nameOk ? S.checkout.missing : !phoneOk ? S.checkout.missingPhone : !nameOk ? S.checkout.missingName : S.checkout.emailBad) : tried && quoting ? S.cart.updating : ''
+  const reason = invalid ? (!phoneOk && !nameOk ? S.checkout.missing : !phoneOk ? S.checkout.missingPhone : !nameOk ? S.checkout.missingName : S.checkout.emailBad) : tried && quoting ? S.cart.updating : tried && gate.failed ? S.cart.checking : ''
   const set = (k: keyof CustomerDraft, v: string) => setCustomer((c) => ({ ...c, [k]: v }))
   const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }))
   const areas = data?.settings?.areas || []
@@ -156,6 +157,8 @@ export default function CheckoutPage() {
     setTouched({ name: true, phone: true, email: true })
     setTried(true)
     if (!canSubmit) {
+      // the price check did not come back: this tap asks again (the reason line says so)
+      if (formOk && gate.failed) retryQuote()
       focusMissing()
       return
     }

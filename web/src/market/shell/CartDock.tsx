@@ -18,14 +18,15 @@ import { S } from '../strings'
 export function CartDock() {
   const { pathname } = useLocation()
   const { itemsByCode } = useMarket()
-  const { quote } = useOrder()
+  const { quote, gate } = useOrder()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
   if (!lines.length) return null
   if (/^\/(cart|checkout|o\/)/.test(pathname)) return null
   const estimate = lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0)
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
-  const min = quote?.minimum && Number(quote.minimum.value_bhd) > 0 ? quote.minimum : null
+  // the shared gate (lib/cartGate): the server's minimum, else the payload's while the check is out
+  const min = gate.minimum && Number(gate.minimum.value_bhd) > 0 ? gate.minimum : null
   const remaining = min ? Math.max(0, Number(min.remaining_bhd) || 0) : 0
   const met = Boolean(min && (min.met || remaining <= 0))
   const pct = min ? Math.min(100, Math.max(0, ((Number(min.value_bhd) - remaining) / Number(min.value_bhd)) * 100)) : 0

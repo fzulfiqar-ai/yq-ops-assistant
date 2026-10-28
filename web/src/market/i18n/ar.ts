@@ -391,6 +391,7 @@ export const ar: Strings = {
     free: 'مجاني',
     total: 'الإجمالي',
     place: 'أرسل طلب الجملة',
+    checking: 'جارٍ التحقق من الأسعار…',
     review: 'راجع الطلبية',
     placeHint: (first: string) => `يؤكد ${first} السعر والمخزون والتوصيل.`,
     placeHintGeneric: 'يؤكد مندوب YQ السعر والمخزون والتوصيل.',
