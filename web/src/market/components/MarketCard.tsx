@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 import type { BadgeKind, ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
 import { track } from '../lib/events'
+import { launchFlight } from '../lib/flight'
 import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, proofText, stepOf, unitAt, variantOf } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
@@ -285,7 +286,7 @@ function TierLine({ qty, price }: { qty: number; price: string }) {
 
 export const MarketCard = memo(function MarketCard({ item, variant = 'grid', from, priority, presetQty, hideBadge, className }: MarketCardProps) {
   const m = useMarket()
-  const { openProduct, viewport } = useShell()
+  const { openProduct } = useShell()
   const toast = useToast()
   const qty = useCartQty(item.item_code)
   const saved = useIsSaved(item.item_code)
@@ -326,17 +327,10 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
 
   const open = useCallback(() => {
     if (from) track('rail_click', { item_code: item.item_code, meta: { rail: from } })
-    const phone = viewport === 'phone'
-    const img = imgWrap.current?.querySelector('img')
-    const vt = phone && typeof document !== 'undefined' && 'startViewTransition' in document && Boolean(img)
-    if (vt && img) {
-      img.style.viewTransitionName = 'product-photo'
-      window.setTimeout(() => {
-        img.style.viewTransitionName = ''
-      }, 900)
-    }
-    openProduct(item.item_code, from, vt)
-  }, [from, item.item_code, openProduct, viewport])
+    // photo flight (lib/flight): the photo lifts off this card and lands in the product sheet
+    launchFlight(item.item_code, imgWrap.current?.querySelector('img'))
+    openProduct(item.item_code, from)
+  }, [from, item.item_code, openProduct])
 
   const flash = useCallback(() => {
     setAdded(true)

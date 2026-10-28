@@ -110,10 +110,13 @@ function ShellBody() {
       </Suspense>
       {/* Its own boundary, and a night field for the gap: the first frame of a session's first load is
        * the brand, with the horizon and the logo animating in on top of it. A product panel or the
-       * palette loading later must never paint it, hence the split. */}
-      <Suspense fallback={NEEDS_SPLASH ? <div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" /> : null}>
-        <Splash />
-      </Suspense>
+       * palette loading later must never paint it, hence the split. Mounted only when the opening is
+       * due (at most weekly): any other load no longer downloads its code just to render nothing. */}
+      {NEEDS_SPLASH && (
+        <Suspense fallback={<div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" />}>
+          <Splash />
+        </Suspense>
+      )}
     </>
   )
 }

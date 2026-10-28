@@ -413,6 +413,45 @@ def palette_focus(page: Page) -> list[Finding]:
     return [("fail", "palette-focus", f"the palette opened with the focus on {r['tag']} ({r['label'][:40]}), not its field", r)]
 
 
+FLYING = r"""
+() => {
+  const clones = [...document.querySelectorAll('body > img[aria-hidden="true"]')].filter((i) => getComputedStyle(i).position === 'fixed');
+  const hero = document.querySelector('[role="dialog"] .m-photo-img');
+  return { clones: clones.length, heroOpacity: hero ? getComputedStyle(hero).opacity : null, heroInline: hero ? hero.style.opacity : null };
+}
+"""
+
+
+def photo_flight(page: Page, quick_view: str) -> list[Finding]:
+    """M4: tapping a card's photo flies a clone of it into the sheet; it lands and is removed, and the
+    sheet's own photo is visible afterwards."""
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "photo-flight", "M4: no quick-view card, not measured", None)]
+    # the first card, centred on screen with its photo decoded: the flight only starts from a visible photo
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(600)
+    try:
+        page.wait_for_function("(el) => { const i = el.querySelector('img'); return i && i.complete && i.naturalWidth > 0 }", arg=btn.element_handle(), timeout=6000)
+    except PWError:
+        return [("warn", "photo-flight", "M4: the card's photo did not load, not measured", None)]
+    btn.evaluate("(el) => el.click()")
+    page.wait_for_timeout(80)
+    during = page.evaluate(FLYING)
+    page.wait_for_timeout(900)
+    after = page.evaluate(FLYING)
+    vals = {"during": during, "after": after}
+    x = page.locator('[role="dialog"] button[aria-label="Close"]')
+    if x.count():
+        x.first.evaluate("(el) => el.click()")
+        page.wait_for_timeout(400)
+    if not during["clones"]:
+        return [("fail", "photo-flight", "M4: no photo flew from the card into the sheet", vals)]
+    if after["clones"] or after["heroInline"] == "0":
+        return [("fail", "photo-flight", "M4: the flight left a clone or a hidden photo behind", vals)]
+    return [("note", "photo-flight", "M4: the card's photo flew into the sheet and handed over", vals)]
+
+
 # ── S6 ─────────────────────────────────────────────────────────────────────────────────────────
 TRACK_TOPS = r"""
 (ms) => {

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Check, Clock, Heart, Maximize2, MessageCircle, Plus, Share2, Store } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { rememberViewed } from '../lib/device'
 import { track } from '../lib/events'
+import { landFlight } from '../lib/flight'
 import { badgeMeta, bhd, cardBadges, fmtDateShort, isOut, minQtyOf, niceCategory, priceAnchor, productDetail, productName, proofText, stepOf, stockMeta } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
@@ -55,6 +56,11 @@ export default function ProductPanel({ code }: { code: string }) {
     rememberViewed(item.item_code)
     track('item', { item_code: item.item_code })
   }, [item])
+  // photo flight (lib/flight): the tapped card's photo lands here. A callback ref runs as the photo
+  // mounts, before the first paint, while the sheet still sits at the start of its slide.
+  const heroRef = useCallback((el: HTMLDivElement | null) => {
+    if (el) landFlight(code, el)
+  }, [code])
   /**
    * The sticky bar repeats the price only once the real one has scrolled away — otherwise the
    * same number is printed twice in one view, 180 px apart.
@@ -160,7 +166,7 @@ export default function ProductPanel({ code }: { code: string }) {
     <Sheet open onClose={closeProduct} title={name} variant={phone || viewport === 'tablet' ? 'sheet' : 'drawer'} size="lg" bare footer={footer}>
       <div className="md:flex md:gap-6 md:p-5 lg:block">
         <div className="md:w-[17rem] md:shrink-0 lg:w-auto">
-          <div className="relative bg-surface md:overflow-hidden md:rounded-lg md:border md:border-line-2">
+          <div ref={heroRef} className="relative bg-surface md:overflow-hidden md:rounded-lg md:border md:border-line-2">
             <ProductImage
               key={view}
               srcs={view === 'package' ? largePhotoChain(item, 'package', phone ? 272 : 416) : undefined}
@@ -172,7 +178,6 @@ export default function ProductPanel({ code }: { code: string }) {
               className="mx-auto w-full max-w-[17rem] md:max-w-[26rem]"
               imgClassName={cn('p-4 md:p-6', out && 'opacity-70 saturate-[.25]')}
               iconSize={48}
-              vtName={phone ? 'product-photo' : undefined}
             />
             <button type="button" onClick={() => setZoom(true)} aria-label={S.card.zoom} className="hit absolute end-3 bottom-3 grid h-10 w-10 place-items-center rounded-full border border-line bg-surface/95 text-ink-2 shadow-1 hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
               <Maximize2 size={16} aria-hidden="true" />
