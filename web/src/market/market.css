@@ -317,6 +317,11 @@
   .m-photo[data-state='wait'] .m-photo-img {
     opacity: 0;
   }
+  /* decoded while the page was scrolling (ui/ProductImage.tsx): shown at once, no fade */
+  .m-photo[data-instant]::before,
+  .m-photo[data-instant] .m-photo-img {
+    transition: none;
+  }
   @media (hover: hover) and (pointer: fine) {
     .m-photo[data-state='wait']::after {
       content: '';
@@ -636,9 +641,24 @@
     transition: none;
   }
 }
+/* A phone moves only the section's header (8 px), never the whole section: a rail of photos rising
+ * as one promoted layer cost frames on a mid phone (measured: 4x CPU, more frames over 50 ms with
+ * whole-section reveals). The section itself stays still and visible; the hook still observes it. */
 @media (prefers-reduced-motion: no-preference) and (max-width: 767px) {
-  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) {
+  html[data-reveal]:not([data-lite]) .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  html[data-reveal]:not([data-lite]) .reveal [data-section-head] {
+    transition: opacity 240ms var(--m-ease-out), transform 240ms var(--m-ease-out);
+  }
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) [data-section-head] {
+    opacity: 0;
     transform: translateY(8px);
+  }
+  html[data-reveal]:not([data-lite]) .reveal.is-instant [data-section-head] {
+    transition: none;
   }
 }
 /* end v3: reveal */

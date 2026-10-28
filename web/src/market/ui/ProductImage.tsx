@@ -25,10 +25,28 @@ import { S } from '../strings'
  * shows at once, with no fade.
  */
 
-/** the photo decoded: its tile drops the tint and the photo fades in */
+/* Smart fade (motion list M7's rule, for photos): a photo that decodes while the page is scrolling
+ * shows at once over its tint; only a photo that lands on a page at rest fades. Fading every photo
+ * that arrived mid-scroll cost frames on a mid phone (measured at 4x CPU) for a fade nobody sees
+ * while the page moves. One passive listener for the whole page; nothing per photo. */
+let lastScroll = -1e9
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'scroll',
+    () => {
+      lastScroll = performance.now()
+    },
+    { passive: true, capture: true },
+  )
+}
+const SETTLE_MS = 150
+
+/** the photo decoded: its tile drops the tint and the photo fades in (at once, mid-scroll) */
 function shown(img: HTMLImageElement | null) {
   const tile = img?.parentElement
-  if (tile && tile.dataset.state !== 'in') tile.dataset.state = 'in'
+  if (!tile || tile.dataset.state === 'in') return
+  if (performance.now() - lastScroll < SETTLE_MS) tile.dataset.instant = ''
+  tile.dataset.state = 'in'
 }
 
 /** a photo already complete when it mounts (memory cache) shows at once, before the first paint */
