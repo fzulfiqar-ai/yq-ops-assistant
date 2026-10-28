@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Copy, ExternalLink, Link2, MessageCircle, X, Check, Loader2,
@@ -11,6 +11,11 @@ import { useAuth, isReadOnly, seesAllOrders } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd, num } from '@/lib/format'
+import { panelState } from '@/lib/dataState'
+import {
+  ORDER_PAGE, flattenOrders, initialStage, listFooter, nextOrderOffset, readStage, saveStage, tabStore,
+} from '@/lib/orderList'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -675,7 +680,8 @@ type FlowMode = 'view' | 'confirm' | 'amend' | 'deliver' | 'cancel' | 'reopen'
 function useOrderFlow(id: number, onChanged: () => void, readOnly: boolean) {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data, isLoading } = useQuery({
+  // isError / reread: a failed read of the order ends its skeleton with the error and Retry (it used to spin for good)
+  const { data, isLoading, isError, error, isFetching, refetch: reread } = useQuery({
     queryKey: ['shop-order', id],
     queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`),
     staleTime: 10_000,   // another desk may have moved this order: re-read on reopen (perf-2609)
@@ -748,7 +754,7 @@ function useOrderFlow(id: number, onChanged: () => void, readOnly: boolean) {
   const tellUrl = step?.url || data?.whatsapp_url || null
   const tellFirst = Boolean(tellUrl) && can('tell_shop') && (step != null || (data ? shopNotTold(data) : false))
   return {
-    data, isLoading, mode, setMode, busy, cancel, setCancel, actions, can, legacy,
+    data, isLoading, isError, error, isFetching, reread, mode, setMode, busy, cancel, setCancel, actions, can, legacy,
     refetch, done, conflict, deliverNow, cancelNow, tellUrl, tellFirst, clearStep: () => setStep(null),
   }
 }
@@ -798,7 +804,11 @@ function OrderDrawer({
           <button onClick={onClose} aria-label="Close" className="grid h-11 w-11 shrink-0 place-items-center rounded-lg hover:bg-accent sm:h-9 sm:w-9"><X size={18} /></button>
         </div>
 
-        {isLoading || !data ? (
+        {flow.isError && !data ? (
+          <div className="p-5">
+            <LoadError error={flow.error} onRetry={() => flow.reread()} isRetrying={flow.isFetching} fallback="Could not load this order." />
+          </div>
+        ) : isLoading || !data ? (
           <div className="space-y-2 p-5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
         ) : (
           <div className="flex-1 space-y-5 p-5">
@@ -991,11 +1001,21 @@ function OrderDrawer({
 // replaced by OrderActions.FocusExceptionsPanel, fed by /shop/focus/candidates (item 6, R7a).
 
 function DeskOrders({
-  meData, rows, isLoading, counts, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus, readOnly,
+  meData, rows, data, isError, error, isFetching, onRetry, footer, onLoadMore, loadingMore,
+  counts, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus, readOnly,
 }: {
   meData?: ShopMe
   rows: ShopOrderRow[]
-  isLoading: boolean
+  /** the list read's answer (undefined until the first page is in) and its failure: lib/dataState.ts */
+  data: unknown
+  isError: boolean
+  error: unknown
+  isFetching: boolean
+  onRetry: () => void
+  /** "Latest 100 of 342 orders" and how many Load more reads; null once every order is on the page */
+  footer: { text: string; more: number } | null
+  onLoadMore: () => void
+  loadingMore: boolean
   counts: StatusCounts
   status: StatusFilter
   setStatus: (s: StatusFilter) => void
@@ -1040,12 +1060,16 @@ function DeskOrders({
   ])
   const needsActionCount = needsActionIds.size
   const totalCount = Object.values(counts).reduce((s, n) => s + (n || 0), 0)
+  // loading / error / ready for the list itself: a failed read is said, with Retry — it used to read "No orders yet"
+  const listState = panelState({ data, isError })
 
-  const displayRows = status === 'needs_action'
+  // Memoised: these were rebuilt on every render, so opening or closing an order handed DataTable a new rows array
+  // and threw the office back to the top of the list. They change only when the rows, the filter or the SLA do.
+  const displayRows = useMemo(() => (status === 'needs_action'
     ? rows.filter((r) => isLateReceived(r, slaMin) || (OPEN_STATUSES.has(r.status) && !r.salesman_id && !r.salesman_name))
-    : rows
+    : rows), [rows, status, slaMin])
   // R7c: the Total column sorts and exports the confirmed-else-original money it shows
-  const tableRows = displayRows.map((r) => ({ ...r, total_effective_bhd: effectiveTotal(r) }))
+  const tableRows = useMemo(() => displayRows.map((r) => ({ ...r, total_effective_bhd: effectiveTotal(r) })), [displayRows])
 
   const cols: Column<ShopOrderRow>[] = [
     { key: 'order_no', label: 'Order', render: (_, r) => (
@@ -1093,7 +1117,7 @@ function DeskOrders({
 
   return (
     <div>
-      <PageHeader title="Shop Orders" subtitle="Orders from the marketplace, salesman links and the shared catalog" />
+      <PageHeader title="Customer orders" subtitle="Orders from the marketplace, salesman links and the shared catalog" />
 
       {!readOnly && <AssignmentQueue onChanged={onRefresh} highlight={queueFocus} />}
 
@@ -1132,13 +1156,31 @@ function DeskOrders({
         </div>
       </div>
 
-      {isLoading ? (
-        <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
+      {listState === 'loading' ? (
+        <div className="space-y-2" aria-busy="true" aria-label="Loading the orders">
+          <Skeleton className="h-10" />
+          {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-12" />)}
+        </div>
+      ) : listState === 'error' ? (
+        <LoadError error={error} onRetry={onRetry} isRetrying={isFetching} fallback="Could not load the orders." />
       ) : (
-        <DataTable rows={tableRows} cols={cols} searchable={false} exportName="yq-shop-orders"
-          empty={status === 'needs_action'
-            ? 'Nothing needs action right now.'
-            : 'No orders yet — customers order from your shared catalog link (see “My link” above) and orders will appear here automatically.'} />
+        <>
+          {/* resetKey: a new chip or search starts the table at its first rows; a re-read (an order opened,
+              confirmed or closed) keeps the rows and the scroll where they were */}
+          <DataTable rows={tableRows} cols={cols} searchable={false} exportName="yq-shop-orders" resetKey={`${status}|${qRaw}`}
+            empty={status === 'needs_action'
+              ? 'Nothing needs action right now.'
+              : 'No orders yet — customers order from your shared catalog link (see “My link” above) and orders will appear here automatically.'} />
+          {/* the list reads 100 orders at a time (the API pages); it used to stop at 100 under an "All N" chip */}
+          {footer && (
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-[13px] text-muted-foreground">
+              <span>{footer.text} · search to find an older one at once</span>
+              <Button type="button" variant="outline" size="sm" onClick={onLoadMore} disabled={loadingMore}>
+                {loadingMore && <Loader2 className="animate-spin" size={14} />} Load {footer.more} more
+              </Button>
+            </div>
+          )}
+        </>
       )}
 
       {openId != null && (
@@ -1348,7 +1390,11 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
       subtitle={data ? [data.customer_shop || data.customer_name, relTime(data.created_at)].filter(Boolean).join(' · ') : undefined}
       footer={footer}
     >
-      {isLoading || !data ? (
+      {flow.isError && !data ? (
+        <div className="p-4">
+          <LoadError error={flow.error} onRetry={() => flow.reread()} isRetrying={flow.isFetching} fallback="Could not load this order." />
+        </div>
+      ) : isLoading || !data ? (
         <div className="space-y-2 p-4">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-16 rounded-xl" />)}</div>
       ) : (
         <div className="space-y-4 p-4">
@@ -1459,6 +1505,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
 
 function FieldOrders({
   meData, rows, isLoading, isError, counts, bucket, setBucket, qRaw, setQRaw, onRefresh, initialOpen,
+  footer, onLoadMore, loadingMore,
 }: {
   meData?: ShopMe
   initialOpen?: number | null
@@ -1471,6 +1518,10 @@ function FieldOrders({
   qRaw: string
   setQRaw: (v: string) => void
   onRefresh: () => void
+  /** "Latest 100 of 130 orders" and how many the next tap reads; null once all are shown */
+  footer: { text: string; more: number } | null
+  onLoadMore: () => void
+  loadingMore: boolean
 }) {
   const navigate = useNavigate()
   const [openId, setOpenId] = useState<number | null>(initialOpen ?? null)
@@ -1570,13 +1621,28 @@ function FieldOrders({
           )}
         </div>
       ) : (
-        <ul className="grid gap-2.5 lg:grid-cols-2">
-          {rows.map((r) => (
-            <li key={r.id}>
-              <OrderCard row={r} onOpen={() => setOpenId(r.id)} />
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="grid gap-2.5 lg:grid-cols-2">
+            {rows.map((r) => (
+              <li key={r.id}>
+                <OrderCard row={r} onOpen={() => setOpenId(r.id)} />
+              </li>
+            ))}
+          </ul>
+          {footer && (
+            <div className="flex flex-col items-center gap-2 pt-1">
+              <p className={cn('text-[12.5px]', MUTED)}>{footer.text}</p>
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={loadingMore}
+                className={cn('flex h-11 items-center gap-1.5 rounded-xl border bg-white px-5 text-[13.5px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] disabled:opacity-60 motion-reduce:transition-none', HAIRLINE, INK)}
+              >
+                {loadingMore && <Loader2 className="animate-spin" size={15} aria-hidden="true" />} Load {footer.more} more
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       {openId != null && (
@@ -1589,6 +1655,8 @@ function FieldOrders({
 // ══════════════════════════════════════════════════════════════════════════════
 
 const OPEN_STATUSES = new Set(['new', 'confirmed', 'packed', 'out_for_delivery'])
+/** the list API's comma list for the open orders: the only ones "Needs action" can hold */
+const OPEN_FILTER = [...OPEN_STATUSES].join(',')
 
 export default function ShopOrders() {
   const { me } = useAuth()
@@ -1605,7 +1673,13 @@ export default function ShopOrders() {
   const initialQ = (sp.get('q') || '').trim()
   const initialOpen = Number(sp.get('open')) || null
   const [status, setStatus] = useState<StatusFilter>('all')
-  const [bucket, setBucket] = useState<VisibleStatus>(initialBucket)
+  // The rep's stage tab: a link's ?bucket= wins; else the stage this browser tab last showed (it reset to
+  // Received on every visit), kept in the tab's sessionStorage; else Received (lib/orderList.ts)
+  const [bucket, setBucketState] = useState<VisibleStatus>(() => (sp.get('bucket') ? initialBucket : initialStage(null, readStage(tabStore()))))
+  const setBucket = (b: VisibleStatus) => {
+    setBucketState(b)
+    saveStage(tabStore(), b)
+  }
   const [qRaw, setQRaw] = useState(initialQ)
   const [q, setQ] = useState(initialQ)
 
@@ -1618,19 +1692,25 @@ export default function ShopOrders() {
 
   // The desk and the field both filter by one of the four stages; Confirmed is a comma list of
   // stored statuses (heart.FILTER_PARAM). 'needs_action' (item 4, R7a) is a computed view, not a
-  // real status, so it fetches the same as 'all' and is filtered client-side (DeskOrders).
+  // real status: it fetches the OPEN orders (the only ones it can hold — a late Received order is
+  // an old one, often past the newest 100 of everything) and is filtered client-side (DeskOrders).
   const statusParam = showDesk
-    ? (status === 'all' || status === 'unassigned' || status === 'needs_action' ? '' : FILTER_PARAM[status])
+    ? (status === 'all' || status === 'unassigned' ? '' : status === 'needs_action' ? OPEN_FILTER : FILTER_PARAM[status])
     : FILTER_PARAM[bucket]
 
-  const ordersQuery = useQuery({
+  // A page of ORDER_PAGE orders at a time, newest first (the API pages with limit/offset and answers the
+  // filtered count): Load more reads the next page. The list used to stop at its first 100 under an
+  // "All 342" chip. lib/orderList.ts: the next offset, each order once, the footer's words.
+  const ordersQuery = useInfiniteQuery({
     queryKey: ['shop-orders', statusParam, q],
-    queryFn: () => {
-      const params = new URLSearchParams({ limit: '100' })
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams({ limit: String(ORDER_PAGE), offset: String(pageParam) })
       if (statusParam) params.set('status', statusParam)
       if (q) params.set('q', q)
       return apiGet<ShopOrdersResp>(`/shop/orders?${params.toString()}`)
     },
+    initialPageParam: 0,
+    getNextPageParam: (_last, pages) => nextOrderOffset(pages),
     // Orders are live data (perf-2609): coming back to this page paints the last list at once and
     // re-reads it in the background after 15 s (the app-wide 5 min let a new order hide that long),
     // and a return to the browser tab re-reads it too.
@@ -1638,7 +1718,14 @@ export default function ShopOrders() {
     refetchOnWindowFocus: true,
   })
 
-  const rows = ordersQuery.data?.orders || []
+  const pages = ordersQuery.data?.pages
+  const rows = useMemo(() => flattenOrders(pages || []), [pages])
+  const counts = pages?.[0]?.counts || {}
+  const footer = ordersQuery.hasNextPage
+    ? listFooter(rows.length, pages?.[pages.length - 1]?.count ?? rows.length, ORDER_PAGE,
+      showDesk && status === 'needs_action' ? 'open orders' : 'orders')
+    : null
+  const loadMore = () => { void ordersQuery.fetchNextPage() }
   const refreshList = () => {
     qc.invalidateQueries({ queryKey: ['shop-orders'] })
     qc.invalidateQueries({ queryKey: ['shop-orders-new-count'] })
@@ -1651,14 +1738,17 @@ export default function ShopOrders() {
         meData={meQuery.data}
         rows={rows}
         isLoading={ordersQuery.isLoading}
-        isError={ordersQuery.isError}
-        counts={ordersQuery.data?.counts || {}}
+        isError={ordersQuery.isError && !ordersQuery.data}
+        counts={counts}
         bucket={bucket}
         setBucket={setBucket}
         qRaw={qRaw}
         setQRaw={setQRaw}
         onRefresh={refreshList}
         initialOpen={initialOpen}
+        footer={footer}
+        onLoadMore={loadMore}
+        loadingMore={ordersQuery.isFetchingNextPage}
       />
     )
   }
@@ -1667,8 +1757,15 @@ export default function ShopOrders() {
     <DeskOrders
       meData={meQuery.data}
       rows={rows}
-      isLoading={ordersQuery.isLoading}
-      counts={ordersQuery.data?.counts || {}}
+      data={ordersQuery.data}
+      isError={ordersQuery.isError}
+      error={ordersQuery.error}
+      isFetching={ordersQuery.isFetching}
+      onRetry={() => { void ordersQuery.refetch() }}
+      footer={footer}
+      onLoadMore={loadMore}
+      loadingMore={ordersQuery.isFetchingNextPage}
+      counts={counts}
       status={status}
       setStatus={setStatus}
       qRaw={qRaw}

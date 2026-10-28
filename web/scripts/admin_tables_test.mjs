@@ -186,6 +186,24 @@ await check("the stage lives in this tab's sessionStorage; a blocked storage nev
   L.saveStage(undefined, 'new')
 })
 
+await check('Customer orders: read a page at a time with Load more; the rows memoised; the table resets only on a filter', () => {
+  const s = text('pages/ShopOrders.tsx')
+  ok(s.includes('<PageHeader title="Customer orders"'), 'the menu label')
+  ok(s.includes('useInfiniteQuery(') && !s.includes("new URLSearchParams({ limit: '100' })"), 'no fixed first 100')
+  ok(s.includes('getNextPageParam: (_last, pages) => nextOrderOffset(pages)'), 'the next offset from lib/orderList.ts')
+  ok(s.includes('flattenOrders(') && s.includes('listFooter('), 'each order once; "Latest 100 of 342 orders"')
+  ok(/const tableRows = useMemo\(/.test(s) && /const displayRows = useMemo\(/.test(s), 'rows memoised: opening an order no longer rebuilds them')
+  ok(s.includes('resetKey={`${status}|${qRaw}`}'), 'the table starts again only when the filter or the search changes')
+  // "Needs action" reads the OPEN orders (late Received or no rep), not the newest 100 of everything
+  ok(s.includes("status === 'needs_action' ? OPEN_FILTER"), 'needs action fetches the open orders')
+})
+
+await check("Customer orders: the rep's stage is kept for the tab; a link's ?bucket still wins", () => {
+  const s = text('pages/ShopOrders.tsx')
+  ok(s.includes("const initialBucket = bucketFromParam(sp.get('bucket'))"), 'the deep link (R7c)')
+  ok(s.includes('initialStage(null, readStage(tabStore()))') && s.includes('saveStage(tabStore(), b)'), 'read and kept per tab')
+})
+
 // ── lib/searchRoute.ts ───────────────────────────────────────────────────────────────────────────
 const Q = await load('lib/searchRoute.ts')
 

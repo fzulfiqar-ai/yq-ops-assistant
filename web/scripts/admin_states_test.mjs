@@ -207,5 +207,14 @@ await check('Purchase orders: wide tables scroll sideways in their card; icons, 
     'a goods receipt moves the landed costs: every report and the freshness chip are read again')
 })
 
+await check('Customer orders: a failed read shows the error with Retry, never "No orders yet"; the drawer and the sheet too', () => {
+  const s = text('pages/ShopOrders.tsx')
+  ok(s.includes("import { LoadError } from '@/components/LoadError'"), 'LoadError')
+  ok((s.match(/<LoadError /g) || []).length >= 3, 'the desk list, the order drawer and the field sheet')
+  ok(s.includes('const listState = panelState({ data, isError })'), 'the desk list reads the shared state rule')
+  const drawer = s.split('function OrderDrawer(')[1].split('\nfunction ')[0]
+  ok(drawer.includes('flow.isError'), "the drawer's skeleton ends when its read fails")
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
