@@ -5,7 +5,7 @@ import type { Quote, ShopItem, StaffCustomer } from '@/lib/shopApi'
 import type { BookShop } from '@/pages/sales/lib'
 import { ProductImage } from './ProductImage'
 import { ShopPill } from './ShopPicker'
-import { bhd, money, RING } from './shared'
+import { bhd, HIT, money, RING } from './shared'
 
 /**
  * The wholesale minimum as a ruler: how far this cart is from it (the server's quote.minimum when
@@ -105,7 +105,7 @@ export function OrderSlip({
                     </span>
                   </span>
                   <span className="shrink-0 font-display text-[12.5px] font-bold tabular-nums text-[#1A1428]">{q?.unavailable ? '—' : money(q?.line_total_bhd ?? (Number(it?.price_bhd) || 0) * l.qty)}</span>
-                  <button type="button" onClick={() => onRemove(l.item_code)} aria-label={`Remove ${l.item_code}`} className={cn('grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#a8a2bb] hover:bg-[#fdecef] hover:text-[#9f1239]', RING)}>
+                  <button type="button" onClick={() => onRemove(l.item_code)} aria-label={`Remove ${l.item_code}`} className={cn('relative grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#a8a2bb] hover:bg-[#fdecef] hover:text-[#9f1239]', HIT, RING)}>
                     <X size={14} aria-hidden="true" />
                   </button>
                 </li>

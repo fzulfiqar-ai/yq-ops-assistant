@@ -237,9 +237,19 @@ export const RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visib
 /** Same ring, drawn inside the element (for full-bleed buttons and photos). */
 export const RING_INSET = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70'
 
-/** Text input / textarea / select. 44px, hairline, accent focus. */
+/** Text input / textarea / select. 44px, hairline, accent focus. 16 px text on a touch screen: an
+ *  iPhone zooms the page into any field under 16 px when it is focused; a mouse keeps 14 px. */
 export const FIELD =
-  'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[14px] leading-none text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15'
+  'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[16px] leading-none text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [@media(pointer:fine)]:text-[14px]'
+
+/**
+ * A 44 px hit area on a touch screen around a control drawn smaller (the marketplace's `.hit`): an
+ * invisible ::after centred on it that only ever grows a side under 44 px. The drawn box, its padding
+ * and the layout stay exactly as they are, so nothing looks heavier; a mouse keeps the drawn box. The
+ * control needs a position (`relative`, or its own `absolute`), no ::after of its own, and no
+ * overflow-hidden on itself or a near scroll box (that would cut the area off).
+ */
+export const HIT = '[@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-[min(0px,calc(50%_-_22px))]'
 
 export const LABEL = 'mb-1.5 block text-[11.5px] font-semibold tracking-[0.01em] text-[#1A1428]'
 

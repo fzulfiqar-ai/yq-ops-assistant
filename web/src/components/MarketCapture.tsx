@@ -157,8 +157,9 @@ const CHIP =
   'inline-flex h-11 items-center gap-1.5 rounded-full px-4 text-[13.5px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60 disabled:cursor-default'
 const CHIP_OFF = 'bg-[#F3EDF8] text-[#4B2C66] hover:bg-[#EADFF3]'
 const CHIP_ON = 'bg-[#6D4091] text-white shadow-sm'
+/** 16 px text on a touch screen (an iPhone zooms into a field under 16 px on focus); 14 px with a mouse */
 const FIELD =
-  'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[14px] text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25'
+  'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[16px] text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25 [@media(pointer:fine)]:text-[14px]'
 /** Arabic labels: no letter-spacing (it breaks the joined letters on iPhones) and a size Arabic reads at */
 const LABEL = 'mb-1.5 block text-[11.5px] font-semibold uppercase tracking-[0.06em] text-[#6b6480] rtl:text-[13px] rtl:tracking-normal'
 const PANEL = 'space-y-4 rounded-2xl border border-[#EFE9F5] bg-[#FCFAFE] p-3'

@@ -5,7 +5,7 @@ import { Sheet } from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
 import type { StaffCustomer } from '@/lib/shopApi'
 import { customerOf, dayLabel, initials, phoneLabel, useShopBook, type BookShop, type CreditChip as Credit } from '@/pages/sales/lib'
-import { RING } from './shared'
+import { HIT, RING } from './shared'
 
 /**
  * The one shop picker (Sprint 5) — it replaces the old CustomerBar and the checkout's "recent
@@ -174,7 +174,7 @@ export function ShopPickerSheet({
             className="h-full w-full bg-transparent text-[16px] outline-none placeholder:text-[#a8a2bb]"
           />
           {q && (
-            <button type="button" onClick={() => setQ('')} aria-label="Clear" className="grid h-9 w-9 place-items-center rounded-lg text-[#6b6480]">
+            <button type="button" onClick={() => setQ('')} aria-label="Clear" className={cn('relative grid h-9 w-9 place-items-center rounded-lg text-[#6b6480]', HIT)}>
               <X size={15} />
             </button>
           )}

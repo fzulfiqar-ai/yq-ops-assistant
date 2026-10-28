@@ -20,7 +20,7 @@ import { getSelectedCustomer, initials, saveShopPhone, setSelectedCustomer, useS
 import { priceCheck, type PriceCheck } from './checkout'
 import { ProductImage } from './ProductImage'
 import { Select } from './Select'
-import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, SKELETON, stepOf } from './shared'
+import { bhd, cleanPhone, FIELD, HIT, isEmail, isPhone, LABEL, minQtyOf, money, RING, SKELETON, stepOf } from './shared'
 import { attemptKey, clientIdFor, newClientOrderId } from './staffOrder'
 
 const FORM_ID = 'yq-shop-order-form'
@@ -424,13 +424,13 @@ export function CartDrawer({
                   </span>
                 </span>
                 {onChangeShop && (
-                  <button type="button" onClick={onChangeShop} className={cn('inline-flex h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-[12px] font-semibold text-[#6D4091] hover:bg-[#EEE8F4]', RING)}>
+                  <button type="button" onClick={onChangeShop} className={cn('relative inline-flex h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-[12px] font-semibold text-[#6D4091] hover:bg-[#EEE8F4]', HIT, RING)}>
                     <ArrowLeftRight size={13} aria-hidden="true" /> {selected ? 'Change' : 'Pick'}
                   </button>
                 )}
               </div>
               {compact && (
-                <button type="button" onClick={() => setEditing(true)} className={cn('mt-1.5 rounded text-[11.5px] font-semibold text-[#6D4091] underline-offset-2 hover:underline', RING)}>
+                <button type="button" onClick={() => setEditing(true)} className={cn('relative mt-1.5 rounded text-[11.5px] font-semibold text-[#6D4091] underline-offset-2 hover:underline', HIT, RING)}>
                   Edit details
                 </button>
               )}
@@ -528,7 +528,8 @@ export function CartDrawer({
                             type="button"
                             onClick={() => removeLine(line.item_code)}
                             className={cn(
-                              'inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#f3c9d2] bg-[#fdecef] px-3.5 text-[12px] font-semibold text-[#9f1239] transition duration-150 ease-out hover:bg-[#fbdde3]',
+                              'relative inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#f3c9d2] bg-[#fdecef] px-3.5 text-[12px] font-semibold text-[#9f1239] transition duration-150 ease-out hover:bg-[#fbdde3]',
+                              HIT,
                               RING,
                             )}
                           >
@@ -580,7 +581,7 @@ export function CartDrawer({
 
             {/* ── coupon (a rep rarely has one: a link until he does) ── */}
             {!couponOpen ? (
-              <button type="button" onClick={() => setCouponOpen(true)} className={cn('mt-4 inline-flex h-10 items-center gap-1.5 rounded-lg px-1 text-[12.5px] font-semibold text-[#6D4091] hover:underline', RING)}>
+              <button type="button" onClick={() => setCouponOpen(true)} className={cn('relative mt-4 inline-flex h-10 items-center gap-1.5 rounded-lg px-1 text-[12.5px] font-semibold text-[#6D4091] hover:underline', HIT, RING)}>
                 <Tag size={13} aria-hidden="true" /> Add a coupon
               </button>
             ) : (

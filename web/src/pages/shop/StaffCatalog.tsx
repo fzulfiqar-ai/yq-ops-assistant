@@ -40,7 +40,7 @@ import { QtySheet } from './QtySheet'
 import { ShopPickerSheet, ShopPill } from './ShopPicker'
 import { ShopSheet } from './ShopSheet'
 import { SoldOutDivider } from './SoldOut'
-import { bhd, hasBadge, isSoldOut, minQtyOf, RING, stepOf } from './shared'
+import { bhd, hasBadge, HIT, isSoldOut, minQtyOf, RING, stepOf } from './shared'
 import { UndoToast, type UndoOffer } from './UndoToast'
 import { useQuote, type QuoteFetcher } from './useQuote'
 
@@ -560,7 +560,7 @@ export function StaffCatalog() {
                 {notice.text}
                 {notice.soldOut?.length ? <> · <b className="font-semibold">Sold out, not added: {notice.soldOut.join(', ')}</b></> : null}
               </span>
-              <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className="-my-1 -mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-black/5">
+              <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className={cn('relative -my-1 -mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-black/5', HIT)}>
                 <X size={13} aria-hidden="true" />
               </button>
             </div>
@@ -583,10 +583,11 @@ export function StaffCatalog() {
                 type="search"
                 enterKeyHint={quick ? 'done' : 'search'}
                 autoComplete="off"
-                className="h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[15px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [&::-webkit-search-cancel-button]:hidden"
+                // 16 px under a finger (an iPhone zooms into a field under 16 px on focus), 15 px with a mouse
+                className="h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[16px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [&::-webkit-search-cancel-button]:hidden [@media(pointer:fine)]:text-[15px]"
               />
               {q ? (
-                <button type="button" onClick={() => setQ('')} aria-label="Clear search" className={cn('absolute right-1 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-lg text-[#6b6480] hover:bg-[#F3F0F6]', RING)}>
+                <button type="button" onClick={() => setQ('')} aria-label="Clear search" className={cn('absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-xl text-[#6b6480] hover:bg-[#F3F0F6]', RING)}>
                   <X size={15} />
                 </button>
               ) : (
@@ -615,7 +616,8 @@ export function StaffCatalog() {
               </div>
             )}
 
-            <div className="-mx-4 mt-2 flex items-center gap-1.5 overflow-x-auto px-4 pb-0.5 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0">
+            {/* py-1.5: the scroll box clips, and each chip's 44 px hit area (HIT) reaches past its 36 px */}
+            <div className="-mx-4 mt-0.5 flex items-center gap-1.5 overflow-x-auto px-4 py-1.5 lg:-mx-6 lg:px-6 xl:mx-0 xl:px-0">
               {cats.map((c) => (
                 <button
                   key={c}
@@ -623,7 +625,8 @@ export function StaffCatalog() {
                   onClick={() => setCat(c)}
                   aria-pressed={cat === c}
                   className={cn(
-                    'inline-flex h-9 shrink-0 items-center gap-1 rounded-full border px-3.5 text-[12px] font-medium capitalize transition duration-150 ease-out',
+                    'relative inline-flex h-9 shrink-0 items-center gap-1 rounded-full border px-3.5 text-[12px] font-medium capitalize transition duration-150 ease-out',
+                    HIT,
                     RING,
                     cat === c ? 'border-[#6D4091] bg-[#6D4091] text-white' : 'border-[#E2DCEA] bg-white text-[#6b6480] hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                   )}
@@ -637,7 +640,8 @@ export function StaffCatalog() {
                 onClick={() => setFiltersOpen(true)}
                 aria-haspopup="dialog"
                 className={cn(
-                  'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-semibold transition duration-150 ease-out',
+                  'relative inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[12px] font-semibold transition duration-150 ease-out',
+                  HIT,
                   RING,
                   activeFilters ? 'border-[#6D4091] bg-[#EEE8F4] text-[#5A3478]' : 'border-[#E2DCEA] bg-white text-[#1A1428] hover:bg-[#f7f5fb]',
                 )}
@@ -653,7 +657,8 @@ export function StaffCatalog() {
                     aria-pressed={view === v}
                     aria-label={v === 'list' ? 'List' : 'Grid'}
                     title={v === 'list' ? 'List — for ordering' : 'Grid — for showing a customer'}
-                    className={cn('grid h-8 w-9 place-items-center rounded-full transition duration-150 ease-out', RING, view === v ? 'bg-[#6D4091] text-white' : 'text-[#6b6480] hover:text-[#1A1428]')}
+                    // side by side, each is 44 px wide under a finger (a centred hit area would reach into its neighbour); HIT adds the height
+                    className={cn('relative grid h-8 w-9 place-items-center rounded-full transition duration-150 ease-out [@media(pointer:coarse)]:w-11', HIT, RING, view === v ? 'bg-[#6D4091] text-white' : 'text-[#6b6480] hover:text-[#1A1428]')}
                   >
                     {v === 'list' ? <List size={15} aria-hidden="true" /> : <LayoutGrid size={15} aria-hidden="true" />}
                   </button>
@@ -683,7 +688,7 @@ export function StaffCatalog() {
                   type="button"
                   onClick={() => setFilters((f) => ({ ...f, [c.key]: false }))}
                   aria-label={`${c.label} filter on — remove it`}
-                  className={cn('inline-flex h-7 items-center gap-1 rounded-full border border-[#6D4091] bg-[#EEE8F4] pl-2.5 pr-2 text-[11.5px] font-semibold text-[#5A3478] transition duration-150 ease-out hover:bg-[#E4DAEE]', RING)}
+                  className={cn('relative inline-flex h-7 items-center gap-1 rounded-full border border-[#6D4091] bg-[#EEE8F4] pl-2.5 pr-2 text-[11.5px] font-semibold text-[#5A3478] transition duration-150 ease-out hover:bg-[#E4DAEE]', HIT, RING)}
                 >
                   {c.label}
                   <X size={12} aria-hidden="true" />

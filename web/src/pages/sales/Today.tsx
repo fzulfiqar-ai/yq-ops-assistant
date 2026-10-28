@@ -7,6 +7,7 @@ import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
 import { Badge } from '@/components/ui/badge'
+import { HIT } from '@/pages/shop/shared'
 import { ageLabel, bhd3, bhdStr, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useToday, waLink, type MoneyStrip, type TodayData } from './lib'
 import { ComingSoon } from './ComingSoon'
 import { BasketsNotSent, DueThisWeek, LinkThisWeek } from './FollowUps'
@@ -75,7 +76,7 @@ function ToConfirm({ t }: { t: TodayData }) {
         <Timer size={16} className="text-primary" aria-hidden="true" />
         <h2 className="font-display text-[15px] font-bold">To confirm</h2>
         {t.waiting_count > 0 && <span className="rounded-full bg-primary px-2 py-0.5 text-[11px] font-bold tabular-nums text-primary-foreground">{t.waiting_count}</span>}
-        <Link to="/shop-orders" className="-mr-2 ml-auto inline-flex h-10 items-center rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted">
+        <Link to="/shop-orders" className={cn('relative -mr-2 ml-auto inline-flex h-10 items-center rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted', HIT)}>
           All orders
         </Link>
       </div>
@@ -256,11 +257,11 @@ export default function Today() {
                           </span>
                         </span>
                         {wa && r.back_in_stock && (
-                          <a href={wa} target="_blank" rel="noreferrer" aria-label="WhatsApp the shop" className="grid h-10 w-10 place-items-center rounded-xl border border-border text-[#1d9e50] hover:bg-muted">
+                          <a href={wa} target="_blank" rel="noreferrer" aria-label="WhatsApp the shop" className={cn('relative grid h-10 w-10 place-items-center rounded-xl border border-border text-[#1d9e50] hover:bg-muted', HIT)}>
                             <MessageCircle size={16} aria-hidden="true" />
                           </a>
                         )}
-                        <button type="button" onClick={() => resolveRestock(r.ids)} aria-label="Mark as told" title="Mark as told" className="grid h-10 w-10 place-items-center rounded-xl border border-border text-muted-foreground hover:bg-muted hover:text-foreground">
+                        <button type="button" onClick={() => resolveRestock(r.ids)} aria-label="Mark as told" title="Mark as told" className={cn('relative grid h-10 w-10 place-items-center rounded-xl border border-border text-muted-foreground hover:bg-muted hover:text-foreground', HIT)}>
                           <Check size={16} aria-hidden="true" />
                         </button>
                       </li>

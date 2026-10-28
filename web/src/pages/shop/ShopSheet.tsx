@@ -17,7 +17,7 @@ import {
 } from '@/pages/sales/lib'
 import { CreditChip, StatusBadge } from './ShopPicker'
 import { SoldOutDivider } from './SoldOut'
-import { RING } from './shared'
+import { HIT, RING } from './shared'
 
 const FROM: Record<string, string> = {
   last_order: 'Their last app order',
@@ -132,17 +132,17 @@ export function ShopSheet({
 
         <div className="mt-3 flex gap-2">
           {onChangeShop && (
-            <button type="button" onClick={onChangeShop} className={cn('inline-flex h-10 items-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white px-3 text-[12.5px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb]', RING)}>
+            <button type="button" onClick={onChangeShop} className={cn('relative inline-flex h-10 items-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white px-3 text-[12.5px] font-semibold text-[#1A1428] hover:bg-[#f7f5fb]', HIT, RING)}>
               <ArrowLeftRight size={14} aria-hidden="true" /> Change shop
             </button>
           )}
           {phone && (
-            <a href={waLink(phone, `Hello${contact ? ` ${contact.split(' ')[0]}` : ''}, YQ here.`) || '#'} target="_blank" rel="noreferrer" aria-label="WhatsApp" className={cn('grid h-10 w-10 place-items-center rounded-xl border border-[#E2DCEA] bg-white text-[#1d9e50] hover:bg-[#f7f5fb]', RING)}>
+            <a href={waLink(phone, `Hello${contact ? ` ${contact.split(' ')[0]}` : ''}, YQ here.`) || '#'} target="_blank" rel="noreferrer" aria-label="WhatsApp" className={cn('relative grid h-10 w-10 place-items-center rounded-xl border border-[#E2DCEA] bg-white text-[#1d9e50] hover:bg-[#f7f5fb]', HIT, RING)}>
               <MessageCircle size={16} aria-hidden="true" />
             </a>
           )}
           {tel && (
-            <a href={tel} aria-label="Call" className={cn('grid h-10 w-10 place-items-center rounded-xl border border-[#E2DCEA] bg-white text-[#1A1428] hover:bg-[#f7f5fb]', RING)}>
+            <a href={tel} aria-label="Call" className={cn('relative grid h-10 w-10 place-items-center rounded-xl border border-[#E2DCEA] bg-white text-[#1A1428] hover:bg-[#f7f5fb]', HIT, RING)}>
               <Phone size={16} aria-hidden="true" />
             </a>
           )}

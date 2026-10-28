@@ -526,7 +526,8 @@ function LegacyShop({ mode = 'public' }: ShopPageProps) {
               aria-label="Search the catalog"
               type="search"
               className={cn(
-                'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[14px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15',
+                // 16 px under a finger: an iPhone zooms into a field under 16 px on focus
+                'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[16px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [@media(pointer:fine)]:text-[14px]',
                 '[&::-webkit-search-cancel-button]:hidden',
               )}
             />

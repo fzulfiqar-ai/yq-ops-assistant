@@ -55,7 +55,8 @@ function QtyInput({ item, qty, disabled, onSetQty }: { item: ShopItem; qty: numb
       placeholder="0"
       aria-label={`Quantity of ${item.item_code}${min > 1 ? `, minimum ${min}` : ''}`}
       className={cn(
-        'h-10 w-[4.5rem] rounded-xl border bg-white text-center text-[14px] font-semibold tabular-nums text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#c9c3d6] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15',
+        // 16 px on a touch screen (a landscape tablet reaches this desk layout; an iPhone-class browser zooms under 16 px)
+        'h-10 w-[4.5rem] rounded-xl border bg-white text-center text-[16px] font-semibold tabular-nums text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#c9c3d6] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15 [@media(pointer:fine)]:text-[14px]',
         qty > 0 ? 'border-[#6D4091]/45 bg-[#F6F2FA]' : 'border-[#E2DCEA]',
         disabled && 'cursor-not-allowed opacity-50',
       )}

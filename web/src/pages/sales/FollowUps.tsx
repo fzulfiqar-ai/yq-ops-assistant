@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { errorText } from '@/lib/errorText'
 import { Badge } from '@/components/ui/badge'
 import { ShopSheet } from '@/pages/shop/ShopSheet'
+import { HIT } from '@/pages/shop/shared'
 import { bhdStr, dayLabel, logFollowupTap, relTime, telLink, useOrderAgain, waLink, type Baskets, type FollowupShop, type Followups, type LinkWeek } from './lib'
 
 /**
@@ -19,7 +20,8 @@ import { bhdStr, dayLabel, logFollowupTap, relTime, telLink, useOrderAgain, waLi
  * sent on WhatsApp after he has seen what it carries).
  */
 
-const ICON = 'grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border bg-card hover:bg-muted'
+// a 40 px button, 44 px under a finger (HIT)
+const ICON = `relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border bg-card hover:bg-muted ${HIT}`
 
 /** One shop row, shared by the Today card and the Customers Due / Lapsed views. */
 export function FollowupRow({ r, kind, compact = false }: { r: FollowupShop; kind: 'due' | 'lapsed'; compact?: boolean }) {
@@ -58,7 +60,7 @@ export function FollowupRow({ r, kind, compact = false }: { r: FollowupShop; kin
         </div>
       )}
       <div className="mt-2.5 grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-1.5">
-        <button type="button" onClick={again} className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-primary px-3 text-[12.5px] font-semibold text-primary-foreground">
+        <button type="button" onClick={again} className={cn('relative inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-primary px-3 text-[12.5px] font-semibold text-primary-foreground', HIT)}>
           <RotateCcw size={14} aria-hidden="true" /> Order again
         </button>
         <button type="button" onClick={restock} aria-label={`Send ${r.shop} a restock link`} title="Send restock link" className={cn(ICON, 'text-[#137a48]')}>
@@ -91,7 +93,7 @@ export function DueThisWeek({ due, counts, dataThrough, hint }: { due: FollowupS
         <span className="hidden text-[12px] text-muted-foreground sm:inline">
           {counts?.due ? `${counts.due} shop${counts.due === 1 ? '' : 's'} by their usual rhythm` : 'from your Focus sales'}
         </span>
-        <Link to="/customers?view=due" className="-mr-2 ml-auto inline-flex h-10 items-center gap-1 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted">
+        <Link to="/customers?view=due" className={cn('relative -mr-2 ml-auto inline-flex h-10 items-center gap-1 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted', HIT)}>
           All due <ChevronRight size={14} aria-hidden="true" />
         </Link>
       </div>
@@ -168,7 +170,7 @@ export function LinkThisWeek({ data, error, onRetry, retrying }: { data: LinkWee
         <p className="mt-1 flex items-center text-[12.5px] text-muted-foreground" title={typeof error === 'string' ? error : errorText(error, 'Could not load this card.')}>
           Couldn't load —
           <button type="button" onClick={onRetry} disabled={retrying}
-            className="-my-2 inline-flex h-10 items-center rounded-lg px-1.5 font-semibold text-primary hover:bg-muted disabled:opacity-50">
+            className={cn('relative -my-2 inline-flex h-10 items-center rounded-lg px-1.5 font-semibold text-primary hover:bg-muted disabled:opacity-50', HIT)}>
             {retrying ? 'retrying…' : 'retry'}
           </button>
         </p>
