@@ -87,6 +87,8 @@ STR = {
     "upcoming.send": "Notify me",
     "card.quickView": "Quick view",
     "states.close": "Close",
+    "card.zoom": "Zoom photo",
+    "states.back": "Back",
 }
 
 # --lang ar: the same keys in Arabic, mirrored from web/src/market/i18n/ar.ts (verify_strings checks
@@ -124,6 +126,8 @@ STR_AR = {
     "upcoming.send": "أخبروني",
     "card.quickView": "عرض سريع",
     "states.close": "إغلاق",
+    "card.zoom": "كبّر الصورة",
+    "states.back": "رجوع",
     # not UI copy keys: what the harness types or clicks in Arabic
     "slides.dotPrefix": "الشريحة ",
     "area.manama": "المنامة",
@@ -1612,24 +1616,39 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             else:
                 finding(run, level, check, detail, values)
 
-    def fresh(load: bool = True) -> Page:
+    def fresh(load: bool = True, init: str = "") -> Page:
         pg = ctx.new_page()
+        if init:
+            pg.add_init_script(init)
         install_mocks(pg, st.order_kind)
         if load:
             pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
             settle(pg, st)
         return pg
 
+    phone = vp.klass == "phone"
     jobs = []
     if st.key == "shop":
         jobs.append(("lazy", lambda pg: smooth.lazy_open(pg, base + st.route)))
+        if phone:  # the header's Back is a phone control
+            jobs.append(("back-entry", lambda pg: smooth.back_from_entry(pg, base, "/shop?f=clearance", STR["states.back"])))
     if st.key == "home":
         jobs.append(("photos+panel", lambda pg: smooth.photo_tiles(pg) + smooth.panel_close_scroll(pg, STR["card.quickView"], STR["states.close"])))
         jobs.append(("back", lambda pg: smooth.back_scroll(pg)))
-        if vp.klass == "phone":
+        jobs.append(("flight", lambda pg: smooth.photo_flight(pg, STR["card.quickView"])))
+        jobs.append(("escape", lambda pg: smooth.escape_stack(pg, STR["card.quickView"], STR["card.zoom"])))
+        jobs.append(("flick", lambda pg: smooth.reveal_flick(pg)))
+        jobs.append(("lite", lambda pg: smooth.lite_mode(pg)))
+        jobs.append(("fade", lambda pg: smooth.photo_fade(pg)))
+        if phone:
+            jobs.append(("reveal", lambda pg: smooth.reveal_phone(pg)))
+            jobs.append(("page-wait", lambda pg: smooth.page_wait(pg, "/shop")))
             jobs.append(("drag+jank", lambda pg: smooth.sheet_drag(pg, STR["card.quickView"], STR["states.close"]) + smooth.scroll_jank(pg)))
+        else:  # Ctrl K is a keyboard shortcut
+            jobs.append(("palette", lambda pg: smooth.palette_focus(pg)))
+            jobs.append(("palette-layers", lambda pg: smooth.palette_layers(pg, "cable", STR["card.quickView"])))
     for name, job in jobs:
-        pg = fresh(load=name != "lazy")
+        pg = fresh(load=name not in ("lazy", "back-entry"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
             record(job(pg))
         except PWError as exc:

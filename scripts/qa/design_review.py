@@ -11,6 +11,8 @@ It also prints the numbers a review asks for, before vs after:
 - bundle sizes against the budgets.
 
     python scripts/qa/design_review.py --before .../before --after .../after --out .../index.html [--notes notes.html]
+        [--title "..."] [--after-name "the polish branch"] [--data-note "<b>Preview data:</b> ..."]
+        [--new-checks photo-blank,lazy-blank]  (checks new in this review: a BEFORE failure is "expected")
 
 Pure: it reads the two folders (meta.json, results.json, full/results.json, lighthouse.json,
 bundle.json, shots/) and writes one file.
@@ -44,12 +46,15 @@ LONG = [("home", "430x932"), ("home", "1366x768"), ("cart_under", "430x932"), ("
 MAX_W = 600
 QUALITY = 78
 
-# Hard checks a pre-R4 build fails by construction: the rule itself arrived with R4.
-EXPECTED_BEFORE = {
+# Hard checks a BEFORE build fails by construction because the rule arrived with the change under
+# review (--new-checks names them; the R4 review's are kept as its preset, used with --r4).
+R4_EXPECTED = {
     "soldout-divider": "the ruled “Not in stock now” divider is new in R4",
     "fonts": "R4 swapped Sora for IBM Plex Mono; the harness now checks the new font",
 }
 TOUCH_FROM_R4 = "1024x768"  # a touch viewport from R4 on, so pre-R4 desktop controls under 44 px fail there
+EXPECTED_BEFORE: dict[str, str] = {}
+R4 = False
 
 
 def webp_uri(path: Path, max_screens: float = 4.0) -> str | None:
@@ -97,7 +102,7 @@ def expected(f: dict, side: str) -> str | None:
         return None
     if f.get("check") in EXPECTED_BEFORE:
         return EXPECTED_BEFORE[f["check"]]
-    if f.get("check") == "tap-target" and f.get("viewport") == TOUCH_FROM_R4:
+    if R4 and f.get("check") == "tap-target" and f.get("viewport") == TOUCH_FROM_R4:
         return "1024×768 became a touch viewport in R4 (44 px targets)"
     return None
 
@@ -136,8 +141,18 @@ def main() -> int:
     ap.add_argument("--after", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--notes", default="", help="an HTML fragment (what changed, decisions for the owner) placed under the header")
-    ap.add_argument("--title", default="YQ Marketplace · R4 “Stockbook” · before / after")
+    ap.add_argument("--title", default="YQ Marketplace · before / after")
+    ap.add_argument("--after-name", default="the branch under review", help="what the AFTER build is, in the header")
+    ap.add_argument("--data-note", default="", help="an HTML sentence on preview data (e.g. pending rows served by readonly_api.py --upcoming)")
+    ap.add_argument("--new-checks", default="", help="comma-separated harness checks new in this review: their BEFORE failures are labelled expected")
+    ap.add_argument("--r4", action="store_true", help="the R4 review's preset of expected BEFORE failures")
     args = ap.parse_args()
+    global R4
+    R4 = args.r4
+    if R4:
+        EXPECTED_BEFORE.update(R4_EXPECTED)
+    for c in [c.strip() for c in args.new_checks.split(",") if c.strip()]:
+        EXPECTED_BEFORE.setdefault(c, "a check new in this review: the before build has no such behaviour")
     before, after = Path(args.before), Path(args.after)
     b, a = load(before), load(after)
     mb, ma = b["meta"] or {}, a["meta"] or {}
@@ -187,14 +202,14 @@ def main() -> int:
 
     notes = Path(args.notes).read_text(encoding="utf-8") if args.notes and Path(args.notes).exists() else ""
     sub = (
-        "Before = <b>" + esc(mb.get("commit", "?")) + "</b> (what is live today). After = <b>" + esc(ma.get("commit", "?")) + "</b> (the R4 branch). "
+        "Before = <b>" + esc(mb.get("commit", "?")) + "</b> (what is live today). After = <b>" + esc(ma.get("commit", "?")) + "</b> (" + esc(args.after_name) + "). "
         "Both builds ran on this PC as local previews, reading the same recorded copy of the live catalog through a read-only stand-in for the API, so nothing was written to production. "
         "Screens were taken with reduced motion so both sides show the same frame. "
-        "<b>Preview data:</b> the WEKOME “Coming soon” cards are the 34 models from the pending review sheet (not published), and the tracking screen is a fictional QA order."
+        + args.data_note
     )
     page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>R4 before and after</title>
+<title>{esc(args.title)}</title>
 <style>
 :root{{--paper:#F6F4EF;--sheet:#fff;--ink:#1B1522;--ink2:#4B4455;--ink3:#6E6776;--rule:#C9C1B4;--line:#E2DDD4;--plum:#6D4091;--ok:#1D6F47;--bad:#A3273C}}
 *{{box-sizing:border-box}}

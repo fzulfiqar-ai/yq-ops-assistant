@@ -308,6 +308,36 @@ def lazy_open(page: Page, url: str, look_at: int = 900) -> list[Finding]:
     return [("fail", "lazy-blank", f"S5: with {len(held)} chunk(s) still loading the page shows {what}", r)]
 
 
+# ── M1: the photo's own fade ──────────────────────────────────────────────────────────────────────
+PHOTO_FADE = r"""
+() => {
+  const shown = [...document.querySelectorAll('.m-photo-img')].filter((i) => {
+    const r = i.getBoundingClientRect();
+    return r.width > 40 && r.bottom > 0 && r.top < innerHeight;
+  });
+  // a photo that decoded mid-scroll shows at once by design (ProductImage's data-instant): not a pop-in
+  const instant = shown.filter((i) => i.parentElement && 'instant' in i.parentElement.dataset);
+  const imgs = shown.filter((i) => !instant.includes(i));
+  const bad = imgs.map((i) => getComputedStyle(i).transitionProperty).filter((p) => !/\b(opacity|all)\b/.test(p));
+  return { checked: imgs.length, instant: instant.length, without: bad.length, sample: [...new Set(bad)].slice(0, 3) };
+}
+"""
+
+
+def photo_fade(page: Page) -> list[Finding]:
+    """M1: every product photo on screen fades on its own opacity. A card's `transition-transform`
+    utility (its hover zoom) used to replace the fade, so card photos popped in over the tint."""
+    page.evaluate("() => window.scrollTo(0, 1200)")
+    page.wait_for_timeout(900)
+    r = page.evaluate(PHOTO_FADE)
+    page.evaluate("() => window.scrollTo(0, 0)")
+    if not r["checked"]:
+        return [("warn", "photo-fade", "M1: no product photo on screen, not measured", r)]
+    if r["without"]:
+        return [("fail", "photo-fade", f"M1: {r['without']} of {r['checked']} photos on screen have no opacity transition (they pop in)", r)]
+    return [("note", "photo-fade", f"M1: all {r['checked']} photos on screen fade in", r)]
+
+
 # ── reveal v2 (motion list M6, M7, M16) ───────────────────────────────────────────────────────────
 REVEAL_STATE = r"""
 () => {
@@ -453,11 +483,17 @@ def photo_flight(page: Page, quick_view: str) -> list[Finding]:
 
 
 def back_from_entry(page: Page, base: str, path: str = "/shop", back_label: str = "Back") -> list[Finding]:
-    """T9: a merchant who arrived from another site (WhatsApp, Google) and taps the header's Back on
-    the first page lands on the shop's Home — never back out of the shop."""
+    """T9: a merchant who arrived from another site (WhatsApp, Google), tapped a filter chip (which
+    REPLACES the history entry: a new key on the same first entry) and then the header's Back lands
+    on the shop's Home — never back out of the shop."""
     page.goto("about:blank")
     page.goto(base + path, wait_until="domcontentloaded", timeout=40000)
     page.wait_for_timeout(3500)
+    chip = page.locator('button[aria-pressed="false"]:not([aria-label])').first  # a filter chip (the view toggles carry labels)
+    tapped = bool(chip.count())
+    if tapped:
+        chip.evaluate("(el) => el.click()")
+        page.wait_for_timeout(900)
     btn = page.locator(f'header button[aria-label="{back_label}"], button[aria-label="{back_label}"]').first
     if not btn.count():
         return [("warn", "back-entry", f"T9: no Back button on {path}, not measured", None)]
@@ -467,9 +503,91 @@ def back_from_entry(page: Page, base: str, path: str = "/shop", back_label: str 
         pass  # the page navigated away during the click: that is the bug this check looks for
     page.wait_for_timeout(1500)
     url = page.url
+    vals = {"url": url, "chip_tapped": tapped}
     if url.startswith(base) and url[len(base):].split("?")[0] in ("", "/"):
-        return [("note", "back-entry", f"T9: Back on the first page went Home ({url})", None)]
-    return [("fail", "back-entry", f"T9: Back on the first page left the shop for {url}", {"url": url})]
+        return [("note", "back-entry", f"T9: Back on the first page went Home ({url}){' after a filter chip' if tapped else ''}", vals)]
+    return [("fail", "back-entry", f"T9: Back on the first page left the shop for {url}{' after a filter chip' if tapped else ''}", vals)]
+
+
+# ── M3: a warmed page opens without a skeleton ────────────────────────────────────────────────────
+# PageSkeleton (ui/Skeleton.tsx): aria-busy with the 28 px heading bar first (grids have their own)
+SKELETON_WATCH = r"""
+() => {
+  const t0 = performance.now();
+  const r = (window.__qaSk = { frames: 0, busy: 0, first: null });
+  const loop = (t) => {
+    r.frames++;
+    if (document.querySelector('[aria-busy="true"] > .skeleton.h-7')) {
+      r.busy++;
+      if (r.first === null) r.first = Math.round(t - t0);
+    }
+    if (t - t0 < 1500) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+
+def page_wait(page: Page, href: str = "/shop") -> list[Finding]:
+    """M3: once the shell has sat idle, a tap to a main page shows that page, not its skeleton. (A fresh
+    Suspense boundary commits the skeleton for a page whose code was never imported, and React holds
+    a shown fallback for at least 300 ms, so every first visit flashed one.)"""
+    page.wait_for_timeout(4000)  # the idle warm-up
+    link = page.locator(f'nav a[href="{href}"]').first
+    if not link.count():
+        return [("warn", "page-wait", f"M3: no nav link to {href}, not measured", None)]
+    page.evaluate(SKELETON_WATCH)
+    link.evaluate("(el) => el.click()")
+    page.wait_for_timeout(1700)
+    r = page.evaluate("() => window.__qaSk")
+    if r and r["busy"]:
+        return [("fail", "page-wait", f"M3: tapping {href} after the shell sat idle showed the page skeleton for {r['busy']} frame(s), from {r['first']} ms", r)]
+    return [("note", "page-wait", f"M3: {href} opened with no skeleton", r)]
+
+
+# ── layers: a product opened from the palette ─────────────────────────────────────────────────────
+LAYERS = r"""
+() => {
+  const ds = [...document.querySelectorAll('[role="dialog"]')].filter((d) => d.getBoundingClientRect().height > 0);
+  const pal = ds.find((d) => d.querySelector('input'));
+  const panel = ds.find((d) => d !== pal && d.querySelector('button[aria-label="Zoom photo"]'));
+  const host = document.activeElement && document.activeElement.closest('[role="dialog"]');
+  return { open: ds.length, palette: Boolean(pal), panel: Boolean(panel),
+           focus: host ? (host === panel ? 'panel' : host === pal ? 'palette' : 'other dialog') : (document.activeElement || {}).tagName };
+}
+"""
+
+
+def palette_layers(page: Page, query: str = "cable", quick_view: str = "Quick view") -> list[Finding]:
+    """A product opened from a ⌘K result sits on top: the focus is in it and Escape closes it first,
+    leaving the palette. (A sheet's open effect re-ran whenever its onClose changed identity: the
+    palette re-pushed itself above the product, took the focus, and Escape closed the hidden one.)"""
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"] input', timeout=6000)
+    except PWError:
+        return [("warn", "palette-layers", "Ctrl+K opened no palette, not measured", None)]
+    page.keyboard.type(query, delay=40)
+    page.wait_for_timeout(1500)
+    card = page.locator(f'[role="dialog"] button[aria-label^="{quick_view}"]').first
+    if not card.count():
+        page.keyboard.press("Escape")
+        return [("warn", "palette-layers", f"no result card for “{query}”, not measured", None)]
+    card.evaluate("(el) => el.click()")
+    page.wait_for_timeout(1200)
+    opened = page.evaluate(LAYERS)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(700)
+    after = page.evaluate(LAYERS)
+    for _ in range(2):
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    vals = {"opened": opened, "after_escape": after}
+    if not opened["panel"]:
+        return [("warn", "palette-layers", "the result opened no product panel over the palette, not measured", vals)]
+    if opened["focus"] != "panel" or after["panel"] or not after["palette"]:
+        return [("fail", "palette-layers", f"a product opened from the palette: focus in the {opened['focus']}, and Escape left " + ("the product open" if after["panel"] else "no palette"), vals)]
+    return [("note", "palette-layers", "the product opened on top with the focus; Escape closed it and left the palette", vals)]
 
 
 # ── S6 ─────────────────────────────────────────────────────────────────────────────────────────
@@ -488,6 +606,9 @@ TRACK_TOPS = r"""
 
 DIALOG_TOP = "() => { const d = document.querySelector('[role=\"dialog\"]'); if (!d) return null;" \
              " const r = d.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 10, top: r.top }; }"
+# the dim behind the sheet (ui/Sheet: the backdrop is the panel's previous sibling)
+DIM = "() => { const p = document.querySelector('[data-sheet-panel]'); const b = p && p.previousElementSibling;" \
+      " return b ? Math.round(+getComputedStyle(b).opacity * 1000) / 1000 : null; }"
 
 
 def sheet_drag(page: Page, quick_view: str, close: str) -> list[Finding]:
@@ -521,6 +642,7 @@ def sheet_drag(page: Page, quick_view: str, close: str) -> list[Finding]:
             page.wait_for_timeout(16)
         page.wait_for_timeout(80)
         during = page.evaluate(DIALOG_TOP)
+        dim = page.evaluate(DIM)
         cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
     finally:
         try:
@@ -528,11 +650,14 @@ def sheet_drag(page: Page, quick_view: str, close: str) -> list[Finding]:
         except PWError:
             pass
     moved = round((during or box)["top"] - box["top"], 1)
-    vals = {"finger_px": 60, "sheet_px": moved}
+    vals = {"finger_px": 60, "sheet_px": moved, "dim": dim}
     if moved < 40:
         out.append(("fail", "sheet-drag", f"S6: with the finger 60 px down the sheet moved {moved}px", vals))
     else:
         out.append(("note", "sheet-drag", f"S6: the sheet followed the finger ({moved}px of 60)", vals))
+    # the dim lifts with the drag (M5): an entrance animation that fills forwards pins it at full
+    if moved >= 40 and dim is not None and dim > 0.97:
+        out.append(("fail", "sheet-dim", f"S6: with the sheet {moved}px down the dim behind it stayed at {dim}", vals))
     page.wait_for_timeout(700)
     x_btn = page.locator(f'[role="dialog"] button[aria-label="{close}"]')
     if x_btn.count():
