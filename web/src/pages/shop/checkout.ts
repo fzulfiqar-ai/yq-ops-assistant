@@ -9,7 +9,7 @@ import type { Quote } from '@/lib/shopApi'
  * `quote?.can_submit !== false`, and so did a failed check with an older cart's price on screen.
  * The rule now:
  *
- *   empty     nothing in the cart, nothing to price;
+ *   empty     nothing in the cart, nothing to price: its total is zero (BHD 0.000, honestly);
  *   checking  no price for this cart yet: placeholders where the figures go, Place order off;
  *   updating  the last good price stays on screen (the totals never flash to zero) while this cart
  *             is priced again; Place order waits for it;
@@ -65,7 +65,8 @@ const blockOf = (q: Quote | null) => (q?.can_submit === false ? q.block_reason |
 
 export function priceCheck(v: QuoteView & { lines: number }): PriceCheck {
   const none = { canPlace: false, showTotals: false, reason: '', error: '' }
-  if (v.lines <= 0) return { state: 'empty', ...none }
+  // nothing to price, and its total is genuinely zero: shown as such, not as a placeholder
+  if (v.lines <= 0) return { state: 'empty', ...none, showTotals: true }
   if (v.error && !v.quoting) return { state: 'failed', ...none, error: v.error }
   if (!v.quote) return { state: 'checking', ...none }
   if (v.quoting || !v.fresh) return { state: 'updating', ...none, showTotals: true, reason: blockOf(v.quote) }

@@ -244,7 +244,9 @@ check('checkout: this cart priced and allowed → ready; an empty cart is nothin
   const pc = need(C, 'priceCheck')
   eq(pick(pc({ lines: 2, quote: quote(), fresh: true, quoting: false, error: '' })), ['ready', true, true])
   eq(pick(pc({ lines: 2, quote: quote({ can_submit: undefined }), fresh: true, quoting: false, error: '' })), ['ready', true, true], 'an older API without the flag')
-  eq(pick(pc({ lines: 0, quote: null, fresh: false, quoting: false, error: '' })), ['empty', false, false])
+  // an empty cart is nothing to price and its total is genuinely zero: no placeholder that pulses as
+  // if something were loading (the checkout's footer shows the total even with no lines)
+  eq(pick(pc({ lines: 0, quote: null, fresh: false, quoting: false, error: '' })), ['empty', false, true])
 })
 
 check('useQuote: an error belongs to the request it answered; a new cart or a Retry is "checking" again', () => {
