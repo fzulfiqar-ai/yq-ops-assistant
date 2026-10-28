@@ -6,6 +6,7 @@ import { setSource } from '@/market/lib/events'
 import { watchInstallPrompt } from '@/market/lib/install'
 import { startErrorReporting } from '@/market/lib/errors'
 import { startVitals } from '@/market/lib/vitals'
+import { AssistHost } from '@/market/assist/AssistLauncher'
 import { MarketProvider, useMarket } from '@/market/MarketContext'
 import Home from '@/market/pages/Home'
 import { Shell } from '@/market/shell/Shell'
@@ -26,6 +27,7 @@ const QuickOrderPage = lazy(() => import('@/market/pages/QuickOrderPage'))
 const LegacyRedirect = lazy(() => import('@/market/pages/LegacyRedirect'))
 const AboutPage = lazy(() => import('@/market/pages/AboutPage'))
 const BrandPage = lazy(() => import('@/market/pages/BrandPage'))
+const AskPage = lazy(() => import('@/market/assist/AskPage'))
 
 /**
  * YQ Marketplace — the merchant front door (built with VITE_APP=market, its own hostname, its own
@@ -130,6 +132,8 @@ export default function MarketApp() {
               <Suspense fallback={null}>
                 <Routes>
                   <Route element={<Shell />}>
+                    {/* AssistHost: pathless layout inside the Shell; renders the Ask YQ launcher (only when settings.ai_enabled) */}
+                    <Route element={<AssistHost />}>
                     <Route path="/" element={<Home />} />
                     <Route path="/p/:code" element={<Home />} />
                     <Route path="/t/:category" element={<CategoryPage />} />
@@ -145,7 +149,9 @@ export default function MarketApp() {
                     <Route path="/orders" element={<MyOrdersPage />} />
                     <Route path="/me" element={<MyYQPage />} />
                     <Route path="/o/:token" element={<TrackingPage />} />
+                    <Route path="/ask" element={<AskPage />} />
                     <Route path="/:slug" element={<Home />} />
+                    </Route>
                   </Route>
                   <Route path="/c/:token" element={<LegacyRedirect />} />
                   <Route path="*" element={<Navigate to="/" replace />} />

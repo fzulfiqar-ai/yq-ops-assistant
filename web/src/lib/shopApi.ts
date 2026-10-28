@@ -157,6 +157,8 @@ export interface MarketPromise {
 
 export interface ShopSettings {
   currency?: string | null
+  /** YQ Assist: the chat assistant is on (nothing is shown unless this is true). */
+  ai_enabled?: boolean
   /** Marketplace v2.1: the promise bar, edited by the office. */
   promises?: MarketPromise[] | null
   min_order_bhd?: number | null
