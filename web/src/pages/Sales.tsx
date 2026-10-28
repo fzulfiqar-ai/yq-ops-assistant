@@ -6,7 +6,6 @@ import { CalendarDays, Store, Truck, UserRound, X } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
-import { panelState } from '@/lib/dataState'
 import { useSkeletonFade } from '@/lib/motionOnce'
 import { ChartBox, FadeIn } from '@/lib/motionKit'
 import { REP_PARAM, matchSalesman } from '@/lib/searchRoute'
@@ -124,7 +123,6 @@ const sellerCols: Column<Seller>[] = [
 
 export default function Sales() {
   const { data, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'sales'], queryFn: () => apiGet<Data>('/report/sales') })
-  const state = panelState({ data, isError })
   const fade = useSkeletonFade(data !== undefined)
   // ?rep=<name>: one salesman, as the command palette's salesman result opens the page
   const [sp] = useSearchParams()
@@ -141,16 +139,17 @@ export default function Sales() {
         actions={rep ? (
           <span className="inline-flex items-center gap-1.5 rounded-full border bg-card py-1 pl-2.5 pr-1 text-[12px] font-semibold">
             <UserRound size={13} className="shrink-0 text-primary" aria-hidden="true" />
-            {repName ?? rep}{state === 'ready' && !repName && <span className="font-normal text-muted-foreground"> · not in these figures</span>}
+            {repName ?? rep}{data && !repName && <span className="font-normal text-muted-foreground"> · not in these figures</span>}
             <Link to="/sales" aria-label="Clear the rep" title="Clear the rep"
               className="grid h-6 w-6 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
               <X size={13} />
             </Link>
           </span>
         ) : undefined} />
-      {state === 'error' ? (
+      {/* lib/dataState.ts's rule, in the words the R7a suite holds: an error only with nothing on screen */}
+      {isError && !data ? (
         <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load sales." />
-      ) : state === 'loading' || !data ? (
+      ) : !data ? (
         <SalesSkeleton />
       ) : (
         <FadeIn on={fade} className="space-y-4">

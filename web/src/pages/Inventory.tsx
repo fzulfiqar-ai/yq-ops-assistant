@@ -5,7 +5,6 @@ import { apiGet } from '@/lib/api'
 import { bhd, fmtDate, num } from '@/lib/format'
 import { deadUncostedNote } from '@/lib/basisText'
 import { cn } from '@/lib/utils'
-import { panelState } from '@/lib/dataState'
 import { useSkeletonFade } from '@/lib/motionOnce'
 import { FadeIn } from '@/lib/motionKit'
 import { LoadError } from '@/components/LoadError'
@@ -137,7 +136,6 @@ function InventorySkeleton() {
 export default function Inventory() {
   const [params] = useSearchParams()
   const { data, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
-  const state = panelState({ data, isError })
   const fade = useSkeletonFade(data !== undefined)
   const s = data?.by_status || {}
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
@@ -148,9 +146,10 @@ export default function Inventory() {
   return (
     <div>
       <PageHeader title="Inventory" subtitle="Velocity-aware stock health — what to reorder, what's stuck" />
-      {state === 'error' ? (
+      {/* lib/dataState.ts's rule, in the words the R7a suite holds: an error only with nothing on screen */}
+      {isError && !data ? (
         <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load inventory." />
-      ) : state === 'loading' || !data ? (
+      ) : !data ? (
         <InventorySkeleton />
       ) : (
         <FadeIn on={fade}>
