@@ -776,14 +776,60 @@ them into words. `_ANSWER` is now a salesman persona with one grounded example, 
 | No model | `rule_action` also reads "does it fit my phone?" and answers with the phone question. |
 | Tests; the scorecard | `tests/test_assist_sales.py`; `tests/assist_cases.yaml` (`before`, `clarify`, `cards_like`) and `scripts/eval_assist.py` (gates `clarify` 100%, `next` ≥ 90%, `context` ≥ 90%; `asks` and fallbacks printed) |
 
+## YQ Assist 2.2: one conversation, a human voice; the mark and a smarter bubble (built 29-Oct-2026, release assist2.2)
+
+The owner, before showing it to others (29-Oct-2026):
+- The purple orb is empty: put the YQ logo in it, same colours, only where the orb is empty, on phone and desktop.
+- The bubble always says the same: make it smart (offers, clearing lines) and different after some time.
+- "Still it doesn't talk like human... one conversation, I asked different questions but same reply. I want the
+  best chat agent in my platform." Then: "Make sure you fix all and it should sound like human."
+- "When I click report a problem it takes directly to rep. The AI try to solve problem if it can not then move to
+  rep."
+
+His decisions: the messages rotate among clearing lines, best sellers and "your usual is in stock" (his campaigns
+lead; real price drops and new lines join when there are any); once per visit, a new message each visit; "Notify
+me" on sold-out cards in the chat. Release steps: docs/RELEASE.md § Release assist2.2.
+
+**Part A: the mark, the reach-out lines, notify.**
+
+| What | How (`app/market_assist.py` unless named) |
+|---|---|
+| The YQ mark | `web/public/yq-mark.svg`: the logo's white "yq?" traced to vector (1.8 KB). `Orb` (`mark`, on by default) masks it in white above the moving light, in every orb with no icon of its own: the chat header, the replies, the desktop button. The phone button keeps its chat icon. Never mirrored in Arabic. |
+| The reasons to speak first | `reach_hooks()`, strongest first, each only when the data holds it: his live campaign (audience "all", in his words, in-stock codes only), an item this phone asked "Tell me when back" for that is in stock now (`asked_back`, its own device id), the shop's usual in stock, a real price drop, new lines, clearing lines (3 or more, "at the normal trade price", never "sale" or a discount), what sells. |
+| A new message each visit | `pick_hook()` skips the hook ids this browser saw lately (`seen`, at most 6, localStorage `yq-assist-seen`). The chat's first line (`hello`) skips the one the bubble just showed. Evergreen lines have two wordings, alternated by day. |
+| The bubble's call | `action: nudge` (no model, no budget, not a turn): `{reply, next: [the tap], hook}`. The launcher asks it when the 15 s timer fires (2 s cap, else the static line). A tap opens the chat on that line's answer; the turn is logged with `topic = "nudge:<hook>"`, so which line sells can be counted (no migration). |
+| Names with the codes | `label_for()`: "the X01 UC Type-C cable", "the UK04 20W charger" (Arabic «شاحن UK04 20 واط»): the code, the one word that sets it apart (connector, watts, mAh; multi-connector, 2-in-1, 3-in-1, AUX to Type-C) and what it is, from the item's own name, spec and category. |
+| Clearing lines said honestly | Offers that are all clearing lines read "the lines we're clearing at the normal trade price"; the chip reads "Clearing lines" (`badge:clearance`). |
+| Tell me when it's back | A sold-out first card gets the page-only chip `{action: "notify", q: code}` (`PAGE_ACTIONS`), handled by `NotifyChip` with the market's own `useTellBack` (the rep's list, a phone asked for first). |
+
+**Part B: a conversation, not a string of first answers.** Measured on 13 shop-owner conversations (English, Arabic,
+Roman Urdu; 34 turns) on the lab with the real free models, every line read: 40 flagged before (repeats, the same
+cards, figure readouts, dead ends, empty replies), 2 after (one empty reply when no model answered, one expected
+"same cards" on "which one is better?").
+
+| What | How |
+|---|---|
+| Routing | `_UNDERSTAND` gains `advice` (how to sell more, push sales, profit, how can you help), `price` ("how much is it?") and `more` ("what else?"). "What should I order / I'm opening a shop" is a plan; a complaint about the products or the service is a `ticket`, never small talk or a product idea. |
+| Memory | The previous assistant turn's intent, cards and topic (`server_history` reads `topic`). The same ask again, or "more", shows only what the chat has not shown, in its own line (`top_more`, `top_more_b`), and never the same question twice. A template line the chat just sent is never sent again word for word (`_follow_up`: `account_again`, `orders_again`, …). A budget after a plan rebuilds it ("Done, I've rebuilt it…"). |
+| The voice | `_ANSWER`: react to what they wrote and answer it first; a complaint gets one real apology; names from the facts' `say`; at most one number (only the first card carries its shop count); never repeat a sentence of the chat; no hype, no guesses (who buys it, why, the season, the weather, their shop); temperature 0.4; the next step given last, outside the data. No example product to copy (2.1's "AB12 … 13 shops" came back as a stats readout and once as a real product). |
+| After the model writes | `_polish()`: a sentence naming a product code that is neither in the catalogue nor in the chat goes (a model offered an "XP-1000" stand), so does one that guesses ("You mentioned…", "fresh arrivals", "for summer") or gives a stock level; hype is said plainly; no "Ah," opener; three sentences at most, the closing question kept. |
+| Languages | The model writes English replies only. Arabic (and Urdu or Hindi in their own script) get the office's own template lines, because the free models' Arabic came out garbled in the lab. Roman Urdu or Hindi typed in Latin letters get simple English. |
+| Sales help | `_h_advice` (also a chip action): from today's data, what is moving across Bahrain, what shops sell with it, the shop's usual when known; then the starter order. |
+| Price | `_h_price`: the price is on the card (the catalogue's trade price per piece, VAT included), never typed by a model; the cards are the ones asked about, or those on screen. |
+| Which is better | A comparison by the specs of the first two cards, then which matters more to their customers. |
+| Problems, AI first | `_support()`: what happened (damaged, not working, wrong or missing, late, or their own words). Not working: the quick checks for that kind of product (`fix_*`, read from the code, the words or a kind chip), then "Did that fix it?". Late: the order's real status. A replacement, a refund, a fault the checks did not fix, or a delivery still late: the rep (`support_replace`, `support_refund`, `support_still`, `support_late`), or the report card while tickets are on. The step is logged as `topic = "issue:<kind>"` (`:checked` once the checks were given). An angry merchant gets the rep as a chip during the triage. |
+| No model | Greetings and thanks get a person's line; "what should I order" and "help me sell more" get their answers; "how much is it?" gets the cards on screen. |
+| Tests; the scorecard | `tests/test_assist_sales.py` (§ 5 and 6); `tests/assist_cases.yaml` (the owner's cases) and `scripts/eval_assist.py` (gate `fresh` 100%: no sentence said earlier in the case's conversation). |
+
 ## Not done yet (in order)
 
 - **YQ Assist, after v2** (each on the owner's go): voice sent at once when the transcript is clear; "Add to quality
   case" from a damage ticket (Market Intel cases); the same brain on WhatsApp (Cloud API keys); web push for
   back-in-stock and ticket updates; a salesman co-pilot ("what to push to this shop today"); Urdu, Hindi and
-  Malayalam template lines; seeding the scorecard from real chat turns. After 2.1: the rep offered after two misses
-  or two thumbs-down in one chat; "Notify me" on a sold-out chat card; a shop's preferences remembered across visits
-  beyond "my usual".
+  Malayalam template lines; seeding the scorecard from real chat turns. After 2.2: the rep offered after two misses
+  or two thumbs-down in one chat; a shop's preferences remembered across visits beyond "my usual"; a speed pass
+  (p95 above 4 s on two-call turns); the cart-below-minimum message; Arabic worded by a model once one writes it
+  well.
 - **7 SKUs still have no photo.**
 - Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
   from Focus history (needs `focus_customer_id` links) · web push · a real `shop_clearance_pct`

@@ -22,6 +22,7 @@ after a follow-up match it). "asks" (the reply's own last sentence is a question
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import statistics
@@ -39,9 +40,19 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 
 GATES = {"intent": 0.92, "sold_out": 1.0, "escalate": 0.95, "official": 1.0, "lang": 0.95, "leak": 1.0,
-         "clarify": 1.0, "next": 0.90, "context": 0.90}
+         "clarify": 1.0, "next": 0.90, "context": 0.90, "fresh": 1.0}
 # the answers that sell (2.1): each should end on a question or an offer, or carry quick replies
-_SELLING = ("find", "fit", "add", "top", "deals", "plan", "usual", "chat", "clarify", "show")
+_SELLING = ("find", "fit", "add", "top", "deals", "plan", "usual", "chat", "clarify", "show", "advice", "price")
+_SENT = re.compile(r"(?<=[.!?؟])\s+")
+
+
+def repeats(reply: str, earlier: list[str]) -> bool:
+    """2.2 B (owner: "I asked different questions but same reply"): a sentence of this reply already said in the
+    case's conversation (0.85 alike or more)."""
+    said = [s.strip().lower() for e in earlier for s in _SENT.split(re.sub(r"\s*\[cards: [^\]]*\]", "", e))
+            if len(s.strip()) > 12]
+    return any(difflib.SequenceMatcher(None, s.strip().lower(), p).ratio() >= 0.85
+               for s in _SENT.split(reply) if len(s.strip()) > 12 for p in said)
 _LEAKS = [re.compile(p, re.I) for p in (
     r"\b[0-9]{7,}\b", r"\[(?:number|email|link)\]", r"[\w.+-]+@[\w-]+\.", r"https?://|www\.",
     r"\b[0-9]+\s*(?:pcs|pieces|units)\s+(?:in|left)", r"you are yq assist", r"<\s*/?\s*data", r"intent is exactly",
@@ -145,6 +156,8 @@ def main() -> int:
         times.append(ms)
         reply = str(res.get("reply") or "")
         got: dict[str, bool] = {}
+        if c.get("before") and reply and not res.get("fallback"):
+            got["fresh"] = not repeats(reply, [h["text"] for h in conv if h["role"] == "assistant"])
         if c.get("clarify"):
             got["clarify"] = (res.get("intent") == "clarify" and not res.get("miss") and bool(res.get("next"))
                               and not res.get("handoff"))
