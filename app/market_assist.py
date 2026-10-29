@@ -48,7 +48,10 @@ INTENTS = ("find", "fit", "add", "list", "order_status", "usual", "handoff", "fe
            "top", "deals", "plan", "ticket", "ticket_status", "policy", "account")
 # the chat's tiles and chips: each is answered from data, with no model call (2.1: the phone question, a card by
 # its code, catalogue words, the opening line)
-ACTIONS = ("top", "deals", "plan", "usual", "orders", "handoff", "ticket", "tickets", "fit", "show", "find", "hello")
+ACTIONS = ("top", "deals", "plan", "usual", "orders", "handoff", "ticket", "tickets", "fit", "show", "find", "hello",
+           "nudge")
+# 2.2: a quick reply the page answers itself, never sent here: "Tell me when it's back" (the card's own restock request)
+PAGE_ACTIONS = ("notify",)
 MAX_NEXT = 4              # quick replies under one answer
 ISSUES = ("damaged", "wrong_item", "missing", "not_working", "delivery", "return", "other")
 _IN_STOCK = ("in_stock", "low_stock")
@@ -213,30 +216,34 @@ def server_history(ids, session_id: str | None, device_id: str | None) -> list[d
 # ── the public catalog, parsed once per refresh ────────────────────────────────────────────────
 
 _cat_lock = threading.Lock()
-_cat: dict = {"etag": None, "items": [], "by_code": {}, "settings": {}, "pairs": {}, "stock_as_of": None}
+_cat: dict = {"etag": None, "items": [], "by_code": {}, "settings": {}, "pairs": {}, "stock_as_of": None,
+              "campaigns": []}
 
 
 def public_catalog() -> dict:
-    """{items, by_code (upper-cased), settings, pairs, stock_as_of}: the public payload every visitor gets,
-    parsed once per context refresh. Reading the PUBLIC bytes (not the context) is the guarantee that
-    nothing the marketplace does not already show can reach a model."""
+    """{items, by_code (upper-cased), settings, pairs, stock_as_of, campaigns}: the public payload every visitor
+    gets, parsed once per context refresh. Reading the PUBLIC bytes (not the context) is the guarantee that
+    nothing the marketplace does not already show can reach a model. 2.2: the campaigns live for every visitor
+    (audience "all"), whose own words the reach-out line may use."""
     from app.catalog import share_token
     ctx = shop.context()
     tok = ctx.get("share_token") or share_token(create=True)
     entry = shop.public_catalog_entry(tok, None)
     if entry is None:
-        return {"items": [], "by_code": {}, "settings": {}, "pairs": {}, "stock_as_of": None}
+        return {"items": [], "by_code": {}, "settings": {}, "pairs": {}, "stock_as_of": None, "campaigns": []}
     with _cat_lock:
         if _cat["etag"] != entry["etag"]:
             data = json.loads(entry["raw"])
             items = data.get("items") or []
             pairs = {str(p.get("item_code") or "").upper(): list(p.get("with") or [])
                      for p in (data.get("pairs") or []) if isinstance(p, dict)}
+            campaigns = [c for c in (data.get("campaigns") or []) if isinstance(c, dict) and c.get("audience") == "all"]
             _cat.update(etag=entry["etag"], items=items, settings=data.get("settings") or {},
                         by_code={str(i.get("item_code") or "").upper(): i for i in items},
-                        pairs=pairs, stock_as_of=data.get("stock_as_of"))
+                        pairs=pairs, stock_as_of=data.get("stock_as_of"), campaigns=campaigns)
         return {"items": _cat["items"], "by_code": _cat["by_code"], "settings": _cat["settings"],
-                "pairs": _cat.get("pairs") or {}, "stock_as_of": _cat.get("stock_as_of")}
+                "pairs": _cat.get("pairs") or {}, "stock_as_of": _cat.get("stock_as_of"),
+                "campaigns": _cat.get("campaigns") or []}
 
 
 # ── the daily budget (public traffic must never starve the owner's own reports) ────────────────
@@ -670,6 +677,9 @@ def _pool(cat: dict, query: str) -> list[dict]:
     sold with a cable is a charger)."""
     shelf = [it for it in cat["items"] if in_stock(it)]
     q = str(query or "")
+    if q.lower().startswith("badge:"):                      # 2.2: "badge:clearance", the reach-out line's own tap
+        badge = q[6:].strip().lower()
+        return [it for it in shelf if badge in (it.get("badges") or [])]
     key = q[4:].strip().upper() if q.lower().startswith("cat:") else category_named(q)
     if key:
         return [it for it in shelf if str(it.get("category") or "").upper() == key]
@@ -805,6 +815,67 @@ _WHY_WORDS = {
     "alternative": "in stock instead of a sold-out item",
 }
 _BADGE_ORDER = ("best_seller", "trending", "selling_fast", "new", "price_drop", "on_offer", "clearance")
+
+
+# 2.2: a product named the way a person says it, "the X01 UC Type-C cable", so a line never reads as two bare codes
+_KIND = {
+    "en": {"CABLE": "cable", "CHARGER": "charger", "CAR CHARGER": "car charger", "POWER BANK": "power bank",
+           "EARPHONE": "earphones", "BLUETOOTH HEADSET": "earbuds", "BLUETOOTH SPEAKER": "speaker",
+           "CAR ACCESSORIES": "car holder"},
+    "ar": {"CABLE": "كيبل", "CHARGER": "شاحن", "CAR CHARGER": "شاحن سيارة", "POWER BANK": "باور بنك",
+           "EARPHONE": "سماعة سلكية", "BLUETOOTH HEADSET": "سماعة بلوتوث", "BLUETOOTH SPEAKER": "مكبر صوت",
+           "CAR ACCESSORIES": "حامل سيارة"},
+}
+_WATTS = re.compile(r"(?i)(?<![0-9.])([0-9]{1,3})\s?w\b")
+_MAH = re.compile(r"(?i)(?<![0-9])([0-9]{4,5})\s?mah\b")
+_THREE_IN_ONE = re.compile(r"(?i)3\s?in\s?1")
+
+
+def _spec_word(it: dict, lang: str) -> str:
+    """The one thing that tells an item from its neighbours on the shelf: a cable's connector, a charger's watts,
+    a power bank's capacity; "" when the name and spec say none."""
+    t = f"{it.get('display_name') or ''} {it.get('spec') or ''}"
+    cat = str(it.get("category") or "").upper()
+    ar = lang == "ar"
+    if cat in ("CABLE", "EARPHONE"):
+        lit, usbc = _CONN_RX["lightning"].search(t), _CONN_RX["usb-c"].search(t)
+        if _THREE_IN_ONE.search(t):
+            return "٣ في ١" if ar else "3-in-1"
+        if lit and usbc:
+            return "تايب سي إلى لايتنينج" if ar else "Type-C to Lightning"
+        if lit:
+            return "لايتنينج" if ar else "Lightning"
+        if usbc:
+            return "تايب سي" if ar else "Type-C"
+        if re.search(r"(?i)micro", t):
+            return "مايكرو" if ar else "micro USB"
+        if re.search(r"(?i)\baux\b|3\.5", t):
+            return "3.5mm" if cat == "EARPHONE" else "AUX"
+        return ""
+    if cat in ("CHARGER", "CAR CHARGER"):
+        watts = [int(w) for w in _WATTS.findall(t)]
+        return (f"{max(watts)} واط" if ar else f"{max(watts)}W") if watts else ""
+    if cat == "POWER BANK":
+        m = _MAH.search(t)
+        return f"{m.group(1)}mAh" if m else ""
+    return ""
+
+
+def label_for(it: dict, lang: str = "en") -> str:
+    """"the X01 UC Type-C cable", "the UK04 20W charger" (Arabic: «شاحن UK04 20 واط»): the code, the one word that
+    sets it apart, and what it is. Only words the item's own name, spec and category give."""
+    code = str(it.get("item_code") or "")
+    kind = _KIND.get(lang, _KIND["en"]).get(str(it.get("category") or "").upper(), "")
+    spec = _spec_word(it, lang)
+    if lang == "ar":
+        return " ".join(x for x in (kind, code, spec) if x)
+    return "the " + " ".join(x for x in (code, spec, kind) if x)
+
+
+def _labels(cat: dict, codes: list[str], T: dict) -> str:
+    """Up to two items by name, joined the language's way ("the X and the Y" / «X وY»)."""
+    items = [cat["by_code"][c.upper()] for c in codes if c.upper() in cat["by_code"]][:2]
+    return T["and"].join(label_for(it, T.get("lang", "en")) for it in items) or _join(codes, T)
 
 
 def _what_it_is(it: dict) -> str:
@@ -977,6 +1048,17 @@ def next_step(cat: dict, shown: list[str], T: dict, seen: str = "", *, ask_phone
     if ask_phone is not None:
         return "Ask which phone it is for, so you can check it fits.", phone_chips(T, ask_phone)
     first = by.get(str(shown[0]).upper()) if shown else None
+    if first and not in_stock(first):
+        # 2.2 (owner: "notify me on sold out"): the sale is not lost to "sold out": the card's own restock request,
+        # then what is in stock instead
+        alt = next((by[str(c).upper()] for c in shown[1:] if str(c).upper() in by and in_stock(by[str(c).upper()])), None)
+        chips = [{"label": T["chip_notify"], "action": "notify", "q": first["item_code"]}]
+        if alt:
+            chips.append(_show_chip(T, alt["item_code"]))
+        return (f"Say {first['item_code']} is sold out right now and offer to tell them when it is back (the 'Tell me "
+                "when it's back' button under your answer)" + (f"; then offer {alt['item_code']}, which is in stock."
+                                                                 if alt else "."),
+                chips + [_chip(T, "top")])
     if broad and first and str(first.get("category") or "").upper() == "CABLE":
         return ("Ask which connector they need: USB-C, Lightning (iPhone 14 and older) or micro USB.",
                 _conn_chips(T))
@@ -989,7 +1071,7 @@ def next_step(cat: dict, shown: list[str], T: dict, seen: str = "", *, ask_phone
     if deal:
         it, why = deal
         return (f"Mention {it['item_code']} in the same category: {_WHY_WORDS[why]}.",
-                [_show_chip(T, it["item_code"]), _chip(T, "deals")])
+                [_show_chip(T, it["item_code"]), deals_chip(cat, T)])
     return "Ask how many pieces they need, or offer to plan the whole order.", [_chip(T, "plan"), _chip(T, "top")]
 
 
@@ -1208,12 +1290,13 @@ def _h_top(cat: dict, query: str, T: dict, seen: str = "") -> tuple[dict, str] |
     if not pairs:
         return None
     items, cards = _cards(pairs)
-    line = T["top"].format(a=_join(items, T))
+    named = _labels(cat, items, T)                  # 2.2: "the X01 UC Type-C cable", never two bare codes
+    line = T["top"].format(a=named)
     if query:                           # already narrowed to a category or phone: what goes with the first one
         hint, chips = next_step(cat, items, T, seen)
         pair = pair_for(cat, items, seen)
-        line = (T["top_pair"].format(a=_join(items, T), code=pair[0]["item_code"], pair=pair[1]["item_code"]) if pair
-                else T["top_narrow"].format(a=_join(items, T)))
+        line = (T["top_pair"].format(a=named, code=pair[0]["item_code"], pair=_labels(cat, [pair[1]["item_code"]], T))
+                if pair else T["top_narrow"].format(a=named))
     else:                               # the whole shelf: which category to open first (store-associate style)
         hint, chips = ("Ask which category they sell most, so you can show its best sellers.",
                        category_chips(cat, T) + [_chip(T, "plan")])
@@ -1225,7 +1308,11 @@ def _h_deals(cat: dict, query: str, T: dict) -> tuple[dict, str]:
     pairs = deal_picks(cat, query)
     if pairs:
         items, cards = _cards(pairs)
-        return _with_hint(_result("deals", T["deals"].format(a=items[0]), items=items, cards=cards, next=chips),
+        # 2.2: clearing lines sell at the normal trade price: when they are all there is, they are called that,
+        # never "offers" (the home page's own words: "Lines we're clearing, at the normal trade price")
+        only_clearing = all(why == "clearance" for _it, why in pairs)
+        line = (T["clearance"] if only_clearing else T["deals"]).format(a=_labels(cat, items[:1], T))
+        return _with_hint(_result("deals", line, items=items, cards=cards, next=chips),
                           "Offer to put some of them in their order."), "answered"
     pairs = top_picks(cat, query)              # no offer on that today: what sells, in stock, instead
     items, cards = _cards(pairs)
@@ -1245,7 +1332,7 @@ def _h_plan(cat: dict, tokens: list[str], budget: float | None, ref: str | None,
     add = [{"item_code": ln["item_code"], "qty": ln["qty"]} for ln in lines]
     res = _result("plan", T["plan"] if plan["usual"] else T["plan_new"], lines=lines, add=add, plan=plan,
                   cards=[{"code": ln["item_code"], "why": ln["why"]} for ln in lines],
-                  next=[_chip(T, "deals"), _chip(T, "top")])
+                  next=[deals_chip(cat, T), _chip(T, "top")])
     return _with_hint(res, "Ask whether to change any quantity before they add it all in one tap."), "answered"
 
 
@@ -1314,7 +1401,8 @@ def _h_show(cat: dict, q: str, T: dict) -> tuple[dict, str]:
     shown, cards, alts = product_cards(cat, found)
     _hint, chips = next_step(cat, shown, T)
     code = found[0]["item_code"]
-    line = T["sold_out_alts"].format(code=code) if code in alts or not in_stock(found[0]) else T["show"].format(code=code)
+    line = (T["show"].format(code=code) if in_stock(found[0])
+            else T["sold_out_alts"].format(code=code) if code in alts else T["sold_out_notify"].format(code=code))
     return _result("show", line, items=shown, cards=cards, alts=alts, next=chips), "answered"
 
 
@@ -1328,37 +1416,157 @@ def _h_find_words(cat: dict, q: str, T: dict) -> tuple[dict, str]:
     return _result("find", T["found"], items=shown, cards=cards, alts=alts, next=chips), "answered"
 
 
-def _h_hello(cat: dict, tokens: list[str], item: dict | None, T: dict) -> dict:
-    """The chat speaks first (ChatGPT Pulse style, from this phone's own history): the product open on the page and
-    what shops take with it; else this phone's usual items in stock; else what shops order most. No model, no
-    budget, not a turn."""
-    by = cat["by_code"]
-    if item:
-        code = item["item_code"]
-        if not in_stock(item):
-            alt = alternatives_for(cat, item, limit=1)
-            if alt:
-                return _result("hello", T["hello_item_sold_out"].format(code=code, pair=alt[0]),
-                               next=[_show_chip(T, alt[0]), _chip(T, "top")])
-        pair = pair_for(cat, [code])
-        if pair:
-            return _result("hello", T["hello_item"].format(code=code, pair=pair[1]["item_code"]),
-                           next=[_chip(T, "fit"), _show_chip(T, pair[1]["item_code"]), _chip(T, "top")])
-        return _result("hello", T["hello_item_solo"].format(code=code), next=[_chip(T, "fit"), _chip(T, "top")])
+def asked_back(cat: dict, device_id: str | None) -> list[str]:
+    """The items this phone asked "Tell me when back" for (shop_restock_requests, its own device id only) that are
+    in stock now, newest request first."""
+    if not device_id:
+        return []
+    try:
+        rows = (shop.get_client().table("shop_restock_requests").select("item_code,created_at")
+                .eq("device_id", device_id).order("created_at", desc=True).limit(10).execute().data or [])
+    except Exception as e:  # noqa: BLE001 — no answer is no message, never an error
+        log.debug("assist: restock read failed: %s", e)
+        return []
+    out: list[str] = []
+    for r in rows:
+        it = cat["by_code"].get(str(r.get("item_code") or "").upper())
+        if it and in_stock(it) and it["item_code"] not in out:
+            out.append(it["item_code"])
+    return out
+
+
+def deals_chip(cat: dict, T: dict) -> dict:
+    """The offers chip, named for what is really there: "Today's deals" with a live offer or a real price drop,
+    "Clearing lines" when the clearing lines (at the normal trade price) are all there is."""
+    live = [it for it in cat["items"] if in_stock(it)]
+    if not any(b in (it.get("badges") or []) for it in live for b in ("price_drop", "on_offer")) and \
+            any("clearance" in (it.get("badges") or []) for it in live):
+        return {"label": T["chip_clearance"], "action": "deals", "q": "badge:clearance"}
+    return _chip(T, "deals")
+
+
+def _codes_q(codes: list[str]) -> str:
+    """Up to MAX_CARDS codes for one "show" tap, inside the request's 60-character q."""
+    out = ""
+    for c in codes[:MAX_CARDS]:
+        if len(out) + len(c) + 1 > 60:
+            break
+        out = f"{out},{c}" if out else c
+    return out
+
+
+def _variant(T: dict, key: str) -> str:
+    """A line's second wording on odd days, so an evergreen message does not read the same every visit."""
+    alt = f"{key}_b"
+    return T[alt] if alt in T and datetime.now(timezone.utc).toordinal() % 2 else T[key]
+
+
+def reach_hooks(cat: dict, tokens: list[str], device_id: str | None, T: dict) -> list[dict]:
+    """Every honest reason to speak first, strongest first (owner, 29-Oct-2026: clearing lines, best sellers, "your
+    usual"; his own campaigns lead; real price drops and new lines join when there are any). Each is
+    {id, nudge (the bubble's line), hello (the opening line), tap (the bubble's one action), chips}, and each only
+    when the data holds it."""
+    by, lang = cat["by_code"], T.get("lang", "en")
+    live = [it for it in cat["items"] if in_stock(it)]
+    hooks: list[dict] = []
+    for c in cat.get("campaigns") or []:                  # the office's own campaign, in its own words
+        codes = [str(x) for x in (c.get("product_codes") or []) if in_stock(by.get(str(x).upper()) or {})]
+        title = _clean_text((c.get("title_ar") if lang == "ar" and c.get("title_ar") else c.get("title")), 80)
+        title = title.rstrip(" .!?؟،")
+        if codes and title:
+            tap = {"label": T["chip_see"], "action": "show", "q": _codes_q(codes)}
+            hooks.append({"id": f"campaign-{c.get('id')}"[:24], "nudge": T["nudge_campaign"].format(title=title),
+                          "hello": T["hello_campaign"].format(title=title), "tap": tap, "chips": [tap, _chip(T, "top")]})
+            break
+    back = asked_back(cat, device_id)
+    if back:
+        tap = _show_chip(T, back[0])
+        hooks.append({"id": "back", "nudge": T["nudge_back"].format(code=back[0]),
+                      "hello": T["hello_back_for_you"].format(a=_labels(cat, back[:1], T)), "tap": tap,
+                      "chips": [tap, _chip(T, "top")]})
     try:
         usual = [ln["item_code"] for ln in (usual_lines(cat, tokens) if tokens else [])
                  if in_stock(by.get(ln["item_code"].upper()) or {})]
-    except Exception as e:  # noqa: BLE001 — the opening line falls back to what sells
-        log.debug("assist: hello usual read failed: %s", e)
+    except Exception as e:  # noqa: BLE001 — the line falls back to the next reason
+        log.debug("assist: usual read failed: %s", e)
         usual = []
-    # the quick replies answer the line's own question (the tiles below already offer everything else)
     if usual:
-        return _result("hello", T["hello_back"].format(a=_join(usual, T)),
-                       next=[{"label": T["chip_yes"], "action": "usual"}, _chip(T, "deals")])
+        tap = {"label": T["chip_yes"], "action": "usual"}
+        hooks.append({"id": "usual", "nudge": T["nudge_usual"].format(code=usual[0]),
+                      "hello": T["hello_back"].format(a=_labels(cat, usual, T)), "tap": tap,
+                      "chips": [tap, deals_chip(cat, T)]})
+    drops = [it["item_code"] for it in live if "price_drop" in (it.get("badges") or [])]
+    if drops:
+        tap = _show_chip(T, drops[0])
+        hooks.append({"id": "drop", "nudge": T["nudge_drop"].format(code=drops[0]),
+                      "hello": T["hello_drop"].format(a=_labels(cat, drops[:1], T)), "tap": tap,
+                      "chips": [tap, _chip(T, "deals")]})
+    news = [it["item_code"] for it in live if "new" in (it.get("badges") or [])]
+    if news:
+        tap = {"label": T["chip_see"], "action": "show", "q": _codes_q(news)}
+        hooks.append({"id": "new", "nudge": T["nudge_new"].format(code=news[0]),
+                      "hello": T["hello_new_in"].format(a=_labels(cat, news, T)), "tap": tap,
+                      "chips": [tap, _chip(T, "top")]})
+    clear = [it for it in live if "clearance" in (it.get("badges") or [])]
+    if len(clear) >= 3:
+        tap = {"label": T["chip_clearance"], "action": "deals", "q": "badge:clearance"}
+        hooks.append({"id": "clearance", "nudge": _variant(T, "nudge_clearance").format(n=len(clear)),
+                      "hello": T["hello_clearance"].format(n=len(clear)), "tap": tap, "chips": [tap, _chip(T, "top")]})
     picks = [it["item_code"] for it, _w in top_picks(cat, "", limit=2)]
     if picks:
-        return _result("hello", T["hello_new"].format(a=_join(picks, T)), next=category_chips(cat, T, limit=4))
-    return _result("hello", T["help"], next=category_chips(cat, T, limit=4))
+        hooks.append({"id": "best", "nudge": _variant(T, "nudge_best"),
+                      "hello": T["hello_new"].format(a=_labels(cat, picks, T)), "tap": _chip(T, "top"),
+                      "chips": category_chips(cat, T, limit=4)})
+    return hooks
+
+
+def pick_hook(hooks: list[dict], seen: list[str]) -> dict | None:
+    """The strongest reason this phone has not been shown lately (its last few, `seen`); when every one was, the
+    strongest again. A new visit gets a new message whenever a second one is eligible."""
+    fresh = [h for h in hooks if h["id"] not in seen]
+    return (fresh or hooks or [None])[0]
+
+
+def _item_hook(cat: dict, item: dict, T: dict) -> dict:
+    """The product open on the page: what is in stock instead when it is sold out; else what shops take with it;
+    else the phone question."""
+    code = item["item_code"]
+    if not in_stock(item):
+        alt = alternatives_for(cat, item, limit=1)
+        if alt:
+            tap = _show_chip(T, alt[0])
+            return {"id": "item", "nudge": T["nudge_item_sold_out"].format(code=code), "tap": tap,
+                    "hello": T["hello_item_sold_out"].format(code=code, pair=_labels(cat, alt, T)),
+                    "chips": [tap, _chip(T, "top")]}
+    pair = pair_for(cat, [code])
+    fit = _chip(T, "fit")
+    if pair:
+        return {"id": "item", "nudge": T["nudge_fit"], "tap": fit,
+                "hello": T["hello_item"].format(code=code, pair=_labels(cat, [pair[1]["item_code"]], T)),
+                "chips": [fit, _show_chip(T, pair[1]["item_code"]), _chip(T, "top")]}
+    return {"id": "item", "nudge": T["nudge_fit"], "tap": fit, "hello": T["hello_item_solo"].format(code=code),
+            "chips": [fit, _chip(T, "top")]}
+
+
+def _h_hello(cat: dict, tokens: list[str], item: dict | None, T: dict, device_id: str | None = None,
+             seen: list[str] | None = None) -> dict:
+    """The chat speaks first (ChatGPT Pulse style, from this phone's own history and the shelf): the product open on
+    the page, else the strongest reason this phone has not seen lately (2.2: reach_hooks). No model, no budget, not a
+    turn. The chips answer the line's own question (the tiles below already offer everything else)."""
+    hook = _item_hook(cat, item, T) if item else pick_hook(reach_hooks(cat, tokens, device_id, T), seen or [])
+    if not hook:
+        return _result("hello", T["help"], next=category_chips(cat, T, limit=4))
+    return _result("hello", hook["hello"], next=hook["chips"], hook=hook["id"])
+
+
+def _h_nudge(cat: dict, tokens: list[str], item: dict | None, T: dict, device_id: str | None = None,
+             seen: list[str] | None = None) -> dict:
+    """The bubble beside the button (2.2): the same reasons as the opening line, one short line and the one thing a tap
+    opens. No model, no budget, not a turn."""
+    hook = _item_hook(cat, item, T) if item else pick_hook(reach_hooks(cat, tokens, device_id, T), seen or [])
+    if not hook:
+        return _result("nudge", "")
+    return _result("nudge", hook["nudge"], next=[hook["tap"]], hook=hook["id"])
 
 
 def _h_handoff(tokens: list[str], ref: str | None, T: dict) -> tuple[dict, str]:
@@ -1502,15 +1710,20 @@ def ask(body: dict, ip: str | None = None, emit=_no_emit) -> dict:
                "lang": ui_lang, "message": message, "ip": ip}
 
     action = _clean_text(body.get("action"), 16).lower()
-    if action == "hello":            # the opening line: from data, no budget, not a turn of the conversation
-        res = _h_hello(cat, tokens, item, TEMPLATES[ui_lang])
+    if action in ("hello", "nudge"):  # the opening line and the bubble's line: from data, no budget, not a turn
+        seen = [_clean_text(s, 24) for s in (body.get("seen") or []) if isinstance(s, str)][:6]
+        speak = _h_hello if action == "hello" else _h_nudge
+        res = speak(cat, tokens, item, TEMPLATES[ui_lang], log_row["device_id"], seen)
         res.pop("_hint", None)
         return res
     if action in ACTIONS:
         log_row["message"] = message or f"[{action}]"
         res, outcome = _act(action, cat, tokens, ref, TEMPLATES[ui_lang], log_row["device_id"],
                             _clean_text(body.get("q"), 60), item)
-        return _finish(res, log_row, outcome, "", "", t0, action=action)
+        # a turn a reach-out line opened says which line (which message sells, counted from the turn log)
+        hook = _clean_text(body.get("nudge"), 24)
+        return _finish(res, log_row, outcome, "", "", t0, action=action,
+                       topic=f"nudge:{hook}" if re.fullmatch(r"[a-z0-9-]{1,24}", hook or "") else None)
 
     # the line breaks of a pasted list live in the raw text (`message` is folded onto one line)
     pasted = pasted_list(cat, mask(str(body.get("message") or "")[:MAX_MESSAGE]))
@@ -1640,7 +1853,7 @@ def ask(body: dict, ip: str | None = None, emit=_no_emit) -> dict:
                                      "what is selling.", amounts, history)
             except AllProvidersFailed:
                 text, prov2 = "", ""
-        return done(_result("chat", text or T["help"], next=[_chip(T, "top"), _chip(T, "deals"), _chip(T, "plan")]),
+        return done(_result("chat", text or T["help"], next=[_chip(T, "top"), deals_chip(cat, T), _chip(T, "plan")]),
                     "answered", prov2, _ms(t1))
 
     # find · fit · add: the catalogue
@@ -1705,6 +1918,7 @@ def ask(body: dict, ip: str | None = None, emit=_no_emit) -> dict:
     code = found[0]["item_code"]
     fallback_line = (T["clarify_phone_item"].format(code=code) if ask_phone
                      else T["sold_out_alts"].format(code=code) if code in alts
+                     else T["sold_out_notify"].format(code=code) if not in_stock(found[0])
                      else T["found_narrow"] if broad and chips and chips[0].get("action") == "find"
                      else T["found"])
     res["reply"] = fallback_line
@@ -2045,12 +2259,36 @@ TEMPLATES = {
         "hello_back": "Welcome back! Your usual items are in stock, starting with {a}. Shall I put your usual order "
                       "together?",
         "hello_new": "Shops are ordering {a} the most this week, in stock now. What do you sell most?",
+        # 2.2: the other reasons to speak first (reach_hooks), and the bubble's short lines for each
+        "hello_clearance": "We're clearing {n} lines at the normal trade price, all in stock. Want to see them first?",
+        "hello_back_for_you": "Good news: {a}, which you asked about, is back in stock. Want to add it?",
+        "hello_drop": "There's a real price drop on {a}; the card shows the old price. Want to see it?",
+        "hello_new_in": "New in the catalogue: {a}. Want a look?",
+        "hello_campaign": "{title}. Want to see it?",
+        "nudge_best": "Want this week's best sellers?",
+        "nudge_best_b": "See what shops are ordering most this week?",
+        "nudge_clearance": "{n} lines clearing at trade price. Want to see them?",
+        "nudge_clearance_b": "We're clearing {n} lines at the normal trade price. Take a look?",
+        "nudge_usual": "Your usual {code} is in stock. Reorder in one tap?",
+        "nudge_back": "{code}, which you asked about, is back in stock. Want to add it?",
+        "nudge_drop": "{code} has a real price drop. Want to see it?",
+        "nudge_new": "New in: {code}. Want a look?",
+        "nudge_campaign": "{title}. Want to see it?",
+        "nudge_fit": "Want to know which phones this fits?",
+        "nudge_item_sold_out": "{code} is sold out right now. Want what's in stock instead?",
+        "clearance": "These are the lines we're clearing at the normal trade price, all in stock, starting with {a}. "
+                     "Shall I put some in your order?",
+        "sold_out_notify": "{code} is sold out right now. Tap 'Tell me when it's back' and we will tell you when it is "
+                           "back. Want to see what else sells?",
         # 2.1: the quick replies
         "chip_top": "What's selling",
         "chip_deals": "Today's deals",
         "chip_plan": "Plan my order",
         "chip_usual": "My usual",
         "chip_yes": "Yes, please",
+        "chip_clearance": "Clearing lines",
+        "chip_notify": "Tell me when it's back",
+        "chip_see": "Show me",
         "chip_ticket": "Report a problem",
         "chip_handoff": "Talk to my salesman",
         "chip_fit": "Which phones does it fit?",
@@ -2123,11 +2361,34 @@ TEMPLATES = {
         "hello_item_sold_out": "{code} نفدت كميته حاليًا، لكن {pair} متوفر وقريب منه. هل تريد أن تراه؟",
         "hello_back": "أهلًا بعودتك! منتجاتك المعتادة متوفرة، وأولها {a}. هل أجهّز لك طلبك المعتاد؟",
         "hello_new": "المحلات تطلب {a} أكثر من غيرها هذا الأسبوع، وهي متوفرة الآن. ما الذي تبيعه أكثر في محلك؟",
+        # 2.2
+        "hello_clearance": "نصفّي {n} صنفًا بسعر الجملة المعتاد، وكلها متوفرة. هل تريد أن تراها أولًا؟",
+        "hello_back_for_you": "خبر سار: {a} الذي طلبته عاد متوفرًا. هل تريد إضافته؟",
+        "hello_drop": "{a} انخفض سعره فعلًا، والبطاقة تعرض السعر السابق. هل تريد أن تراه؟",
+        "hello_new_in": "جديد في الكتالوج: {a}. هل تريد نظرة؟",
+        "hello_campaign": "{title}. هل تريد أن تراه؟",
+        "nudge_best": "تريد أن ترى الأكثر مبيعًا هذا الأسبوع؟",
+        "nudge_best_b": "تريد أن ترى ما تطلبه المحلات أكثر هذا الأسبوع؟",
+        "nudge_clearance": "{n} صنفًا للتصفية بسعر الجملة. تريد أن تراها؟",
+        "nudge_clearance_b": "نصفّي {n} صنفًا بسعر الجملة المعتاد. تريد نظرة؟",
+        "nudge_usual": "{code} المعتاد لديك متوفر. تعيد الطلب بلمسة؟",
+        "nudge_back": "{code} الذي طلبته عاد متوفرًا. تريد إضافته؟",
+        "nudge_drop": "{code} انخفض سعره فعلًا. تريد أن تراه؟",
+        "nudge_new": "جديد لدينا: {code}. تريد نظرة؟",
+        "nudge_campaign": "{title}. تريد أن تراه؟",
+        "nudge_fit": "تريد أن تعرف أي الهواتف يناسبها هذا المنتج؟",
+        "nudge_item_sold_out": "{code} نفدت كميته حاليًا. تريد البديل المتوفر؟",
+        "clearance": "هذه الأصناف التي نصفّيها بسعر الجملة المعتاد، وكلها متوفرة، وأولها {a}. هل أضيف بعضها إلى طلبك؟",
+        "sold_out_notify": "{code} نفدت كميته حاليًا. اضغط «أبلغني عند التوفر» وسنبلغك عند توفره. هل تريد أن ترى ما يُباع "
+                           "أكثر؟",
         "chip_top": "الأكثر مبيعًا",
         "chip_deals": "عروض اليوم",
         "chip_plan": "جهّز طلبي",
         "chip_usual": "طلبي المعتاد",
         "chip_yes": "نعم، من فضلك",
+        "chip_clearance": "أصناف التصفية",
+        "chip_notify": "أبلغني عند التوفر",
+        "chip_see": "اعرضها لي",
         "chip_ticket": "الإبلاغ عن مشكلة",
         "chip_handoff": "كلّم مندوبي",
         "chip_fit": "أي الهواتف يناسب؟",

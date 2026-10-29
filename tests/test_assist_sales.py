@@ -78,8 +78,8 @@ def _chips_ok(res: dict, lang: str = "en") -> None:
     for c in chips:
         assert isinstance(c.get("label"), str) and c["label"].strip(), c
         assert ("say" in c) != ("action" in c), f"a chip either speaks or acts: {c}"
-        if "action" in c:
-            assert c["action"] in ma.ACTIONS and c["action"] != "hello", c
+        if "action" in c:                         # a chip never opens the hello or the bubble's line again
+            assert c["action"] in ma.ACTIONS + ma.PAGE_ACTIONS and c["action"] not in ("hello", "nudge"), c
         if lang == "ar":
             assert re.search("[؀-ۿ]", c["label"]) or re.fullmatch(r"[A-Z0-9 \-]+(?: .*)?", c["label"]), c
     assert "_hint" not in res, "the model's instruction reached the page"
@@ -313,7 +313,7 @@ def _():
         assert r["reply"].startswith("A starter order for you") and len(rig.sent) == 1
     with Rig(U("deals"), reply="PB20 is perfect for bulk orders!") as rig:
         r = _ask(message="any offers?")
-        assert r["reply"] == ma.TEMPLATES["en"]["deals"].format(a="PB10") and len(rig.sent) == 1
+        assert r["reply"] == ma.TEMPLATES["en"]["deals"].format(a="the PB10 10000mAh power bank") and len(rig.sent) == 1
     with Rig(usual=[{"item_code": "CC1", "qty": 20}]) as rig:     # the tiles: no model, ever
         for action in ("top", "deals", "plan", "usual", "orders", "fit", "show", "find"):
             r = _ask(message=action, action=action, q="CC1" if action == "show" else "", order_tokens=["t" * 24])
@@ -327,7 +327,8 @@ def _():
     with Rig() as rig:
         r = _ask(message="What's selling", action="top")
         cats = [c for c in r["next"] if c.get("q", "").startswith("cat:")]
-        assert cats and r["next"][-1]["action"] == "plan" and r["reply"].startswith("Shops are ordering UK20 and CC1")
+        assert cats and r["next"][-1]["action"] == "plan"
+        assert r["reply"].startswith("Shops are ordering the UK20 20W charger and the CC1 Type-C cable"), r["reply"]
         r = _ask(message=cats[0]["label"], action="top", q=cats[0]["q"])
         want = cats[0]["q"][4:]
         assert r["items"] and all(ma.public_catalog()["by_code"][c]["category"] == want for c in r["items"])
@@ -378,7 +379,8 @@ def _():
     from app import market_assist as ma
     with PairRig() as rig:
         r = _ask(message="Cables", action="top", q="cat:CABLE")
-        assert r["reply"] == ma.TEMPLATES["en"]["top_pair"].format(a="CC1", code="CC1", pair="UK20") and rig.sent == []
+        assert r["reply"] == ma.TEMPLATES["en"]["top_pair"].format(a="the CC1 Type-C cable", code="CC1",
+                                                                     pair="the UK20 20W charger") and rig.sent == []
         assert r["next"][0] == {"label": "Show UK20", "action": "show", "q": "UK20"}
 
 
@@ -423,25 +425,263 @@ def _():
     T = ma.TEMPLATES["en"]
     with PairRig() as rig:
         r = _ask(message="hello", action="hello", item_code="UK20")
-        assert r["reply"] == T["hello_item"].format(code="UK20", pair="CC1") and r["next"][0]["action"] == "fit"
+        assert r["reply"] == T["hello_item"].format(code="UK20", pair="the CC1 Type-C cable") and r["next"][0]["action"] == "fit"
         r = _ask(message="hello", action="hello", item_code="UK30")             # sold out: what is close, in stock
-        assert r["reply"] == T["hello_item_sold_out"].format(code="UK30", pair="UK20")
+        assert r["reply"] == T["hello_item_sold_out"].format(code="UK30", pair="the UK20 20W charger")
         r = _ask(message="hello", action="hello", item_code="TWS9")             # nothing shops add with it
         assert r["reply"] == T["hello_item_solo"].format(code="TWS9")
-        r = _ask(message="hello", action="hello")                                 # a new phone
-        assert r["reply"] == T["hello_new"].format(a="UK20 and CC1") and r["next"][0]["q"].startswith("cat:")
+        r = _ask(message="hello", action="hello")                                 # a new phone: a real drop first
+        assert r["reply"] == T["hello_drop"].format(a="the PB10 10000mAh power bank") and r["hook"] == "drop"
+        assert r["next"][0] == {"label": "Show PB10", "action": "show", "q": "PB10"}
+        _chips_ok(r)
+        r = _ask(message="hello", action="hello", seen=["drop", "new"])           # those seen lately: what sells
+        assert r["reply"] == T["hello_new"].format(a="the UK20 20W charger and the CC1 Type-C cable")
+        assert r["next"][0]["q"].startswith("cat:") and r["hook"] == "best"
         assert rig.sent == [] and ma._cap["n"] == 0 and "shop_ask_turns" not in rig.client.db, "hello was logged"
         _chips_ok(r)
     with Rig(usual=[{"item_code": "LT1", "qty": 10}, {"item_code": "CC1", "qty": 20}]) as _rig:
         r = _ask(message="hello", action="hello", order_tokens=["t" * 24])
-        assert r["reply"] == T["hello_back"].format(a="CC1") and r["next"][0] == {"label": "Yes, please", "action": "usual"}
+        assert r["reply"] == T["hello_back"].format(a="the CC1 Type-C cable")
+        assert r["next"][0] == {"label": "Yes, please", "action": "usual"} and r["hook"] == "usual"
     with Rig() as _rig:
+        AR = ma.TEMPLATES["ar"]
         r = _ask(message="مرحبا", action="hello", lang="ar")
-        assert r["reply"] == ma.TEMPLATES["ar"]["hello_new"].format(a="UK20 وCC1")
+        assert r["reply"] == AR["hello_drop"].format(a="باور بنك PB10 10000mAh"), r["reply"]
+        r = _ask(message="مرحبا", action="hello", lang="ar", seen=["drop", "new"])
+        assert r["reply"] == AR["hello_new"].format(a="شاحن UK20 20 واط وكيبل CC1 تايب سي"), r["reply"]
         _chips_ok(r, "ar")
 
 
-# ── 5. pins ──────────────────────────────────────────────────────────────────────────────────
+# ── 5. 2.2: the reach-out lines (the bubble and the opening line) ─────────────────────────────
+
+# never pushy (owner's honesty rule): no "sale", no discount or urgency words, in either language
+_PUSHY = re.compile(r"(?i)\b(sale|discount|% ?off|hurry|last chance|limited|only \d+ left|ends? (soon|today)|"
+                    r"don'?t miss|grab)\b|تخفيض|خصم|أسرع|لفترة محدودة|لا تفوت")
+
+
+def _shelf(**badges):
+    """The v2 shelf with some items' badges replaced, e.g. _shelf(PB10=(), C18=("clearance",))."""
+    items = [dict(it, badges=list(badges[it["item_code"]])) if it["item_code"] in badges else it for it in SHELF]
+    return dict(_shelf_cat(), items=items, by_code={i["item_code"]: i for i in items})
+
+
+_CLEARING = {"PB10": (), "TWS9": (), "C18": ("clearance",), "HD1": ("clearance",)}     # with PB20: three in stock
+
+
+def _hooks(cat=None, tokens=(), device_id=None, lang="en"):
+    from app import market_assist as ma
+    return ma.reach_hooks(cat or ma.public_catalog(), list(tokens), device_id, ma.TEMPLATES[lang])
+
+
+@test("reach-out: his campaign, an item asked back, the usual, a real drop, new, clearing (3+), what sells; honest")
+def _():
+    from app import market_assist as ma
+    T = ma.TEMPLATES["en"]
+    with Rig() as _rig:
+        assert [h["id"] for h in _hooks()] == ["drop", "new", "best"], "one clearing line is not a message"
+        two = _shelf(PB10=(), TWS9=(), C18=("clearance",), SP1=("clearance",))      # PB20, C18; SP1 is sold out
+        assert [h["id"] for h in _hooks(two)] == ["best"], "two clearing lines in stock made a message"
+        cat = _shelf(**_CLEARING)
+        h = _hooks(cat)[0]
+        assert h["id"] == "clearance" and h["hello"] == T["hello_clearance"].format(n=3)
+        assert h["nudge"] in (T["nudge_clearance"].format(n=3), T["nudge_clearance_b"].format(n=3))
+        assert h["tap"] == {"label": "Clearing lines", "action": "deals", "q": "badge:clearance"}
+        cat["campaigns"] = [{"id": "c1", "title": "Car season picks!", "title_ar": "مختارات موسم السيارات",
+                             "product_codes": ["SP1", "C18", "HD1"], "audience": "all"}]
+        h = _hooks(cat)[0]                                       # his campaign leads, in his words, in stock only
+        assert h["id"] == "campaign-c1" and h["nudge"] == "Car season picks. Want to see it?" and h["tap"]["q"] == "C18,HD1"
+        assert _hooks(cat, lang="ar")[0]["nudge"] == ma.TEMPLATES["ar"]["nudge_campaign"].format(title="مختارات موسم السيارات")
+        cat["campaigns"] = [{"id": "c2", "title": "Speakers", "product_codes": ["SP1"], "audience": "all"}]
+        assert _hooks(cat)[0]["id"] == "clearance", "a campaign of sold-out lines was pushed"
+        assert ma._codes_q([f"CODE-{n:06d}" for n in range(6)]) == ",".join(f"CODE-{n:06d}" for n in range(5)), \
+            "a tap's codes outgrew the request's 60 characters"
+    with Rig(usual=[{"item_code": "LT1", "qty": 10}, {"item_code": "CC1", "qty": 20}]) as _rig:
+        h = _hooks(tokens=["t" * 24])[0]
+        assert h["id"] == "usual" and h["nudge"] == T["nudge_usual"].format(code="CC1"), "a sold-out usual was named"
+        saved = ma.asked_back
+        ma.asked_back = lambda _cat, dev: ["LT2"] if dev == "dev-1" else []
+        try:
+            assert [x["id"] for x in _hooks(tokens=["t" * 24], device_id="dev-1")][:2] == ["back", "usual"]
+            assert _hooks(tokens=["t" * 24], device_id="dev-1")[0]["hello"] == T["hello_back_for_you"].format(
+                a="the LT2 Lightning cable")
+            assert _hooks(tokens=["t" * 24], device_id="dev-2")[0]["id"] == "usual"
+        finally:
+            ma.asked_back = saved
+    for lang in ("en", "ar"):
+        with Rig() as _rig:
+            for cat in (_shelf_cat(), _shelf(**_CLEARING)):
+                for h in _hooks(cat, lang=lang):
+                    assert not _PUSHY.search(h["nudge"]) and not _PUSHY.search(h["hello"]), (h["nudge"], h["hello"])
+                    assert h["nudge"].rstrip().endswith("?" if lang == "en" else "؟"), h["nudge"]
+                    for c in [h["tap"], *h["chips"]]:
+                        if c.get("action") == "show":
+                            assert all(ma.in_stock(cat["by_code"][x]) for x in c["q"].split(",")), c
+                    _chips_ok({"next": h["chips"]}, lang)
+
+
+@test("an item this phone asked back for: its own requests only (by device id), in stock now, newest first, once")
+def _():
+    from app import market_assist as ma, shop
+    calls: list[tuple] = []
+
+    class Q:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def select(self, cols):
+            calls.append(("select", cols))
+            return self
+
+        def eq(self, col, val):
+            calls.append(("eq", col, val))
+            self.rows = [r for r in self.rows if r.get(col) == val]
+            return self
+
+        def order(self, col, desc=False):
+            calls.append(("order", col, desc))
+            return self
+
+        def limit(self, _n):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": self.rows})()
+
+    rows = [{"device_id": "dev-1", "item_code": "lt2", "created_at": "2026-10-29"},
+            {"device_id": "dev-1", "item_code": "SP1", "created_at": "2026-10-28"},     # still sold out
+            {"device_id": "dev-1", "item_code": "LT2", "created_at": "2026-10-27"},     # asked twice
+            {"device_id": "dev-2", "item_code": "CC1", "created_at": "2026-10-29"}]     # another phone's
+    client = type("C", (), {"table": lambda _s, name: calls.append(("table", name)) or Q(list(rows))})()
+    saved = shop.get_client
+    shop.get_client = lambda: client
+    try:
+        assert ma.asked_back(_shelf_cat(), "dev-1") == ["LT2"]
+        assert ("table", "shop_restock_requests") in calls and ("eq", "device_id", "dev-1") in calls
+        assert ("order", "created_at", True) in calls
+        calls.clear()
+        assert ma.asked_back(_shelf_cat(), None) == [] and calls == [], "no device id read every phone's requests"
+        shop.get_client = lambda: (_ for _ in ()).throw(RuntimeError("db down"))
+        assert ma.asked_back(_shelf_cat(), "dev-1") == [], "a failed read became an error, not just no message"
+    finally:
+        shop.get_client = saved
+
+
+@test("a new message each visit: the bubble skips the lines seen lately, the chat's first line the bubble's; no model")
+def _():
+    from app import market_assist as ma
+    T = ma.TEMPLATES["en"]
+    with Rig() as rig:
+        r = _ask(message="hello", action="nudge")
+        assert (r["hook"], r["reply"]) == ("drop", T["nudge_drop"].format(code="PB10"))
+        assert r["next"] == [{"label": "Show PB10", "action": "show", "q": "PB10"}], "a bubble has one tap"
+        r = _ask(message="hello", action="nudge", seen=["drop"])
+        assert (r["hook"], r["reply"]) == ("new", T["nudge_new"].format(code="TWS9"))
+        r = _ask(message="hello", action="nudge", seen=["drop", "new"])
+        assert r["hook"] == "best" and r["reply"] in (T["nudge_best"], T["nudge_best_b"])
+        assert r["next"] == [{"label": T["chip_top"], "action": "top"}]
+        r = _ask(message="hello", action="nudge", seen=["drop", "new", "best"])  # every one seen: the strongest again
+        assert r["hook"] == "drop"
+        r = _ask(message="hello", action="hello", seen=["drop"])                  # the chat never repeats the bubble
+        assert r["hook"] == "new" and r["reply"] == T["hello_new_in"].format(a="the TWS9 earbuds")
+        r = _ask(message="hello", action="nudge", seen=["x" * 400, 5, None, "drop"])   # junk is ignored, not an error
+        assert r["hook"] == "new"
+        r = _ask(message="hello", action="nudge", item_code="UK20")               # a product page: the fit question
+        assert (r["hook"], r["reply"], r["next"][0]["action"]) == ("item", T["nudge_fit"], "fit")
+        r = _ask(message="hello", action="nudge", item_code="UK30")               # sold out: what is in stock instead
+        assert r["reply"] == T["nudge_item_sold_out"].format(code="UK30") and r["next"][0]["q"] == "UK20"
+        assert rig.sent == [] and ma._cap["n"] == 0 and "shop_ask_turns" not in rig.client.db, "a reach-out was logged"
+        assert r.get("turn_id") is None, "a reach-out line got a turn id (thumbs on a line nobody asked)"
+
+    class Day:                                                   # the evergreen lines read differently on odd days
+        n = 739000
+
+        @classmethod
+        def now(cls, tz=None):
+            from datetime import datetime as real
+            return real.fromordinal(cls.n).replace(tzinfo=tz)
+
+    saved = ma.datetime
+    ma.datetime = Day
+    try:
+        a = ma._variant(T, "nudge_best")
+        Day.n += 1
+        assert {a, ma._variant(T, "nudge_best")} == {T["nudge_best"], T["nudge_best_b"]}
+        assert ma._variant(T, "nudge_drop") == T["nudge_drop"], "a line with one wording changed"
+    finally:
+        ma.datetime = saved
+
+
+@test("the turn a bubble's tap opens says which line it was (topic nudge:<hook>), so what sells can be counted")
+def _():
+    with Rig() as rig:
+        _ask(message="Today's deals", action="deals", nudge="drop")
+        _ask(message="What's selling", action="top", nudge="campaign-c1")
+        _ask(message="What's selling", action="top", nudge="DROP; x")
+        _ask(message="What's selling", action="top")
+        topics = [t.get("topic") for t in rig.client.db["shop_ask_turns"]]
+        assert topics == ["nudge:drop", "nudge:campaign-c1", None, None], topics
+
+
+@test("names with the codes: 'the CC1 Type-C cable', 'the UK20 20W charger', in en and ar, from the item's own words")
+def _():
+    from app import market_assist as ma
+    by = _shelf_cat()["by_code"]
+    assert [ma.label_for(by[c]) for c in ("CC1", "UK20", "PB10", "LT2", "TWS9", "C18")] == [
+        "the CC1 Type-C cable", "the UK20 20W charger", "the PB10 10000mAh power bank", "the LT2 Lightning cable",
+        "the TWS9 earbuds", "the C18 18W car charger"]
+    assert [ma.label_for(by[c], "ar") for c in ("CC1", "UK20", "PB10")] == [
+        "كيبل CC1 تايب سي", "شاحن UK20 20 واط", "باور بنك PB10 10000mAh"]
+    assert ma.label_for({"item_code": "X9", "category": "CASE", "display_name": "X9"}) == "the X9", "a word was invented"
+    assert ma.label_for({"item_code": "X01", "category": "CABLE", "display_name": "X01 UC",
+                         "spec": "USB to Type-C 3A 1m"}) == "the X01 Type-C cable"
+    assert ma.label_for({"item_code": "L3", "category": "CABLE", "display_name": "3 in 1 cable",
+                         "spec": "Lightning, Type-C, micro"}) == "the L3 3-in-1 cable"
+    T = ma.TEMPLATES["en"]
+    assert ma._labels(_shelf_cat(), ["UK20", "CC1", "LT2"], T) == "the UK20 20W charger and the CC1 Type-C cable"
+    assert ma._labels(_shelf_cat(), ["GONE1"], T) == "GONE1", "a code not on the shelf vanished from the line"
+
+
+@test("clearing lines said honestly: all clearing -> 'at the normal trade price' + 'Clearing lines'; a real drop -> deals")
+def _():
+    from app import market_assist as ma
+    T = ma.TEMPLATES["en"]
+    with Rig() as _rig:
+        r = _ask(message="Today's deals", action="deals")              # a real drop is live: the offers line
+        assert r["items"][:2] == ["PB10", "PB20"] and r["reply"] == T["deals"].format(a="the PB10 10000mAh power bank")
+        assert ma.deals_chip(_shelf_cat(), T) == {"label": "Today's deals", "action": "deals"}
+        cat = _shelf(**_CLEARING)
+        ma.public_catalog = lambda: cat
+        r = _ask(message="Today's deals", action="deals")              # clearing lines only: called that
+        assert set(r["items"]) == {"C18", "HD1", "PB20"} and not _PUSHY.search(r["reply"])
+        assert r["reply"] == T["clearance"].format(a=ma.label_for(cat["by_code"][r["items"][0]]))
+        assert ma.deals_chip(cat, T) == {"label": "Clearing lines", "action": "deals", "q": "badge:clearance"}
+        r = _ask(message="Clearing lines", action="deals", q="badge:clearance")
+        assert set(r["items"]) == {"C18", "HD1", "PB20"}
+        _chips_ok(r)
+
+
+@test("sold out in the chat: the words and a 'Tell me when it's back' chip (the page's own), then what is in stock")
+def _():
+    from app import market_assist as ma
+    T = ma.TEMPLATES["en"]
+    assert "notify" in ma.PAGE_ACTIONS and "notify" not in ma.ACTIONS, "the server would answer a page-only chip"
+    with Rig() as _rig:
+        r = _ask(message="Show SP1", action="show", q="SP1")          # no speaker in stock: the words and the chip
+        assert r["reply"] == T["sold_out_notify"].format(code="SP1")
+        assert r["next"][0] == {"label": "Tell me when it's back", "action": "notify", "q": "SP1"}
+        _chips_ok(r)
+        r = _ask(message="Show UK30", action="show", q="UK30")        # one close and in stock: offered after the chip
+        assert r["reply"] == T["sold_out_alts"].format(code="UK30") and r["items"][0] == "UK30"
+        assert [c.get("action") for c in r["next"]][:2] == ["notify", "show"] and r["next"][1]["q"] == "UK20"
+        _chips_ok(r)
+        r = _ask(message="Show UK20", action="show", q="UK20")        # in stock: no such chip
+        assert all(c.get("action") != "notify" for c in r["next"])
+    with Rig(U("find", query="speaker", codes=["SP1"]), reply="SP1 is sold out right now.") as rig:
+        _ask(message="do you have the SP1 speaker?")                  # typed: the model is told to offer it
+        assert "Tell me when it's back" in _model_text(rig)
+
+
+# ── 6. pins ──────────────────────────────────────────────────────────────────────────────────
 
 @test("templates: every line in both languages with the same slots; Arabic lines are Arabic; no banned copy")
 def _():
@@ -459,15 +699,22 @@ def _():
     from app.market_search import CATEGORY_WORDS
     assert set(ma.CATEGORY_LABELS["en"]) == set(CATEGORY_WORDS), "a shelf category has no chip label"
     for line in ("clarify_phone", "clarify_phone_item", "clarify_what", "top", "deals", "show", "hello_item",
-                 "hello_back", "hello_new", "found", "found_narrow", "sold_out_alts", "miss", "usual", "plan"):
+                 "hello_back", "hello_new", "found", "found_narrow", "sold_out_alts", "miss", "usual", "plan",
+                 "clearance", "sold_out_notify",
+                 *(k for k in en if k.startswith(("hello_", "nudge_")) and k != "hello_item_solo")):  # asks first
         assert en[line].rstrip().endswith("?") and ar[line].rstrip().endswith("؟"), f"{line} ends on no question"
+    for k in en:                                     # 2.2: the clearing lines and the reach-out lines are never pushy
+        if k.startswith(("hello_", "nudge_", "clearance", "chip_")):
+            assert not _PUSHY.search(en[k]) and not _PUSHY.search(ar[k]), k
 
 
-@test("the ask request carries a chip's q (60 chars); the bubble's switch defaults on and needs the chat switch")
+@test("the ask request carries a chip's q (60), the lines seen (6) and the tapped line (24); the bubble's switch")
 def _():
     from app import shop
     src = (ROOT / "app" / "shop_api.py").read_text(encoding="utf-8")
     assert "q: str | None = Field(default=None, max_length=60)" in src
+    assert "seen: list[str] = Field(default_factory=list, max_length=6)" in src
+    assert "nudge: str | None = Field(default=None, max_length=24)" in src
     assert shop.SETTING_DEFAULTS["shop_ai_nudge_enabled"] == "1"
     vals = {"shop_market_ai_enabled": "0", "shop_ai_nudge_enabled": "1"}
     assert not (shop._flag(vals, "shop_market_ai_enabled") and shop._flag(vals, "shop_ai_nudge_enabled"))

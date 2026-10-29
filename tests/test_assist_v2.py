@@ -203,7 +203,7 @@ def _():
 def _():
     with Rig(U("top", query="")) as rig:
         r = _ask(message="what is selling most these days?")
-        assert len(rig.sent) == 2 and r["reply"].startswith("Shops are ordering UK20") and not SOLD_OUT & set(r["items"])
+        assert len(rig.sent) == 2 and r["reply"].startswith("Shops are ordering the UK20") and not SOLD_OUT & set(r["items"])
     with Rig(U("top", query=""), reply="UK20 is our best seller with shops. Which do you sell most?") as rig:
         r = _ask(message="what is selling most these days?")
         assert r["reply"] == "UK20 is our best seller with shops. Which do you sell most?" and r["next"]
