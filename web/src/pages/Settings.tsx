@@ -175,6 +175,10 @@ const SHOP_FIELDS: ShopField[] = [
   { key: 'shop_order_prefix', label: 'Order number prefix', hint: 'e.g. YQ → order numbers look like YQ-2609-0001.', type: 'text' },
   { key: 'shop_best_seller_top_n', label: 'Best-seller count', hint: 'How many top sellers get the "Best seller" badge.', type: 'number' },
   { key: 'shop_trending_growth_pct', label: 'Trending growth %', hint: 'Sales growth that qualifies an item as "Trending."', type: 'number' },
+  { key: 'shop_market_ai_enabled', label: 'Marketplace chat (YQ Assist)', hint: 'Show the chat to merchants on the marketplace. Off until you switch it on; watch Merchant voice after.', type: 'toggle' },
+  { key: 'shop_ai_daily_cap', label: 'Chat daily cap (turns)', hint: 'Most AI-answered chat turns per day across all merchants (0 = no cap). Beyond it the chat shows plain search results, so your own reports keep their free AI.', type: 'number' },
+  { key: 'shop_ai_voice_enabled', label: 'Chat microphone', hint: 'Merchants can speak an order or a question; they check the text before it is sent. Needs the chat switched on.', type: 'toggle' },
+  { key: 'shop_ai_photo_enabled', label: 'Chat camera', hint: 'Merchants can photograph a product, its box or a written order list. Needs the chat switched on.', type: 'toggle' },
   { key: 'shop_new_days', label: 'New item window (days)', hint: 'Days since first sale that an item is tagged "New."', type: 'number' },
 ]
 

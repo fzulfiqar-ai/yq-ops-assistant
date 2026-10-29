@@ -189,6 +189,11 @@ EXPECTED_GATES = {
     # X1 (release 2b): the team message names the salesmen with their figures; the role check (admin and management,
     # app.command_api._require_command) sits in the route, like the Command Centre's own routes
     ("GET", "/command/team-message"): ["user"],
+    # YQ Assist (28-Oct-2026): what merchants asked the chat and suggested; the public /ask and
+    # /feedback routes are rate-limited and switched off by shop_market_ai_enabled
+    ("GET", "/shop/assist/turns"): ["feature:Shop Admin"],
+    ("GET", "/shop/feedback"): ["feature:Shop Admin"],
+    ("PATCH", "/shop/feedback/{feedback_id}"): ["feature:Shop Admin"],
 }
 
 

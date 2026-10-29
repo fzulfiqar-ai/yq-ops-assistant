@@ -30,6 +30,8 @@ const QuickOrderPage = lazyPage(() => import('@/market/pages/QuickOrderPage'))
 const LegacyRedirect = lazyPage(() => import('@/market/pages/LegacyRedirect'))
 const AboutPage = lazyPage(() => import('@/market/pages/AboutPage'))
 const BrandPage = lazyPage(() => import('@/market/pages/BrandPage'))
+// YQ Assist's full page (/ask); not warmed: the chat is opened by few, and its launcher is tiny
+const AskPage = lazyPage(() => import('@/market/assist/AskPage'))
 
 /**
  * The pages a merchant opens most — the four tabs, a shelf, search, checkout, a pasted list — fetched
@@ -183,6 +185,7 @@ export default function MarketApp() {
                     <Route path="/orders" element={<MyOrdersPage />} />
                     <Route path="/me" element={<MyYQPage />} />
                     <Route path="/o/:token" element={<TrackingPage />} />
+                    <Route path="/ask" element={<AskPage />} />
                     <Route path="/:slug" element={<Home />} />
                   </Route>
                   <Route path="/c/:token" element={<LegacyRedirect />} />

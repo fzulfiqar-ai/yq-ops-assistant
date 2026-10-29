@@ -609,13 +609,59 @@ truthful "Deal" badge · `moq` / `pack_size` on SKUs that ship in packs · photo
 (a photo-less product cannot appear in a slider, a brand tile or a composed creative) ·
 `public_whatsapp` + `photo_url` on salesman profiles · a company WhatsApp for "Ask YQ".
 
+## YQ Assist: the marketplace chat (28-Oct-2026, P1 of the AI plan)
+
+A "Chat now" bubble that answers from the public catalogue and the device's own orders, in the
+merchant's language, and hands over to the shop's salesman on WhatsApp. **Off until the office
+switches `shop_market_ai_enabled` to 1** (Settings); the payload carries it as `settings.ai_enabled`
+and the page shows nothing while it is off.
+
+| Piece | Where |
+|---|---|
+| The turn: understand → handle → answer | `app/market_assist.py` |
+| Server search (a port of `lib/search.ts`, synonyms held equal by a test) | `app/market_search.py` |
+| JSON answers, the `assist` routing task, usage per provider per day (`GET /llm/health`) | `app/llm_router.py` |
+| `POST /public/market/ask`, `/voice` (speech to text), `/photo` (a product, a box or a written list), `/feedback` | `app/shop_api.py` |
+| Speech to text (Whisper on Groq, Voxtral on Mistral), image-reading models (`vision`) | `app/llm_router.py` |
+| Portal reads: `GET /shop/assist/turns`, `GET /shop/feedback`, `PATCH /shop/feedback/{id}` (Shop Admin) | `app/shop_api.py` |
+| Portal page **Merchant voice**: ideas and problems, what merchants asked (misses = sourcing leads), free AI today | `web/src/pages/MerchantVoice.tsx` |
+| Tables `shop_ask_turns`, `shop_feedback`; settings `shop_ai_daily_cap`, `shop_ai_voice_enabled`, `shop_ai_photo_enabled` | `scripts/market_assist_migration.sql` |
+| The bubble, the panel, `/ask`, the microphone, the camera, the list review | `web/src/market/assist/` |
+| Tests | `tests/test_market_assist.py` |
+
+**One message, at most two model calls.** (1) `chat_json` reads the intent (find, fit, add, list,
+order_status, usual, handoff, feedback, chat) and the product in the catalogue's English words, in
+any language. (2) Python handles it on public data only. (3) For find, fit, add and chat a second
+call writes one to three sentences in the merchant's language; lists, order status, "my usual", the
+hand-off and feedback answer from templates (en/ar) with no second call.
+
+**Lists** (pasted, typed in one line, spoken, or photographed) come back as `lines`: each line
+`matched` (a product code was written), `pick` (every word matched: the best item plus up to two
+alternatives for the merchant to confirm) or `missing` (only part matched: the hits are suggestions,
+nothing is added). Quantities are raised to the item's minimum. A pasted list still works when no
+model answers (`parse_list`: codes and English words). **Voice** returns text to check before
+sending; Whisper's "Thank you." on silence counts as no speech; the recording is never stored.
+**Photos** are read by one vision call (Groq's qwen3.8-27b, then Mistral, then Gemini; measured
+0.4–2.4 s) and never stored; a box from another brand is said plainly ("That looks like a … product.
+These are the closest items YQ stocks.").
+
+**Guardrails.** The model reads the PUBLIC payload bytes only (`public_catalog()`), so it can see
+nothing the marketplace does not already show; it is never given a price, and `_scrub_prices()`
+drops any sentence that still names one (policy amounts like the minimum excepted). `add` lines
+wait for the merchant's tap; nothing is ordered or sent. Merchant text is masked (`mask()`: runs of
+7+ digits and e-mails out, `YQ-…` order numbers kept) before a provider or a table sees it, and
+fenced as data. Rate limits: 30/min per address, 6/min and 60/day per device. `shop_ai_daily_cap`
+(default 800 turns per UTC day): past it, and whenever no model answers, the reply says
+`fallback: true` and the page runs its own search. A product ask that finds nothing is logged as a
+`search_zero` event with `meta.where = 'ask'`, the demand signal Market Intel already reads.
+
+**Hand-off order:** the rep on this device's latest order → the storefront rep (if they opted in
+to WhatsApp) → `WA_HUMAN_NUMBER` → none (the rep confirms every order and calls).
+
 ## Not done yet (in order)
 
-- **Arabic / RTL is prepared but not switched on.** Every string is centralised in `strings.ts`, the
-  CSS uses logical properties only (`ps-`/`pe-`/`start`/`end`), `locale` flips `lang`/`dir` on
-  `<html>`, campaigns carry `title_ar` / `line_ar` / `cta_label_ar` and every promise has `ar`. What
-  is missing is the translated string file and a language switch that persists.
-- **The AI concierge** (`shop_market_ai_enabled`, phase C) is not built.
+- **YQ Assist P2–P6** (paste or voice order, photo search, smart reorder and alerts, smarter search
+  with Arabic item names, honest insights): see the plan in the 28-Oct-2026 release note.
 - **7 SKUs still have no photo.**
 - Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
   from Focus history (needs `focus_customer_id` links) · web push · a real `shop_clearance_pct`

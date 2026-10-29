@@ -271,6 +271,40 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         phone: str = Field(max_length=32)
         device_id: str | None = Field(default=None, max_length=64)
 
+    # YQ Assist (the marketplace chat, app/market_assist.py)
+    class AskTurn(BaseModel):
+        role: str = Field(max_length=16)
+        text: str = Field(max_length=500)
+
+    class AskRequest(BaseModel):
+        message: str = Field(min_length=1, max_length=500)
+        history: list[AskTurn] = Field(default_factory=list, max_length=6)
+        lang: str | None = Field(default=None, max_length=8)
+        device_id: str | None = Field(default=None, max_length=64)
+        session_id: str | None = Field(default=None, max_length=64)
+        item_code: str | None = Field(default=None, max_length=64)
+        order_tokens: list[str] = Field(default_factory=list, max_length=20)
+        referral_code: str | None = Field(default=None, max_length=32)
+
+    class FeedbackRequest(BaseModel):
+        kind: str = Field(max_length=16)
+        text: str | None = Field(default=None, max_length=1000)
+        turn_id: int | None = None
+        device_id: str | None = Field(default=None, max_length=64)
+        session_id: str | None = Field(default=None, max_length=64)
+        lang: str | None = Field(default=None, max_length=8)
+        page: str | None = Field(default=None, max_length=80)
+
+    class FeedbackStatus(BaseModel):
+        status: str = Field(max_length=8)
+
+    class PhotoRequest(BaseModel):
+        image: str = Field(max_length=2_200_000)      # a data URL; app/market_assist.photo checks type and size
+        lang: str | None = Field(default=None, max_length=8)
+        device_id: str | None = Field(default=None, max_length=64)
+        session_id: str | None = Field(default=None, max_length=64)
+        referral_code: str | None = Field(default=None, max_length=32)
+
     class RestockResolve(BaseModel):
         ids: list[int] = Field(max_length=200)
 
@@ -587,6 +621,90 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def market_restock(request: Request, body: RestockRequest) -> dict:
         ok = shop.add_restock(body.item_code, body.phone, body.device_id, body.referral_code)
         return {"ok": ok}
+
+    # ── public: YQ Assist, the marketplace chat (off until shop_market_ai_enabled = 1) ──
+    def _assist_open(feature: str | None = None) -> None:
+        vals = shop.context()["settings"]
+        if (not shop.market_enabled() or not shop._flag(vals, "shop_market_ai_enabled")
+                or (feature and not shop._flag(vals, feature))):
+            raise HTTPException(status_code=404, detail="The assistant is not available.")
+
+    @app.post("/public/market/ask")
+    @limiter.limit("30/minute")                              # per address: the net
+    @limiter.limit("6/minute", key_func=device_key)          # per address + device
+    @limiter.limit("60/day", key_func=device_key)
+    def market_ask(request: Request, body: AskRequest) -> dict:
+        """One chat turn: what the merchant wants, answered from the public catalog and the
+        device's own orders only. Never places an order; `add` lines wait for the merchant's tap."""
+        _assist_open()
+        from app import market_assist
+        return market_assist.ask(body.model_dump(), ip=_ip(request))
+
+    @app.post("/public/market/voice")
+    @limiter.limit("20/minute")                              # per address: the net
+    @limiter.limit("6/minute", key_func=device_key)          # per address + device (x-device-id header)
+    @limiter.limit("40/day", key_func=device_key)
+    async def market_voice(request: Request, file: UploadFile = File(...)) -> dict:
+        """A spoken order or question to text (Whisper on Groq, Voxtral on Mistral); the page shows the
+        text to check before it is sent. The recording is never stored."""
+        _assist_open("shop_ai_voice_enabled")
+        from starlette.concurrency import run_in_threadpool
+        from app import market_assist
+        audio = await file.read(market_assist.AUDIO_MAX_BYTES + 1)
+        try:
+            return await run_in_threadpool(market_assist.voice, audio, file.content_type or "")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.post("/public/market/photo")
+    @limiter.limit("20/minute")
+    @limiter.limit("4/minute", key_func=device_key)
+    @limiter.limit("30/day", key_func=device_key)
+    def market_photo(request: Request, body: PhotoRequest) -> dict:
+        """A photo of a product, its box or a written order list: the nearest catalogue items, or the
+        list's lines to check. The photo is sent to a model and never stored."""
+        _assist_open("shop_ai_photo_enabled")
+        from app import market_assist
+        try:
+            return market_assist.photo(body.model_dump(), ip=_ip(request))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.post("/public/market/feedback")
+    @limiter.limit("30/minute")
+    @limiter.limit("10/minute", key_func=device_key)
+    def market_feedback(request: Request, body: FeedbackRequest) -> dict:
+        """An idea, a problem report, a question for the team, or a thumbs on a chat answer."""
+        if not shop.market_enabled():
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        from app import market_assist
+        return {"ok": market_assist.save_feedback(body.model_dump(), ip=_ip(request))}
+
+    # ── portal: what merchants ask and suggest (Shop Admin) ──────────────────
+    @app.get("/shop/assist/turns")
+    def shop_assist_turns(days: int = Query(14, ge=1, le=90), limit: int = Query(200, ge=1, le=500),
+                          _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_assist
+        return {"turns": market_assist.recent_turns(days, limit)}
+
+    @app.get("/shop/feedback")
+    def shop_feedback_list(status: str | None = None, limit: int = Query(200, ge=1, le=500),
+                           _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_assist
+        return {"feedback": market_assist.list_feedback(status, limit)}
+
+    @app.patch("/shop/feedback/{feedback_id}")
+    def shop_feedback_status(feedback_id: int, body: FeedbackStatus,
+                             user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_assist
+        try:
+            row = market_assist.set_feedback_status(feedback_id, body.status, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if not row:
+            raise HTTPException(status_code=404, detail="Feedback not found.")
+        log_event(user.email, "shop.feedback_status", detail={"id": feedback_id, "status": body.status})
+        return row
 
     # ── portal: campaigns (Shop Admin) + restock list (Shop Orders) ──────────
     @app.get("/shop/campaigns")

@@ -2,6 +2,7 @@ import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
 import { lazyPage } from '@/lib/lazyPage'
 import { cn } from '@/lib/utils'
+import { AssistLauncher } from '../assist/AssistLauncher'
 import { splashDue } from '../lib/splashGate'
 import { useMarket } from '../MarketContext'
 import { ErrorBoundary } from '../ui/ErrorBoundary'
@@ -114,6 +115,12 @@ function ShellBody() {
       </ErrorBoundary>
       <ErrorBoundary key={`palette:${paletteOpen ? 1 : 0}`} overlay onDismiss={closePalette}>
         <Suspense fallback={null}>{paletteOpen && <SearchPalette />}</Suspense>
+      </ErrorBoundary>
+      {/* YQ Assist: the chat launcher, beside the page slot so a page change never remounts it (the
+       * slot is keyed per page); nothing renders unless the office has switched the chat on. A chat
+       * that breaks disappears; the shop under it carries on. */}
+      <ErrorBoundary silent>
+        <AssistLauncher />
       </ErrorBoundary>
       {/* Its own boundary, and a night field for the gap: the first frame of a session's first load is
        * the brand, with the horizon and the logo animating in on top of it. A product panel or the

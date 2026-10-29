@@ -180,6 +180,13 @@ SETTING_DEFAULTS: dict[str, str] = {
         {"key": "rep", "en": "Every order confirmed by your rep", "ar": "كل طلب يؤكده مندوبك", "icon": "shield", "to": "/about#how"},
     ], ensure_ascii=False),
     "shop_market_ai_enabled": "0",       # phase C: the concierge; off until the office switches it on
+    # YQ Assist (28-Oct-2026): model-backed chat turns per UTC day before the chat falls back to plain
+    # search, so public traffic never spends the free AI quota the owner's own reports run on. 0 = no cap.
+    "shop_ai_daily_cap": "800",
+    # the chat's microphone (speech to text) and camera (a product, a box or a written list); each
+    # needs shop_market_ai_enabled as well
+    "shop_ai_voice_enabled": "1",
+    "shop_ai_photo_enabled": "1",
     # wholesale order engine (16-Sep-2026): the minimum is a sales engine, not a wall
     "shop_small_order_mode": "request",  # request = accept + flag for the rep · allow = accept silently · block = refuse
     "shop_small_order_fee_bhd": "0",     # optional handling fee the rep may apply when confirming a small order
@@ -1347,6 +1354,10 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "allow_backorder": allow_backorder(vals, staff),
             "show_retail_compare": show_compare,
             "public_tiers": public_tiers,
+            # YQ Assist: the chat bubble shows only while the office has switched it on
+            "ai_enabled": _flag(vals, "shop_market_ai_enabled"),
+            "ai_voice": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_voice_enabled"),
+            "ai_photo": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_photo_enabled"),
             "areas": [a.strip() for a in str(vals.get("shop_areas") or "").split(",") if a.strip()],
             # R7d: {area (lower-cased): the rep's first name} — the checkout's "Your area representative"
             "area_reps": area_rep_names(ctx),

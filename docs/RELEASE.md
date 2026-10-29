@@ -475,6 +475,54 @@ engine files, so `/yq-load` waits until Claude reverts `main` or the API is depl
 
 ---
 
+## Release assist1: the free-AI repair + YQ Assist, the marketplace chat (28-Oct-2026)
+
+**What ships.** (1) The router repair: on 28-Oct every default model the free rotation used was gone or refused, so
+the portal's AI had no working provider; it now uses the models that answer (Groq's qwen3.8-27b and gpt-oss, Mistral).
+(2) YQ Assist on the marketplace (docs/MARKETPLACE.md § YQ Assist): the chat, the microphone, the camera (a product, a
+box or a written list), pasted lists, "Ask the assistant" on an empty search, and the portal's **Merchant voice** page.
+The chat ships **off** (`shop_market_ai_enabled` = 0) and the page shows nothing until it is switched on.
+
+**Before step 1, the owner, in Render → the API service → Environment ("Save", not "Save and deploy"):**
+
+| Key | Why | Where to get it |
+|---|---|---|
+| `GROQ_API_KEY` | the backbone: chat, photos, voice; check it is set | console.groq.com → API Keys |
+| `MISTRAL_API_KEY` | second host, also reads photos and speech | console.mistral.ai → API Keys (free "Experiment" plan) |
+| `GEMINI_API_KEY` | third host (slow on 28-Oct, still a fallback) | aistudio.google.com → Get API key |
+| `OPENROUTER_API_KEY` | replace: the current key answers 401 "User not found" | openrouter.ai/keys |
+| `MOONSHOT_API_KEY`, `SAMBANOVA_API_KEY` | delete: suspended / invalid (Moonshot is prepaid, not free) | — |
+
+**When.** After a morning load. The release changes `app/`, so from the pull until the API deploy has finished
+`/yq-load` refuses ("a portal release is merged but not live"): go from the pull to the deploy in one sitting. The web
+(market + portal) deploys by itself after CI on the push to `main`; until the API is live the bubble stays hidden and
+the Merchant voice page says "not switched on yet".
+
+```
+git pull --ff-only                                                         # main = the assist1 commit Claude names
+python -m scripts.yq_backup release assist1                                # 1. the encrypted backup
+python -m scripts.apply_sql scripts/market_assist_migration.sql --rehearse # 2. "Rehearsal OK" (on production, rolled back)
+python -m scripts.apply_sql scripts/market_assist_migration.sql            #    "Done." (an error = nothing applied: tell Claude)
+python -m scripts.audit_grants                                             #    must exit 0
+python -m scripts.render_deploy status                                     # 3. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait               #    <sha> = the assist1 commit Claude names
+curl -s https://api.yqmarketplace.com/health                               # 4. "commit" = the first 12 characters of <sha>
+python -m scripts.ops status                                               #    no "merged but not live": /yq-load works again
+```
+
+**5. Check the AI, then switch the chat on.** Portal → Merchant voice → *Free AI today*: the Groq rows say available
+(a row with only failures needs a new key). Portal → Settings → the marketplace chat switch → on (live within a
+minute). On your phone at yqmarketplace.com, tap **Ask YQ** and try: "fast charger for iphone 15"; the same in Arabic;
+paste "20 C07 / 10 type c cable / 5 power bank" on three lines; the microphone; a photo of a charger box; "talk to my
+salesman"; a thumbs up and "Suggest an idea". The idea and the questions appear on the Merchant voice page.
+
+**If something is wrong.** The chat off: Settings → the switch → off (a minute). The API back: `python -m
+scripts.render_deploy rollback --deploy <the id of step 3> --wait`. The two new tables can stay (nothing reads them
+without the new API); to remove them, run the reverse lines at the top of `scripts/market_assist_migration.sql` with
+`apply_sql`. Then tell Claude.
+
+---
+
 ## Reference: what R6 added to the checks
 
 - `/health` → `commit` (RENDER_GIT_COMMIT): the smoke can prove which build answers.

@@ -40,6 +40,7 @@ const ShopOrders = lazy(() => import('@/pages/ShopOrders'))
 const Salesmen = lazy(() => import('@/pages/Salesmen'))
 const ShopRules = lazy(() => import('@/pages/ShopRules'))
 const ShopAnalytics = lazy(() => import('@/pages/ShopAnalytics'))
+const MerchantVoice = lazy(() => import('@/pages/MerchantVoice'))
 // R7d: one marketplace merchant — facts, trend against its own usual, INSIGHTS with their evidence.
 const MerchantProfile = lazy(() => import('@/pages/MerchantProfile'))
 // The customer-facing shop, reused inside the portal so a salesman can order for a shop.
@@ -112,6 +113,7 @@ export default function App() {
           <Route path="salesmen" element={<Gate feature="Shop Admin"><Salesmen /></Gate>} />
           <Route path="shop-rules" element={<Gate feature="Shop Admin"><ShopRules /></Gate>} />
           <Route path="shop-analytics" element={<ShopAnalyticsGate><ShopAnalytics /></ShopAnalyticsGate>} />
+          <Route path="merchant-voice" element={<Gate feature="Shop Admin"><MerchantVoice /></Gate>} />
           <Route path="shop-analytics/merchant/:id" element={<ShopAnalyticsGate><MerchantProfile /></ShopAnalyticsGate>} />
           <Route path="coaching" element={<Gate feature="Sales"><Coaching /></Gate>} />
           <Route path="sales" element={<Gate feature="Sales"><Sales /></Gate>} />
