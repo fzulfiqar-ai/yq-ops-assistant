@@ -33,10 +33,12 @@ import {
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { MarketCard } from '../components/MarketCard'
+import { useTellBack } from '../components/RestockAsk'
 import { locale, ltrText, moneyText, withCurrency } from '../i18n'
 import { fmtDateShort, productName } from '../lib/format'
 import { useMarket } from '../MarketContext'
 import { useReducedMotion } from '../shell/useViewport'
+import { S } from '../strings'
 import { AnchorButton, Button, IconButton } from '../ui/Button'
 import { useToast } from '../ui/Toast'
 import type { AskAction, AskNext, AskResponse, AskStage } from './assistApi'
@@ -44,6 +46,7 @@ import { enabledDevForced } from './enabled'
 import { whatsappWith } from './handoff'
 import { ListReview } from './ListReview'
 import { canRecord, downscale, photoOf } from './media'
+import type { FirstMessage } from './open'
 import { Orb, type OrbState } from './Orb'
 import { A } from './strings'
 import { newId, type Msg } from './store'
@@ -241,21 +244,41 @@ function ReplyActions({ m, onVote }: { m: Msg; onVote: (m: Msg, v: 'up' | 'down'
   )
 }
 
+const NEXT_CHIP =
+  'inline-flex min-h-11 items-center rounded-full border border-plum/30 bg-plum-wash px-3.5 py-2 text-start text-sm font-semibold text-plum-ink transition-colors hover:border-plum/50 hover:bg-plum-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
+
+/** 2.2 (owner: "notify me on sold out"): the sold-out card's "Tell me when it's back" as the answer's next step: the
+ * market's own restock request (useTellBack: the rep's list, a phone asked for first when this device has none). */
+function NotifyChip({ item, label }: { item: ShopItem; label: string }) {
+  const { asked, ask, sheet } = useTellBack(item)
+  return (
+    <>
+      <button type="button" onClick={ask} disabled={asked} className={cn(NEXT_CHIP, 'gap-2', asked && 'border-ok/30 bg-ok-soft text-ok hover:border-ok/30 hover:bg-ok-soft')}>
+        {asked ? <Check size={15} aria-hidden="true" /> : <MessageCircle size={15} aria-hidden="true" />}
+        {asked ? S.card.tellBackDone : label}
+      </button>
+      {sheet}
+    </>
+  )
+}
+
 /** 2.1: the quick replies under the newest answer (or the opening line): tap instead of type. */
 function NextChips({ next, onPick }: { next: AskNext[]; onPick: (n: AskNext) => void }) {
+  const { itemsByCode } = useMarket()
   if (!next.length) return null
   return (
     <div role="group" aria-label={A.suggested} className="assist-rise flex flex-wrap gap-2">
-      {next.map((n, i) => (
-        <button
-          key={`${n.label}-${i}`}
-          type="button"
-          onClick={() => onPick(n)}
-          className="inline-flex min-h-11 items-center rounded-full border border-plum/30 bg-plum-wash px-3.5 py-2 text-start text-sm font-semibold text-plum-ink transition-colors hover:border-plum/50 hover:bg-plum-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
-        >
-          {n.label}
-        </button>
-      ))}
+      {next.map((n, i) => {
+        if (n.action === 'notify') {
+          const it = itemsByCode.get(String(n.q || ''))
+          return it ? <NotifyChip key={`${n.label}-${i}`} item={it} label={n.label} /> : null
+        }
+        return (
+          <button key={`${n.label}-${i}`} type="button" onClick={() => onPick(n)} className={NEXT_CHIP}>
+            {n.label}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -586,8 +609,9 @@ export function AssistChat({
   titleId,
 }: {
   itemCode: string | null
-  /** sent once as soon as the chat is open: words, or (2.1, the launcher's line) a tile's action */
-  first?: { id: number; text: string; action?: AskAction } | null
+  /** sent once as soon as the chat is open: words, or (2.1, the launcher's line) a tile's action; 2.2 with what it
+   * narrows to and which line it was */
+  first?: FirstMessage | null
   onClose?: () => void
   titleId?: string
 }) {
@@ -646,7 +670,7 @@ export function AssistChat({
   useEffect(() => {
     if (first && handled.current !== first.id) {
       handled.current = first.id
-      if (first.action) sendAction(first.action, first.text)
+      if (first.action) sendAction(first.action, first.text, first.q, first.nudge)
       else send(first.text)
     }
   }, [first, send, sendAction])

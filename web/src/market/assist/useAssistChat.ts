@@ -21,7 +21,7 @@ import {
   type TicketBody,
   type TicketReceipt,
 } from './assistApi'
-import { announceReady } from './open'
+import { announceReady, noteSeen, seenLines } from './open'
 import { forgetPhotos, keepPhoto, photoOf } from './media'
 import { A } from './strings'
 import { load, MAX_MSGS, newId, save, type ErrorKind, type Msg, type Row, type Saved } from './store'
@@ -145,11 +145,13 @@ function answerMsg(res: AskResponse, question: string, ctx: CatalogCtx, extra: P
   }
 }
 
-/** The quick replies the page can act on: a label, then words to send or a known action (a card the catalogue has). */
+/** The quick replies the page can act on: a label, then words to send or a known action (cards the catalogue has:
+ * 2.2, a "show" may name several, "notify" names the sold-out card). */
 export function cleanNext(next: AskNext[] | undefined, ctx: Pick<CatalogCtx, 'itemsByCode'>): AskNext[] {
   return (next || [])
     .filter((n) => n && typeof n.label === 'string' && n.label.trim() && (n.say || n.action))
-    .filter((n) => n.action !== 'show' || ctx.itemsByCode.has(String(n.q || '')))
+    .filter((n) => n.action !== 'show' || String(n.q || '').split(',').every((c) => ctx.itemsByCode.has(c)))
+    .filter((n) => n.action !== 'notify' || ctx.itemsByCode.has(String(n.q || '')))
     .slice(0, 4)
 }
 
@@ -284,9 +286,11 @@ export function useAssistChat(itemCodeProp: string | null) {
     if (session.helloKey === key) return
     session.helloKey = key
     publish({ hello: null })
-    postAsk({ ...askBase(session.snap.state.sid), message: 'hello', action: 'hello' })
+    // 2.2: never the line the bubble just showed, nor one of the last few; the one shown joins them
+    postAsk({ ...askBase(session.snap.state.sid), message: 'hello', action: 'hello', seen: seenLines() })
       .then((res) => {
         if (session.helloKey === key && res && typeof res.reply === 'string' && res.reply) {
+          if (session.snap.state.msgs.length === 0) noteSeen(res.hook)
           publish({ hello: { ...res, next: cleanNext(res.next, ctxRef.current) } })
         }
       })
@@ -312,8 +316,9 @@ export function useAssistChat(itemCodeProp: string | null) {
     )
   }, [])
 
-  /** A tile: its label is the message the merchant sees, its action is what the server answers (no model). */
-  const sendAction = useCallback((action: AskAction, label: string, q?: string) => {
+  /** A tile: its label is the message the merchant sees, its action is what the server answers (no model). 2.2: a
+   * reach-out line's tap says which line it was (`nudge`). */
+  const sendAction = useCallback((action: AskAction, label: string, q?: string, nudge?: string) => {
     if (session.inflight) return
     void run(
       {
@@ -322,15 +327,21 @@ export function useAssistChat(itemCodeProp: string | null) {
         retry: { text: label },
         user: { id: newId(), role: 'user', text: label },
         call: (signal, { sid, onStage, onCards }) =>
-          postAskStream({ ...askBase(sid), message: label, action, ...(q ? { q: q.slice(0, 60) } : {}), history_ids: historyIds() }, { onStage, onCards }, signal),
+          postAskStream(
+            { ...askBase(sid), message: label, action, ...(q ? { q: q.slice(0, 60) } : {}), ...(nudge ? { nudge: nudge.slice(0, 24) } : {}), history_ids: historyIds() },
+            { onStage, onCards },
+            signal,
+          ),
       },
       ctxRef.current,
     )
   }, [])
 
-  /** 2.1: a quick reply: words go as the merchant's own message, an action is answered from data. */
+  /** 2.1: a quick reply: words go as the merchant's own message, an action is answered from data (2.2: "notify" is
+   * the page's own chip, never sent). */
   const sendNext = useCallback(
     (n: AskNext) => {
+      if (n.action === 'notify') return
       if (n.action) sendAction(n.action, n.label, n.q)
       else if (n.say) send(n.say)
     },
