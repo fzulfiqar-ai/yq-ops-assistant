@@ -1767,6 +1767,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("page-wait", lambda pg: smooth.page_wait(pg, "/shop")))
             jobs.append(("drag+jank", lambda pg: smooth.sheet_drag(pg, STR["card.quickView"], STR["states.close"]) + smooth.scroll_jank(pg)))
             jobs.append(("no-glide", lambda pg: smooth.no_glide_on_touch(pg)))
+            jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
             jobs.append(("add-keypad", lambda pg: smooth.add_flight_keypad(pg, CART_KEY, STR["qty.apply"])))
         else:  # Ctrl K is a keyboard shortcut
@@ -1779,6 +1780,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("first-screen-slow", lambda pg: smooth.first_screen_slow(pg, base)))
             jobs.append(("calm", lambda pg: smooth.calm(pg, base)))
             jobs.append(("opening-logo", lambda pg: smooth.opening_logo(pg, base)))
+            jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
             jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
@@ -1788,7 +1790,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("page-glide", lambda pg: smooth.page_glide(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:
-        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm", "opening-logo", "discs-photos"), init=smooth.LOW_MEMORY if name == "lite" else "")
+        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm", "opening-logo", "opening-motion", "discs-photos"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
             record(job(pg))
         except PWError as exc:

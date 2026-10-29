@@ -1043,8 +1043,8 @@ def opening_logo(page: Page, base: str, delay_ms: int = 1200) -> list[Finding]:
       const look = () => {
         const tile = document.querySelector('#yq-boot img');
         let state = 'no boot frame';
-        if (tile) { const r = tile.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); state = hit && (hit === tile || tile.contains(hit) || hit.closest('#yq-boot')) ? 'logo' : 'covered'; }
-        else if (document.querySelector('[data-splash]')) state = 'opening';
+        if (document.querySelector('[data-splash]')) state = 'opening';
+        else if (tile) { const r = tile.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); state = hit && (hit === tile || tile.contains(hit) || hit.closest('#yq-boot')) ? 'logo' : 'covered'; }
         out.push(state);
         if (performance.now() - t0 < ms) requestAnimationFrame(look); else done(out);
       };
@@ -1645,3 +1645,96 @@ def kbd_badge(page: Page) -> list[Finding]:
     if not r["inOrder"]:
         return [("fail", "kbd-badge", f"the shortcut badge reads backwards in Arabic ({r['text']} shown as {r['text'][::-1]})", r)]
     return [("note", "kbd-badge", f"the shortcut badge reads {r['text']} left to right", r)]
+
+
+# ── the opening, smooth from the first pixel (the owner's video, 29-Oct-2026) ───────────────────────
+OPENING_WATCH = r"""
+(holdMs) => new Promise((done) => {
+  const out = { bootMoving: null, carried: null, restarted: false, exitBooked: null, filters: [], hold: [] };
+  const t0 = performance.now();
+  // an animation in its active phase (a delay still running, or a finished one, does not count);
+  // the first frame's 8 s safety fade is not motion
+  const active = (a) => {
+    if (a.playState !== 'running' || a.animationName === 'yq-boot-out') return false;
+    const t = a.effect.getComputedTiming();
+    return t.localTime > t.delay && t.localTime < t.delay + t.activeDuration;
+  };
+  const moving = (root) => (root ? root.getAnimations({ subtree: true }).filter(active).length : 0);
+  // the first frame's animations start with its first painted frame (a phone paints later)
+  const started = (root) => root.getAnimations({ subtree: true }).some((a) => a.animationName !== 'yq-boot-out' && Number(a.currentTime) > 0);
+  const bigFilters = () => {
+    const area = innerWidth * innerHeight;
+    const found = [];
+    for (const root of [document.getElementById('yq-boot'), document.querySelector('[data-splash]')]) {
+      if (!root) continue;
+      for (const el of [root, ...root.querySelectorAll('*')]) {
+        const f = getComputedStyle(el).filter;
+        if (!f || f === 'none') continue;
+        const b = el.getBoundingClientRect();
+        if (b.width * b.height > 0.2 * area) found.push(el.tagName.toLowerCase() + ' ' + f);
+      }
+    }
+    return found;
+  };
+  let mountAt = null, carried = null, carriedT = null;
+  const look = () => {
+    const now = performance.now() - t0;
+    const boot = document.getElementById('yq-boot');
+    const s = document.querySelector('[data-splash]');
+    if (!s && boot && out.bootMoving === null && now > 300 && started(boot)) {
+      out.bootMoving = moving(boot) > 0;
+      const a = boot.getAnimations({ subtree: true }).find((x) => x.animationName !== 'yq-boot-out' && x.effect.target !== boot);
+      if (a) { carried = a.effect.target; carriedT = a.currentTime; }
+    }
+    if (s && mountAt === null) {
+      mountAt = now;
+      out.exitBooked = s.getAnimations().some((a) => { const k = a.effect.getKeyframes(); return k.length > 0 && String(k[k.length - 1].opacity) === '0'; });
+      out.filters = bigFilters();
+    }
+    if (s && mountAt !== null) {
+      const since = now - mountAt;
+      if (carried && out.carried === null && since > 200) {
+        out.carried = carried.isConnected;
+        const a = carried.getAnimations()[0];
+        if (!a || (carriedT != null && a.currentTime < carriedT)) out.restarted = true;
+      }
+      if (since > 1600 && since < holdMs - 100) out.hold.push(moving(s) + moving(document.getElementById('yq-boot')));
+    }
+    if ((!s && mountAt !== null) || now > 10000) return done({ ...out, mountAt: mountAt == null ? null : Math.round(mountAt) });
+    requestAnimationFrame(look);
+  };
+  look();
+})
+"""
+
+
+def opening_motion(page: Page, base: str, delay_ms: int = 900, hold_ms: int = 1900) -> list[Finding]:
+    """The opening, smooth from the first pixel (the owner's video, 29-Oct-2026: it stepped, froze for
+    ~2 s, then cut to the shop). With the opening's code held back a little: the served first frame
+    already moves (the dawn rises from the first paint), and the opening carries that dawn on instead
+    of restarting it; nothing large is drawn through a live filter (four full-screen blurs re-applied
+    every frame stepped it at 4-9 fps headless); the exit is booked when the opening mounts, so a busy
+    page can neither delay it nor drop its fade into a cut; and something keeps moving through the
+    hold, so it never stands frozen before it leaves."""
+    page.add_init_script("try { sessionStorage.removeItem('yq-splash-session'); localStorage.removeItem('yq-splash-at') } catch (e) {}")
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/assets/Splash-[^/]+\.js$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    r = page.evaluate(OPENING_WATCH, hold_ms)
+    page.unroute_all(behavior="ignoreErrors")
+    if r["mountAt"] is None:
+        return [("warn", "opening-motion", "the opening did not play, not measured", r)]
+    out: list[Finding] = []
+    if not r["bootMoving"]:
+        out.append(("fail", "opening-motion", "the served first frame stands still until the opening's code arrives", r))
+    if not r["carried"] or r["restarted"]:
+        out.append(("fail", "opening-motion", "the opening does not carry the first frame's dawn on (it is removed or restarts)", r))
+    if r["filters"]:
+        out.append(("fail", "opening-motion", f"{len(r['filters'])} large layer(s) of the opening are drawn through a live filter: " + "; ".join(r["filters"][:4]), r))
+    if not r["exitBooked"]:
+        out.append(("fail", "opening-motion", "the opening's exit is not booked when it mounts (a timer starts it, so a busy page delays it or cuts it)", r))
+    if not r["hold"] or min(r["hold"]) == 0:
+        out.append(("fail", "opening-motion", "nothing moves in the hold before the exit (the frame stands frozen)", r))
+    return out or [("note", "opening-motion", "the dawn moves from the first paint and carries on, no live filter, exit booked, the hold keeps moving", r)]

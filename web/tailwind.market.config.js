@@ -20,6 +20,10 @@ export default {
   safelist: [
     'horizon',
     'is-rising',
+    // the opening's background, which the served first frame (web/vite.config.ts BOOT_HTML) draws too
+    'is-opening',
+    'open-veil-1',
+    'open-veil-2',
     'is-small',
     'band-sash',
     'slider-track',
