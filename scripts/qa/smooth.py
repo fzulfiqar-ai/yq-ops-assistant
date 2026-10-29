@@ -1879,3 +1879,75 @@ def panel_still(page: Page, quick_view: str) -> list[Finding]:
     if r["behind"]:
         out.append(("fail", "panel-still", f"the page behind the open panel keeps animating: {', '.join(r['behind'][:4])}", r))
     return out or [("note", "panel-still", f"the page held still, the photo landed {r['land']} px from its place, nothing animates behind", r)]
+
+
+NO_BLUR = r"""
+() => [...document.querySelectorAll('body *')].filter((el) => {
+  if (el.closest('[data-assist-panel]')) return false;
+  const cs = getComputedStyle(el);
+  const f = cs.backdropFilter || cs.webkitBackdropFilter;
+  return f && f !== 'none' && el.getBoundingClientRect().width > 0;
+}).map((el) => (el.getAttribute('aria-label') || el.className || el.tagName).toString().slice(0, 40) + ' ' + (getComputedStyle(el).backdropFilter || getComputedStyle(el).webkitBackdropFilter))
+"""
+
+
+PAINT_SCAN = r"""
+async () => {
+  const clip = new Set(), will = new Set();
+  const look = () => {
+    for (const a of document.getAnimations()) {
+      try { if (a.effect.getKeyframes().some((k) => 'clipPath' in k)) clip.add(a.animationName || 'waapi'); } catch (e) {}
+    }
+    const area = innerWidth * innerHeight;
+    for (const el of document.querySelectorAll('#root *')) {
+      const w = getComputedStyle(el).willChange;
+      if (!w || w === 'auto') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width * r.height > 0.25 * area && !el.getAnimations().some((a) => a.playState === 'running')) will.add((el.className || el.tagName).toString().slice(0, 30) + ' ' + w);
+    }
+  };
+  for (let i = 0; i < 16; i++) { window.scrollBy(0, innerHeight * 0.8); await new Promise((r) => setTimeout(r, 160)); look(); }
+  await new Promise((r) => setTimeout(r, 1200));
+  look();
+  window.scrollTo(0, 0);
+  return { clip: [...clip], will: [...will] };
+}
+"""
+
+
+def no_blur(page: Page, quick_view: str) -> list[Finding]:
+    """Round 2, D (desktop): no frosted glass. Nothing is drawn through a backdrop-filter with the page
+    at rest, with a product panel open or with the search palette open (the chat panel, another track,
+    aside): on a PC's integrated graphics each blur was recomputed on every scroll frame and under every
+    open layer, the reason phones never had it."""
+    found = {"rest": page.evaluate(NO_BLUR)}
+    btn = _quick_view(page, quick_view)
+    if btn is not None:
+        btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+        page.wait_for_timeout(700)
+        btn.click()
+        try:
+            page.wait_for_selector("[data-sheet-panel]", timeout=4000)
+        except PWError:
+            pass
+        page.wait_for_timeout(400)
+        found["panel"] = page.evaluate(NO_BLUR)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"] input', timeout=4000)
+    except PWError:
+        pass
+    page.wait_for_timeout(400)
+    found["palette"] = page.evaluate(NO_BLUR)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    # and down the whole page: no permanent will-change on a large layer (the night band's blurred arcs
+    # kept theirs, so their blur was re-applied on every scroll frame), no animation of clip-path (the
+    # section titles: off the compositor, a main-thread paint per scroll frame)
+    found.update(page.evaluate(PAINT_SCAN))
+    bad = {k: v for k, v in found.items() if v}
+    if bad:
+        return [("fail", "no-blur", "frosted or costly layers on a PC: " + "; ".join(f"{k}: {', '.join(v[:3])}" for k, v in bad.items()), found)]
+    return [("note", "no-blur", "no backdrop blur at rest, under a product panel or under the palette; no lasting will-change or clip-path animation", found)]

@@ -168,10 +168,10 @@ export function StickyHeader() {
 
   return (
     <header ref={headerRef} className="header-lift sticky top-0 z-header">
-      {/* `relative z-[1]`: with a mouse each frosted layer is its own stacking context (the blur),
-          so the strip below, painted later, covered the mega-nav's first row and took its clicks
-          (29-Oct-2026). The row now paints above the strip, and the menu it holds with it. */}
-      <div className="glass relative z-[1] border-b border-line">
+      {/* `relative z-[1]`: the row is its own stacking context above the strip below, so the strip,
+          painted later, never covers the mega-nav's first row or takes its clicks (it did while each
+          frosted bar was a context of its own: 29-Oct-2026). The bars are solid since round 2. */}
+      <div className="bar-solid relative z-[1] border-b border-line">
         <div className="container-m flex h-header items-center gap-3 lg:gap-4">
           <Link to="/" aria-label={`${S.brand} · ${S.kicker}`} className="hit relative flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
             <img src="/yq-logo-160.webp" alt="" width={40} height={40} className="h-10 w-10 rounded-sm" />
@@ -317,7 +317,7 @@ export function StickyHeader() {
       </div>
 
       {showStrip && categories.length > 0 && (
-        <div className="glass border-b border-line">
+        <div className="bar-solid border-b border-line">
           <div className="container-m no-scrollbar relative flex h-11 items-center gap-1.5 overflow-x-auto">
             <HoverPill className="rounded-full" />
             {categories.map((c) => {

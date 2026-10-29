@@ -281,6 +281,12 @@
       }
     }
   }
+  /* The desktop header and category strip are solid (29-Oct-2026, round 2): their frost was recomputed on
+   * every scroll frame and under every open layer on a PC's integrated graphics, the same reason the
+   * phone's bars never blurred. 97 % of the surface, so the page does not show through. */
+  .bar-solid {
+    background-color: hsl(var(--m-surface) / 0.97);
+  }
   .skeleton {
     position: relative;
     overflow: hidden;
@@ -809,16 +815,16 @@
 }
 /* Section titles rise out of a mask as they come up the screen (F4). A scroll-driven animation: no
  * observer, so a title can never be left hidden; a browser without scroll timelines shows it still. */
+/* transform and opacity only (round 2): a clip-path keyframe kept the rise off the compositor, a
+ * main-thread paint per scroll frame for every title in range */
 @keyframes m-title-rise {
   from {
     opacity: 0;
     transform: translate3d(0, 0.5em, 0);
-    clip-path: inset(0 0 60% 0);
   }
   to {
     opacity: 1;
     transform: translate3d(0, 0, 0);
-    clip-path: inset(0 0 0 0);
   }
 }
 @supports (animation-timeline: view()) {
@@ -970,9 +976,10 @@ html[data-lite] .m-photo::after {
     --arc-blur: 26px;
   }
   @media (prefers-reduced-motion: no-preference) {
+    /* no will-change (round 2): the rise promotes the arcs while it runs; a permanent one kept the night
+     * band's blurred arcs composited, so their blur was re-applied on every scroll frame */
     .horizon.is-rising > i {
       animation: m-horizon-rise var(--arc-dur) cubic-bezier(0.16, 1, 0.3, 1) var(--arc-delay) both;
-      will-change: transform, opacity;
     }
   }
 }

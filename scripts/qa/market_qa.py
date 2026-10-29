@@ -1784,6 +1784,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
             jobs.append(("slides-alive", lambda pg: smooth.slides_alive(pg)))
             jobs.append(("panel-still", lambda pg: smooth.panel_still(pg, STR["card.quickView"])))
+            jobs.append(("no-blur", lambda pg: smooth.no_blur(pg, STR["card.quickView"])))
             jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
