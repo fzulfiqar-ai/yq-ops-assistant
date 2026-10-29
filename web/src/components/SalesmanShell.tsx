@@ -4,6 +4,9 @@ import { Bell, BookImage, ClipboardList, CircleUserRound, House, KeyRound, Loade
 import { mustResetOf, passwordScreenFor, useAuth } from '@/lib/auth'
 import { MarketCapture } from '@/components/MarketCapture'
 import { navFor } from '@/lib/nav'
+import { PageErrorBoundary } from '@/lib/pageFrame'
+import { useCodeWarm, useWarmOnIntent } from '@/lib/prefetch'
+import { noteTabTap, useShellScroll } from '@/lib/shellScroll'
 import { cn } from '@/lib/utils'
 import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
 import { SignOutSheet } from '@/pages/sales/SignOutSheet'
@@ -126,8 +129,20 @@ function useActiveIndex(tabs: Tab[]): number {
   return activeTab(pathname, tabs)
 }
 
+/**
+ * What a tab link does besides navigating (ship 2, items 12 and 13): a press, a resting hover or a focus
+ * fetches its page's code (and Today's read) ahead, so the first tap never freezes on a download; the
+ * tap tells the scroll keeper it came from the tab bar, so the tab lands where it was left (or, the tab
+ * already open, back at its top) — lib/shellScroll.
+ */
+function useTabLink(): (to: string) => ReturnType<ReturnType<typeof useWarmOnIntent>> & { onClick: () => void } {
+  const warmOn = useWarmOnIntent()
+  return (to) => ({ ...warmOn(to), onClick: () => noteTabTap(to) })
+}
+
 function FloatingTabs({ tabs }: { tabs: Tab[] }) {
   const active = useActiveIndex(tabs)
+  const tabLink = useTabLink()
   // as many columns as the rep has tabs; the lit pill hides on a page under none of them
   const n = Math.max(1, tabs.length)
   return (
@@ -139,7 +154,7 @@ function FloatingTabs({ tabs }: { tabs: Tab[] }) {
           const on = i === active
           return (
             <li key={t.to} className="relative">
-              <NavLink to={t.to} end={t.end} aria-current={on ? 'page' : undefined} className={cn('relative flex h-full flex-col items-center justify-center gap-0.5 rounded-2xl text-[11px] font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70', on ? 'text-accent-foreground' : 'text-muted-foreground')}>
+              <NavLink to={t.to} end={t.end} {...tabLink(t.to)} aria-current={on ? 'page' : undefined} className={cn('relative flex h-full flex-col items-center justify-center gap-0.5 rounded-2xl text-[11px] font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70', on ? 'text-accent-foreground' : 'text-muted-foreground')}>
                 <span className={cn('relative transition-transform duration-200', on && 'scale-[1.08]')}>
                   <Icon size={22} strokeWidth={on ? 2.1 : 1.75} aria-hidden="true" />
                   {t.badge ? <Badge count={t.badge} className="absolute -right-2.5 -top-1.5" /> : null}
@@ -155,6 +170,7 @@ function FloatingTabs({ tabs }: { tabs: Tab[] }) {
 }
 
 function TopTabs({ tabs }: { tabs: Tab[] }) {
+  const tabLink = useTabLink()
   return (
     <nav aria-label="Main" className="hidden md:block lg:hidden">
       <ul className="flex items-center gap-1 rounded-full border border-border bg-muted p-1">
@@ -162,7 +178,7 @@ function TopTabs({ tabs }: { tabs: Tab[] }) {
           const Icon = t.icon
           return (
             <li key={t.to}>
-              <NavLink to={t.to} end={t.end} className={({ isActive }) => cn('flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-semibold transition-colors duration-150', isActive ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground')}>
+              <NavLink to={t.to} end={t.end} {...tabLink(t.to)} className={({ isActive }) => cn('flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-semibold transition-colors duration-150', isActive ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground')}>
                 <Icon size={16} aria-hidden="true" />
                 <span className="relative pr-1">
                   {t.label}
@@ -181,6 +197,7 @@ function Sidebar({ tabs, more, name, onSignOut, collapsed, onToggle }: { tabs: T
   // 1024-1279: always the icon rail; 1280+: full width unless collapsed. Labels and the wide layout
   // are switched by CSS (xl:), so the first paint is already right — no media query in JS.
   const full = !collapsed
+  const tabLink = useTabLink()
   const label = cn('flex-1 truncate', full ? 'hidden xl:inline' : 'hidden')
   const item = ({ isActive }: { isActive: boolean }) =>
     cn(
@@ -203,7 +220,7 @@ function Sidebar({ tabs, more, name, onSignOut, collapsed, onToggle }: { tabs: T
         {tabs.map((t) => {
           const Icon = t.icon
           return (
-            <NavLink key={t.to} to={t.to} end={t.end} className={item} title={t.label} aria-label={t.badge ? `${t.label}, ${t.badge} new` : t.label}>
+            <NavLink key={t.to} to={t.to} end={t.end} {...tabLink(t.to)} className={item} title={t.label} aria-label={t.badge ? `${t.label}, ${t.badge} new` : t.label}>
               <Icon size={18} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
               <span className={label}>{t.label}</span>
               {t.badge ? (
@@ -286,12 +303,7 @@ export function SalesmanShell() {
   // A temporary password: only the password screen is useful (the API refuses everything else).
   const mustReset = mustResetOf(me, session)
   const passwordScreen = passwordScreenFor(me)
-  if (mustReset && loc.pathname !== passwordScreen.split('#')[0]) {
-    return <Navigate to={passwordScreen} replace />
-  }
 
-  const name = me?.full_name || me?.email?.split('@')[0] || ''
-  const first = firstName(name)
   // only the tabs whose page this login may open (the route's Gate in App.tsx; pages/sales/tabs.ts)
   const tabs: Tab[] = (
     [
@@ -302,6 +314,18 @@ export function SalesmanShell() {
       { to: '/account', label: 'Me', icon: CircleUserRound },
     ] satisfies Tab[]
   ).filter((t) => tabAllowed(me, t.to))
+  const tabPaths = tabs.map((t) => t.to)
+  // the window's scroll: a new page at the top, Back where it was, each tab where it was left (lib/shellScroll)
+  useShellScroll(tabPaths)
+  // the tabs' code at idle once the shell has painted (the first tap used to freeze on its download)
+  useCodeWarm(tabPaths, loc.pathname, !!me && !mustReset)
+
+  if (mustReset && loc.pathname !== passwordScreen.split('#')[0]) {
+    return <Navigate to={passwordScreen} replace />
+  }
+
+  const name = me?.full_name || me?.email?.split('@')[0] || ''
+  const first = firstName(name)
   // everything else an admin granted this salesman (Finds, Leads, Field notes, Coach, Reports…)
   const more: Tab[] = navFor(me)
     .filter((n) => !CORE.has(n.to) && n.to !== '/')
@@ -341,15 +365,18 @@ export function SalesmanShell() {
           {/* --yq-capture-room: the floating "Spotted" button's height while it shows (MarketCapture),
              so the last line of a page can scroll out from under it */}
           <main className="pb-[calc(var(--yq-tabbar,88px)+env(safe-area-inset-bottom)+var(--yq-capture-room,0px))] md:pb-[calc(2.5rem+var(--yq-capture-room,0px))]">
-            <Suspense
-              fallback={
-                <div className="grid h-[60vh] place-items-center text-muted-foreground">
-                  <Loader2 className="animate-spin" size={22} />
-                </div>
-              }
-            >
-              {outlet}
-            </Suspense>
+            {/* a page that breaks shows its own error with Reload; the tabs keep working (lib/pageFrame) */}
+            <PageErrorBoundary resetKey={loc.pathname}>
+              <Suspense
+                fallback={
+                  <div className="grid h-[60vh] place-items-center text-muted-foreground">
+                    <Loader2 className="animate-spin" size={22} />
+                  </div>
+                }
+              >
+                {outlet}
+              </Suspense>
+            </PageErrorBoundary>
           </main>
         </div>
       </div>
