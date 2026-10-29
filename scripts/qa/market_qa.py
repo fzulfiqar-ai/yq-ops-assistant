@@ -1768,6 +1768,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("drag+jank", lambda pg: smooth.sheet_drag(pg, STR["card.quickView"], STR["states.close"]) + smooth.scroll_jank(pg)))
             jobs.append(("no-glide", lambda pg: smooth.no_glide_on_touch(pg)))
             jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
+            jobs.append(("slides-alive", lambda pg: smooth.slides_alive(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
             jobs.append(("add-keypad", lambda pg: smooth.add_flight_keypad(pg, CART_KEY, STR["qty.apply"])))
         else:  # Ctrl K is a keyboard shortcut
@@ -1781,6 +1782,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("calm", lambda pg: smooth.calm(pg, base)))
             jobs.append(("opening-logo", lambda pg: smooth.opening_logo(pg, base)))
             jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
+            jobs.append(("slides-alive", lambda pg: smooth.slides_alive(pg)))
             jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
@@ -1828,6 +1830,8 @@ def polish_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
     Arabic a facet chip's count after its label and the search badge reading ⌘K; fresh pages, as
     menu_run."""
     jobs = [smooth.caps_labels]
+    if st.key == "category":
+        jobs.append(smooth.slides_alive)
     if LANG == "ar" and st.key == "category":
         jobs.append(smooth.bidi_chips)
     if LANG == "ar" and st.key == "home" and vp.width >= 1280:

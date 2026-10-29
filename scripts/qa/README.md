@@ -171,6 +171,7 @@ languages, each check on a fresh page:
 | `caps-labels` | home, category | no tracked ALL-CAPS label, light or night, the whole page scrolled through (the opening's Skip is not on these pages) |
 | `bidi-chips` | category + the Browse menu, Arabic | each chip's count sits after its label, and each label reads right to left (a `dir="auto"` island turned "USB إلى C" round) |
 | `kbd-badge` | home, Arabic, ≥ 1280 px | the search box's shortcut badge reads ⌘K left to right |
+| `slides-alive` | home (English, desktop + phone), category (both languages) | a product slide is never a still picture: through its dwell the discs keep floating and the art breathes in (≥ 0.5 px each in 0.9 s, once the spring into the fan has settled) |
 
 The empty Orders page must show its "How an order moves" steps (a needle of the `orders` state).
 

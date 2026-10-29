@@ -1738,3 +1738,45 @@ def opening_motion(page: Page, base: str, delay_ms: int = 900, hold_ms: int = 19
     if not r["hold"] or min(r["hold"]) == 0:
         out.append(("fail", "opening-motion", "nothing moves in the hold before the exit (the frame stands frozen)", r))
     return out or [("note", "opening-motion", "the dawn moves from the first paint and carries on, no live filter, exit booked, the hold keeps moving", r)]
+
+
+# ── living slides (the owner, 29-Oct-2026: "shows like a video") ────────────────────────────────────
+SLIDE_PROBE = r"""
+() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 40 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth; };
+  const art = [...document.querySelectorAll('.creative')].find((c) => {
+    const s = c.closest('[data-slide-state]');
+    return vis(c) && (!s || s.getAttribute('data-slide-state') !== 'idle');
+  });
+  if (!art) return null;
+  const disc = art.querySelector('.creative-disc[data-pos="c"]') || art.querySelector('.creative-disc');
+  if (!disc) return null;
+  const d = disc.getBoundingClientRect();
+  const slide = art.closest('[data-slide-state]') || art.closest('.slide-card') || art;
+  return { key: (slide.textContent || '').trim().slice(0, 40), discX: d.left + d.width / 2, discY: d.top + d.height / 2, artW: art.getBoundingClientRect().width };
+}
+"""
+
+
+def slides_alive(page: Page, settle_ms: int = 1500, window_ms: int = 900) -> list[Finding]:
+    """A product slide is never a still picture (the owner, 29-Oct-2026: "shows like a video"): through
+    its dwell the slide's discs keep floating and its art pushes slowly in. Measured on the slide on
+    screen once its spring into the fan has settled; a slide that changes while measured is not
+    measured. Reduced motion and lite mode are the calm guard's."""
+    page.wait_for_timeout(settle_ms)
+    a = page.evaluate(SLIDE_PROBE)
+    if not a:
+        return [("warn", "slides-alive", "no product slide on screen, not measured", None)]
+    page.wait_for_timeout(window_ms)
+    b = page.evaluate(SLIDE_PROBE)
+    if not b or b["key"] != a["key"]:
+        return [("warn", "slides-alive", "the slide changed while it was measured, not measured", {"a": a, "b": b})]
+    moved = abs(b["discX"] - a["discX"]) + abs(b["discY"] - a["discY"])
+    grew = b["artW"] - a["artW"]
+    vals = {"slide": a["key"], "moved": round(moved, 2), "grew": round(grew, 2)}
+    out: list[Finding] = []
+    if moved < 0.5:
+        out.append(("fail", "slides-alive", f"the slide's product discs stand still through its dwell (moved {moved:.2f} px in {window_ms} ms)", vals))
+    if grew < 0.5:
+        out.append(("fail", "slides-alive", f"the slide's art does not push in through its dwell (grew {grew:.2f} px in {window_ms} ms)", vals))
+    return out or [("note", "slides-alive", f"the discs float ({moved:.1f} px) and the art pushes in ({grew:.1f} px) in {window_ms} ms", vals)]

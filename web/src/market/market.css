@@ -1486,6 +1486,66 @@ html[data-lite] .m-photo::after {
 [dir='rtl'] .slide-scrim {
   transform: scaleX(-1);
 }
+/* Living slides (29-Oct-2026, the owner: "shows like a video"): through its dwell a product slide is
+ * never a still picture. Its discs float, out of step, on the independent translate / rotate
+ * properties, so they add to the fan's transform and its spring instead of replacing them; its art
+ * breathes slowly in and out (scale on .creative, linear, so it never stands still); a light sweeps
+ * across the centre product every 7 s. All on the compositor. A slide off stage pauses where it is
+ * (no snap back while it leaves), and reduced motion or a lite phone gets none of it. */
+@keyframes m-disc-float {
+  from {
+    translate: 0 -1.5cqh;
+    rotate: -0.8deg;
+  }
+  to {
+    translate: 0 1.5cqh;
+    rotate: 0.8deg;
+  }
+}
+@keyframes m-art-breathe {
+  to {
+    scale: 1.045;
+  }
+}
+@keyframes m-disc-sheen {
+  0% {
+    transform: translate3d(-120%, 0, 0);
+  }
+  18%,
+  100% {
+    transform: translate3d(120%, 0, 0);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-lite]) .creative {
+    animation: m-art-breathe 6s linear infinite alternate;
+  }
+  html:not([data-lite]) .creative-disc {
+    animation: m-disc-float var(--float, 5.2s) ease-in-out calc(var(--k, 0) * -1.9s) infinite alternate;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='l'] {
+    --float: 6.1s;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='r'] {
+    --float: 5.6s;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='c'] {
+    overflow: hidden;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='c']::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 34%, hsl(0 0% 100% / 0.42) 50%, transparent 66%);
+    animation: m-disc-sheen 7s cubic-bezier(0.4, 0, 0.2, 1) 1.4s infinite both;
+  }
+  html:not([data-lite]) [data-slide-state='idle'] .creative,
+  html:not([data-lite]) [data-slide-state='idle'] .creative-disc,
+  html:not([data-lite]) [data-slide-state='idle'] .creative-disc::after {
+    animation-play-state: paused;
+  }
+}
 /* end v3: slider */
 
 /* v3: hints */
