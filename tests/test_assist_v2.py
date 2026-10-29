@@ -47,6 +47,11 @@ def _():
     assert "before insert on shop_tickets" in sql and "'t-' ||" in sql          # T-YYMM-NNNN
     assert "before update on shop_ticket_events" in sql and "before truncate on shop_ticket_events" in sql
     assert "on delete cascade" in sql                                            # the retention purge
+    assert "on shop_tickets (device_id, client_ticket_id)" in sql                 # a double tap is one ticket
+    assert "on shop_ticket_events (ticket_id, (detail->>'to'))" in sql            # one reminder per recipient
+    assert "grant select on v_assist_open_tickets to yq_readonly" in sql          # the Command Centre's view
+    view = sql[sql.index("create or replace view v_assist_open_tickets"):sql.index("revoke all on v_assist_open_tickets")]
+    assert not any(c in view for c in ("note", "photos", "customer_id", "device_id", "ip_hash")), view
     for k, v in (("shop_ai_support_enabled", "0"), ("shop_ai_retention_days", "180"),
                  ("shop_ticket_keep_days", "730"), ("shop_ticket_sla_hours", "24"), ("shop_ai_policies", "[]")):
         assert f"('{k}', '{v}'" in sql, k

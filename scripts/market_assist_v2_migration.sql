@@ -1,7 +1,7 @@
 -- YQ Assist v2 (29-Oct-2026): the tickets the chat raises, their timeline, and turns that say who and how fast.
 --   Apply:    python -m scripts.apply_sql scripts/market_assist_v2_migration.sql --rehearse
 --             python -m scripts.apply_sql scripts/market_assist_v2_migration.sql ; python -m scripts.audit_grants
---   Reverse:  alter table shop_ask_turns drop column if exists ticket_id;
+--   Reverse:  drop view if exists v_assist_open_tickets; alter table shop_ask_turns drop column if exists ticket_id;
 --             drop table if exists shop_ticket_events; drop table if exists shop_tickets;
 --             drop function if exists shop_tickets_set_ref(); drop function if exists shop_ticket_events_no_rewrite();
 --             (the new shop_ask_turns columns, the widened checks and the settings can stay: nothing else reads them)
@@ -35,7 +35,7 @@ create table if not exists shop_tickets (
   updated_at      timestamptz not null default now(),
   first_seen_at   timestamptz,                              -- the rep or the office first opened it
   resolved_at     timestamptz,
-  sla_notified_at timestamptz,                              -- the one reminder (rep, then owner) was claimed
+  client_ticket_id text,                                    -- the page's own id: a double tap or a retry is one ticket
   ip_hash         text
 );
 alter table shop_tickets enable row level security;        -- service role only; no policies
@@ -45,6 +45,8 @@ create index if not exists shop_tickets_status_idx   on shop_tickets (status, cr
 create index if not exists shop_tickets_salesman_idx on shop_tickets (salesman_id, status);
 create index if not exists shop_tickets_order_idx    on shop_tickets (order_id);
 create index if not exists shop_tickets_device_idx   on shop_tickets (device_id, created_at desc);
+create unique index if not exists shop_tickets_client_idx on shop_tickets (device_id, client_ticket_id)
+  where client_ticket_id is not null;
 
 comment on table shop_tickets is
   'YQ Assist v2 (29-Oct-2026): what a merchant reported in the chat (damaged, wrong or missing items, delivery, a call-back, an account request), only on orders that device holds. Owned by the order''s rep; the owner watches. Masked text, private photos. Kept 730 days after closing (shop_ticket_keep_days).';
@@ -105,9 +107,26 @@ create trigger shop_ticket_events_no_truncate
   before truncate on shop_ticket_events
   for each statement execute function shop_ticket_events_no_rewrite();
 
--- one SLA reminder claim per ticket: two scheduler runs racing can never send two
-create unique index if not exists shop_ticket_events_one_reminder_idx on shop_ticket_events (ticket_id)
+-- one SLA reminder claim per ticket and recipient (the rep first, then the owner): two scheduler runs racing can
+-- never send two
+create unique index if not exists shop_ticket_events_one_reminder_idx on shop_ticket_events (ticket_id, (detail->>'to'))
   where event = 'reminder';
+
+-- the Command Centre's view (app/metrics.py reads as yq_readonly): the open tickets by reference, kind, status,
+-- age and rep only; never the note, the photos, the shop or the device
+create or replace view v_assist_open_tickets as
+select t.ref, t.kind, t.status, t.created_at, t.first_seen_at, t.salesman_id
+from shop_tickets t
+where t.status in ('new', 'in_progress', 'waiting_shop');
+revoke all on v_assist_open_tickets from anon, authenticated;
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'yq_readonly') then
+    grant select on v_assist_open_tickets to yq_readonly;
+  end if;
+end $$;
+comment on view v_assist_open_tickets is
+  'YQ Assist v2: the open chat tickets for the Command Centre attention item: reference, kind, status, age and rep id only. yq_readonly only; not security_invoker (the role reads the view, not the table).';
 
 -- ── 3. turns that say who asked, who was offered, what was shown and where the time went ────────
 alter table shop_ask_turns add column if not exists action        text;      -- a tile / chip tapped (no model call)
@@ -178,6 +197,18 @@ begin
      and (has_table_privilege('yq_readonly', 'public.shop_tickets', 'SELECT')
        or has_table_privilege('yq_readonly', 'public.shop_ticket_events', 'SELECT')) then
     raise exception 'market_assist_v2 migration FAILED: tickets hold merchant reports and must not be readable by yq_readonly';
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'yq_readonly')
+     and not has_table_privilege('yq_readonly', 'public.v_assist_open_tickets', 'SELECT') then
+    raise exception 'market_assist_v2 migration FAILED: yq_readonly cannot read v_assist_open_tickets';
+  end if;
+  if exists (select 1 from pg_class where oid = 'public.v_assist_open_tickets'::regclass
+             and coalesce(reloptions::text, '') like '%security_invoker%') then
+    raise exception 'market_assist_v2 migration FAILED: v_assist_open_tickets must not be security_invoker';
+  end if;
+  if exists (select 1 from information_schema.role_table_grants
+             where table_schema = 'public' and table_name = 'v_assist_open_tickets' and grantee in ('anon', 'authenticated')) then
+    raise exception 'market_assist_v2 migration FAILED: v_assist_open_tickets is granted to anon/authenticated';
   end if;
   select count(*) into n from information_schema.columns
   where table_schema = 'public' and table_name = 'shop_ask_turns'
