@@ -1058,7 +1058,8 @@ def _():
     # a parent's new onClose on every keystroke must not re-run the open effect (its focus step drops the keyboard)
     sheet = _read("web/src/components/ui/sheet.tsx")
     assert "const close = useCallback(() => onCloseRef.current(), [])" in sheet
-    assert "}, [open, close])" in sheet and "[onClose])\n\n  useEffect(() => {\n    if (!open) return" not in sheet
+    # ship 2 (30-Oct-2026): the layer mounts per open, so the effect's inputs are all stable (no `open`)
+    assert "}, [panelEl, opener, close])" in sheet and "[onClose])\n\n  useEffect(() => {\n    if (!open) return" not in sheet
     cap = _read("web/src/components/MarketCapture.tsx")
     assert "useCustomers(open && pickShop)" not in cap and "<select" not in cap.split("function ShopPicker(", 1)[1]
     picker = cap.split("function ShopPicker(", 1)[1].split("\nfunction ", 1)[0]
