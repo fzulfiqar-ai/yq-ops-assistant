@@ -80,7 +80,7 @@ def _i(x, default: int = 0) -> int:
 # ── the one SQL: a rep's shops with cadence and value (v_sales, yq_readonly) ──
 
 # $1 = the rep's Focus name; '' = every rep, which only load_shops(all_reps=True) ever sends (the
-# admin route). Names in v_sales carry a warehouse suffix ("Ahmed Aradi - Acc WH"): the match is
+# admin route). Names in v_sales carry a warehouse suffix ("Rep Name - Acc WH"): the match is
 # the whole name or the part before ' - ' (rep_base), the same rule as rep_month_sales' `name - %`
 # but with no LIKE, so a '%' or '_' in an admin-typed Focus name cannot widen the match.
 SHOPS_SQL = """
@@ -140,7 +140,7 @@ def _norm(s) -> str:
 
 
 def rep_base(name) -> str:
-    """The Focus rep name without its warehouse suffix: 'Ahmed Aradi - Acc WH' → 'Ahmed Aradi'.
+    """The Focus rep name without its warehouse suffix: 'Rep Name - Acc WH' → 'Rep Name'.
     This is what salesmen.focus_name and salesman_targets.salesman hold."""
     return str(name or "").split(" - ")[0].strip()
 

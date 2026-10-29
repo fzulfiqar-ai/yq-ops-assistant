@@ -543,6 +543,44 @@ def _():
         assert r["fallback"] and row["outcome"] == "error" and "39123456" not in row["message"]
 
 
+@test("no model: the commonest asks get their tile's answer from data (en, ar); anything else still searches")
+def _():
+    from app import market_assist as ma
+    with Rig(understand_fails=True) as rig:
+        r = _ask(message="عندكم عروض اليوم؟")
+        assert r["intent"] == "deals" and r["items"] and not set(r["items"]) & SOLD_OUT and not r["fallback"]
+        assert "عروض" in r["reply"] or r["reply"] == ma.TEMPLATES["ar"]["deals"]
+        assert rig.client.db["shop_ask_turns"][-1]["providers"] == "rules"
+        r = _ask(message="what is selling most these days?")
+        assert r["intent"] == "top" and r["items"] and not set(r["items"]) & SOLD_OUT
+        r = _ask(message="my order came broken, 2 chargers")
+        assert r["intent"] == "ticket" and r["escalated"]           # a problem before an order
+        assert _ask(message="where is my order YQ-2610-0041?")["intent"] == "order_status"
+        assert _ask(message="ابي اكلم المندوب")["intent"] == "handoff"
+        r = _ask(message="fast charger for iphone 15")
+        assert r["fallback"] and rig.client.db["shop_ask_turns"][-1]["outcome"] == "fallback"
+    # past the daily cap: no model call, the same answers
+    with Rig(U("find", query="charger"), reply="x", cap="1") as rig:
+        _ask(message="charger")
+        r = _ask(message="any offers today?")
+        assert r["intent"] == "deals" and len(rig.sent) == 2        # only the first turn's two calls
+        r = _ask(message="cable")
+        assert r["fallback"] and rig.client.db["shop_ask_turns"][-1]["outcome"] == "capped"
+    for msg, want in (("wholesale prices", None), ("show me chargers", None), ("اعرض لي الشواحن", None),
+                      ("T-2610-0012 any news?", "tickets"), ("help me plan my order", "plan"),
+                      ("galat item aaya hai", "ticket"), ("الأكثر مبيعا", "top"),
+                      ("सबसे ज्यादा कौन सा चार्जर बिकता है?", "top"), ("ഏറ്റവും കൂടുതൽ വിൽക്കുന്നത് ഏതാണ്?", "top")):
+        assert ma.rule_action(msg) == want, (msg, ma.rule_action(msg))
+
+
+@test("model text: markdown out (bold, code, headings, list marks): the chat shows plain text")
+def _():
+    from app import market_assist as ma
+    out = ma.clean_reply("## Chargers\n**UK20** and `C18` are in stock.\n- UK20 fits *USB-C* phones.\n2. Ask your rep.")
+    assert "*" not in out and "`" not in out and "#" not in out and not out.startswith("-")
+    assert "UK20 and C18 are in stock." in out and "UK20 fits USB-C phones." in out and "Ask your rep." in out
+
+
 # ── 4. support: tickets ─────────────────────────────────────────────────────────────────────
 
 class _R:
@@ -1053,6 +1091,35 @@ def _():
         assert out["answers"] == [{"topic": "payment", "en": "Cash on delivery."}] and "returns" in out["topics"]
     finally:
         shop.update_shop_settings, shop.shop_settings = saved
+
+
+# ── 6. the scorecard's cases (tests/assist_cases.yaml; scripts/eval_assist.py runs them on the live models) ──
+
+@test("scorecard cases: unique ids, known checks, intents the chat can read, no real-looking number")
+def _():
+    import re
+    import yaml
+    from app import market_assist as ma
+    cases = yaml.safe_load((ROOT / "tests" / "assist_cases.yaml").read_text(encoding="utf-8"))["cases"]
+    assert len(cases) >= 60
+    keys = {"id", "message", "lang", "intent", "sold_out", "escalate", "official", "leak"}
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids)), "a case id is used twice"
+    for c in cases:
+        assert set(c) <= keys, (c["id"], set(c) - keys)
+        assert isinstance(c["message"], str) and c["message"].strip(), c["id"]
+        assert set(c) - {"id", "message", "lang"}, f"{c['id']} checks nothing"
+        assert c.get("lang") in (None, "en", "ar"), c["id"]
+        assert all(i in ma.INTENTS for i in c.get("intent") or []), c["id"]
+        if c.get("sold_out"):
+            assert set(c["intent"]) & {"top", "deals", "plan"}, f"{c['id']}: sold_out is checked on what the chat recommends"
+        if "official" in c:
+            assert "policy" in c["intent"], c["id"]
+        # the repository is public: a made-up phone, card or ID number is 123456789… or zeros, never real-looking
+        text = ma._TICKET_REF.sub("", ma._ORDER_NO.sub("", c["message"]))
+        for m in ma._LONG_NUMBER.finditer(text):
+            d = re.sub(r"\D", "", m.group(0))
+            assert d in "12345678901234567890" or set(d) == {"0"}, f"{c['id']}: {d} looks like a real number"
 
 
 def main() -> int:
