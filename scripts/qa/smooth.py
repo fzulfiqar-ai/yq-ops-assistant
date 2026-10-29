@@ -2150,10 +2150,14 @@ async ({ label, ms }) => {
 
 PANEL_FADE = r"""
 async () => {
-  const seen = []; const t0 = performance.now();
-  while (performance.now() - t0 < 900) {
+  // from the panel's first appearance (its code can arrive late on a busy machine) to 900 ms after it
+  const seen = []; const t0 = performance.now(); let first = null;
+  while (performance.now() - t0 < 4000 && (first === null || performance.now() - first < 900)) {
     const p = document.querySelector('[data-sheet-panel]');
-    if (p) seen.push([Math.round(performance.now() - t0), +(+getComputedStyle(p).opacity).toFixed(2), new DOMMatrix(getComputedStyle(p).transform === 'none' ? undefined : getComputedStyle(p).transform).m41]);
+    if (p) {
+      if (first === null) first = performance.now();
+      seen.push([Math.round(performance.now() - t0), +(+getComputedStyle(p).opacity).toFixed(2), new DOMMatrix(getComputedStyle(p).transform === 'none' ? undefined : getComputedStyle(p).transform).m41]);
+    }
     await new Promise((r) => requestAnimationFrame(r));
   }
   return seen;
