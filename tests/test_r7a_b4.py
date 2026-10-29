@@ -88,7 +88,9 @@ def _():
     # forward step only: Received -> Confirm order, Confirmed -> Delivered; never a stamp button
     drawer = src.split("function OrderDrawer(", 1)[1].split("\nfunction ", 1)[0]
     assert "const hasFooter = Boolean(data) && !readOnly && !editing && (flow.actions.some((a) => a !== 'tell_shop') || flow.tellFirst)" in drawer
-    footer = drawer.split("{data && hasFooter && (", 1)[1]
+    # ship 2 (30-Oct-2026): the actions are the sheet's pinned footer (components/ui/sheet)
+    assert "footer={actions}" in drawer
+    footer = drawer.split("const actions = data && hasFooter ? (", 1)[1].split(") : undefined", 1)[0]
     assert "can('confirm') && (" in footer and "Confirm order" in footer
     assert "can('cancel') && (" in footer and "Cancel order" in footer
     # Confirm comes before Cancel in source order (primary, then secondary)
@@ -300,10 +302,13 @@ def _():
 # ── R7e: the portal overlay bug (owner screenshot: the drawer's top hid under the top bar) ──────
 
 BODY_PORTAL = "web/src/components/BodyPortal.tsx"
-# every page that hand-rolls a `fixed inset-0 z-50` overlay (a <Sheet> already portals by itself)
-OVERLAY_FILES = (SHOP, "web/src/pages/Catalog.tsx", "web/src/pages/Finds.tsx", "web/src/pages/Leads.tsx",
-                 "web/src/pages/PriceTracker.tsx", "web/src/pages/Salesmen.tsx", "web/src/pages/ShopRules.tsx",
-                 "web/src/pages/shop-ops/CampaignsSection.tsx")
+# every page that hand-rolls a `fixed inset-0 z-50` overlay (a <Sheet> already portals by itself). Ship 2
+# (30-Oct-2026) moved the seven office pages' modals onto components/ui/sheet (Esc, focus trap, motion):
+# the campaign dialog, with its own manners, is the last hand-rolled one.
+OVERLAY_FILES = ("web/src/pages/shop-ops/CampaignsSection.tsx",)
+SHEET_PAGES = (SHOP, "web/src/pages/Catalog.tsx", "web/src/pages/Finds.tsx", "web/src/pages/Leads.tsx",
+               "web/src/pages/PriceTracker.tsx", "web/src/pages/Salesmen.tsx", "web/src/pages/ShopRules.tsx")
+SHEET = "web/src/components/ui/sheet.tsx"
 
 
 @test("R7e: BodyPortal renders its children beside the shell's <main> (else the body), never inside it")
@@ -327,13 +332,18 @@ def _():
 @test("R7e: the order drawer is portalled and its header (order no, status pills, Close) sticks at the top")
 def _():
     drawer = _read(SHOP).split("function OrderDrawer(", 1)[1].split("\nfunction ", 1)[0]
-    assert "<BodyPortal>" in drawer and "</BodyPortal>" in drawer
-    assert drawer.index("<BodyPortal>") < drawer.index('className="fixed inset-0 z-50') < drawer.index("</BodyPortal>")
-    head = drawer.split("sticky top-0", 1)[1].split(">", 1)[0]
-    assert "z-10" in head and "bg-card" in head, "an opaque header above the drawer's own scroll"
-    assert drawer.index("sticky top-0") < drawer.index('aria-label="Close"'), "Close lives in the sticky header"
-    # the backdrop still closes it; a click inside the panel does not
-    assert 'backdrop-blur-sm" onClick={onClose}>' in drawer and "onClick={(e) => e.stopPropagation()}" in drawer
+    # ship 2 (30-Oct-2026): a portal sheet, which portals itself to <body> (above the top bar, under the toasts)
+    assert '<Sheet open onClose={onClose} variant="drawer"' in drawer and "</Sheet>" in drawer
+    assert "title={data?.order_no || 'Order'}" in drawer
+    head = drawer.split("header={data ? (", 1)[1].split(") : null}>", 1)[0]
+    assert "<StatusPill status={data.status} />" in head and "<StageTrack order={data} />" in head
+    sheet = _read(SHEET)
+    assert "createPortal(<SheetLayer {...props} />, document.body)" in sheet
+    # the sheet's header (the order no, its chips and Close) sits outside the scrolling body: it never scrolls away
+    at = sheet.index("{header}")
+    assert at < sheet.index('aria-label="Close"', at) < sheet.index('data-sheet-body=""'), "Close lives in the fixed header"
+    # the dim closes it; a click inside the panel does not (the dim is the panel's sibling)
+    assert 'aria-label="Close"\n        tabIndex={-1}\n        onClick={close}' in sheet
 
 
 @test("R7e: every hand-rolled z-50 overlay in the portal pages is wrapped in <BodyPortal> (one each, imported)")
@@ -344,6 +354,10 @@ def _():
         assert n >= 1, rel
         assert src.count("<BodyPortal>") == n == src.count("</BodyPortal>"), (rel, n, src.count("<BodyPortal>"))
         assert "import { BodyPortal } from '@/components/BodyPortal'" in src, rel
+    for rel in SHEET_PAGES:
+        src = _read(rel)
+        assert "fixed inset-0" not in src and "<BodyPortal>" not in src, rel
+        assert "import { Sheet } from '@/components/ui/sheet'" in src, rel
     # the campaign dialog keeps its own manners: Escape from anywhere, focus in and back
     camp = _read("web/src/pages/shop-ops/CampaignsSection.tsx")
     assert "if (e.key === 'Escape') closeRef.current()" in camp and "document.addEventListener('keydown', onKey)" in camp
@@ -352,8 +366,11 @@ def _():
 @test("review: Ctrl/Cmd+K opens the command palette ABOVE an open drawer or dialog, still under the toasts")
 def _():
     # BodyPortal puts a page overlay (z-50) beside <main>, later in the DOM than the palette (the first child of
-    # the AppShell root); neither parent is a stacking context, so a tie at z-50 painted the overlay over it
+    # the AppShell root); neither parent is a stacking context, so a tie at z-50 painted the overlay over it.
+    # Ship 2: the drawers and dialogs are sheets in <body> (z-50), so the palette is portalled there too.
     pal = _read("web/src/components/CommandPalette.tsx")
+    assert "return createPortal(" in pal and "document.body," in pal
+    assert 'className="fixed inset-0 z-50 flex"' in _read(SHEET)
     assert 'className="fixed inset-0 z-[60] flex items-start justify-center' in pal
     assert "fixed inset-0 z-50" not in pal
     # an opaque panel: tailwind.config.js defines no 'popover' colour, so bg-popover painted nothing over the overlay
