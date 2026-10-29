@@ -947,6 +947,25 @@ def _():
     assert set(settings.allowed_origins) <= set(k["allow_origins"]) and "http://localhost:5173" in k["allow_origins"]
 
 
+@test("cors: every custom header the web sends passes the browser's preflight (live bug 29-Oct: the chat's microphone)")
+def _():
+    import re as _re
+    from fastapi.testclient import TestClient
+    import app.main as m
+    web = ROOT / "web" / "src"
+    sent = set()
+    for f in list(web.rglob("*.ts")) + list(web.rglob("*.tsx")):
+        for h in _re.findall(r"""['"](x-[a-z0-9-]+)['"]\s*:""", f.read_text(encoding="utf-8", errors="replace"), _re.I):
+            sent.add(h.lower())
+    assert "x-device-id" in sent, sent                      # the microphone upload (assistApi.ts postVoice)
+    c = TestClient(m.app)
+    for h in sorted(sent):
+        r = c.options("/public/market/voice", headers={"Origin": "http://localhost:5173",
+                                                       "Access-Control-Request-Method": "POST",
+                                                       "Access-Control-Request-Headers": f"content-type,{h}"})
+        assert r.status_code == 200, f"preflight refused for {h}: {r.status_code} {r.text[:80]}"
+
+
 @test("auth: POST /auth/password — must_reset-exempt, clears the flag; the current password is required otherwise")
 def _():
     from fastapi.testclient import TestClient
