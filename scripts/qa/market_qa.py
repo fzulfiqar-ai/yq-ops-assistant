@@ -1663,21 +1663,24 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
 
 def menu_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
     """The desktop Browse menu (smooth.browse_menu, 29-Oct-2026): a mouse on 1366/1920, a tap on the
-    1024x768 touch row; on a fresh page, so the page it opens reaches nothing else."""
-    pg = ctx.new_page()
-    install_mocks(pg, st.order_kind)
-    try:
-        pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
-        settle(pg, st)
-        for level, check, detail, values in smooth.browse_menu_touch(pg) if vp.touch else smooth.browse_menu(pg):
-            if level == "note":
-                run.notes.append(check + ": " + detail)
-            else:
-                finding(run, level, check, detail, values)
-    except PWError as exc:
-        finding(run, "fail", "smooth-error", "browse-menu: Playwright error: " + str(exc)[:240])
-    finally:
-        pg.close()
+    1024x768 touch row; on fresh pages, so the page it opens reaches nothing else. With a mouse, the
+    rest before it opens and the menu aim (K1) run first, on a page of their own."""
+    jobs = [smooth.browse_menu_touch] if vp.touch else [lambda pg: smooth.menu_intent(pg) + smooth.menu_aim(pg), smooth.browse_menu]
+    for job in jobs:
+        pg = ctx.new_page()
+        install_mocks(pg, st.order_kind)
+        try:
+            pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
+            settle(pg, st)
+            for level, check, detail, values in job(pg):
+                if level == "note":
+                    run.notes.append(check + ": " + detail)
+                else:
+                    finding(run, level, check, detail, values)
+        except PWError as exc:
+            finding(run, "fail", "smooth-error", "browse-menu: Playwright error: " + str(exc)[:240])
+        finally:
+            pg.close()
 
 
 def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Report, lead: bool) -> None:

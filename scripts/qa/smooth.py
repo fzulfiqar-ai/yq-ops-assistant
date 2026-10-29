@@ -466,7 +466,13 @@ def photo_flight(page: Page, quick_view: str) -> list[Finding]:
     except PWError:
         return [("warn", "photo-flight", "M4: the card's photo did not load, not measured", None)]
     btn.evaluate("(el) => el.click()")
-    page.wait_for_timeout(80)
+    # sampled once the sheet is there: a script click sends no pointerdown, so the panel's code may
+    # still be loading (it warms at idle or on a press) and the sheet, and its flight, come later
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=3000)
+    except PWError:
+        pass
+    page.wait_for_timeout(60)
     during = page.evaluate(FLYING)
     page.wait_for_timeout(900)
     after = page.evaluate(FLYING)
@@ -760,6 +766,40 @@ MENU_ROWS = r"""
            panel: panel ? { left: panel.left, right: panel.right, top: panel.top, bottom: panel.bottom } : null };
 }
 """
+
+
+INTENT_PROBE = r"""
+() => {
+  const btn = document.querySelector('header button[aria-haspopup]');
+  window.__qaIntent = { enter: null, open: null };
+  btn.parentElement.addEventListener('pointerenter', () => { if (window.__qaIntent.enter == null) window.__qaIntent.enter = performance.now(); });
+  new MutationObserver(() => {
+    if (btn.getAttribute('aria-expanded') === 'true' && window.__qaIntent.open == null) window.__qaIntent.open = performance.now();
+  }).observe(btn, { attributes: true, attributeFilter: ['aria-expanded'] });
+}
+"""
+
+
+def menu_intent(page: Page) -> list[Finding]:
+    """K1: the menu opens after a short rest on Browse, so a mouse passing over it on its way
+    elsewhere never flashes it open; resting on it still opens it. Timed inside the page, from the
+    pointer's arrival to the menu opening, so a slow machine cannot skew it."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "menu-intent", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    page.wait_for_timeout(300)
+    page.evaluate(INTENT_PROBE)
+    btn.hover()
+    page.wait_for_timeout(700)
+    r = page.evaluate("() => window.__qaIntent")
+    if r["open"] is None or r["enter"] is None:
+        return [("fail", "menu-intent", "resting on Browse did not open the menu", r)]
+    delay = round(r["open"] - r["enter"])
+    vals = {"open_after_ms": delay}
+    if delay < 60:
+        return [("fail", "menu-intent", f"the menu opened {delay} ms after the mouse arrived: a pass over Browse flashes it open", vals)]
+    return [("note", "menu-intent", f"the menu opens {delay} ms after the mouse rests on Browse", vals)]
 
 
 def menu_aim(page: Page) -> list[Finding]:

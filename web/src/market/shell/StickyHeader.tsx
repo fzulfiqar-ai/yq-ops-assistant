@@ -13,6 +13,9 @@ import { S } from '../strings'
 import { MegaNav } from './MegaNav'
 import { useShell } from './ShellContext'
 
+/** a mouse rests this long on Browse before the menu opens (K1): a hand passing over it never flashes it */
+const MENU_INTENT_MS = 90
+
 /**
  * Tablet/desktop header. Sticky, glass, 72px. Logo + "Where Bahrain restocks." · Browse (mega-nav
  * on desktop, link on tablet) · a large search trigger with a rotating example that opens the
@@ -44,6 +47,7 @@ export function StickyHeader() {
   const [tickSeen, setTickSeen] = useState(tick)
   const [pathSeen, setPathSeen] = useState(pathname)
   const closeTimer = useRef<number | undefined>(undefined)
+  const openTimer = useRef<number | undefined>(undefined)
   // the pointer that pressed Browse: a mouse click never closes the menu hovering just opened
   const pressedBy = useRef('')
   const headerRef = useRef<HTMLElement>(null)
@@ -72,11 +76,18 @@ export function StickyHeader() {
       setMega(false)
       megaRef.current?.querySelector<HTMLElement>('button[aria-haspopup]')?.focus()
     }
+    // the page dims under the open menu (K1), so a scroll of the page under it closes it
+    const fromY = window.scrollY
+    const onScroll = () => {
+      if (Math.abs(window.scrollY - fromY) > 48) setMega(false)
+    }
     document.addEventListener('pointerdown', onDown)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScroll, { passive: true })
     return () => {
       document.removeEventListener('pointerdown', onDown)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScroll)
     }
   }, [mega])
   useEffect(() => {
@@ -121,9 +132,19 @@ export function StickyHeader() {
 
   const openMega = () => {
     window.clearTimeout(closeTimer.current)
+    window.clearTimeout(openTimer.current)
     setMega(true)
   }
+  // a mouse opens it after a short rest (K1), so a hand passing over Browse on its way to the search
+  // or the logo never flashes the menu open; a click opens it at once
+  const openMegaSoon = () => {
+    window.clearTimeout(closeTimer.current)
+    if (mega) return
+    window.clearTimeout(openTimer.current)
+    openTimer.current = window.setTimeout(() => setMega(true), MENU_INTENT_MS)
+  }
   const closeMegaSoon = () => {
+    window.clearTimeout(openTimer.current)
     window.clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => setMega(false), 160)
   }
@@ -157,7 +178,7 @@ export function StickyHeader() {
               // pb-2 + -mb-2: the 8 px between the button and the menu is part of this hover area (a
               // bridge), so a slow hand crossing it never starts the 160 ms close; the layout is unchanged
               className="relative -mb-2 shrink-0 pb-2"
-              onPointerEnter={(e) => e.pointerType === 'mouse' && openMega()}
+              onPointerEnter={(e) => e.pointerType === 'mouse' && openMegaSoon()}
               onPointerLeave={(e) => e.pointerType === 'mouse' && closeMegaSoon()}
             >
               <button
@@ -262,6 +283,15 @@ export function StickyHeader() {
             )}
           </button>
         </div>
+        {/* K1: a soft dim over the strip and the page while the menu is open; the header row stays
+            bright. Inside the row's layer, so it sits over the strip and under the menu; a press on
+            it closes the menu (the press-outside rule above) and reaches nothing under it. */}
+        {desktop && megaMounted && (
+          <div
+            aria-hidden="true"
+            className={cn('absolute inset-x-0 top-full h-[100dvh] bg-ink/20', mega ? '[animation:m-fade-in_200ms_var(--m-ease-out)_both]' : 'pointer-events-none [animation:m-fade-out_140ms_var(--m-ease-in)_both]')}
+          />
+        )}
       </div>
 
       {showStrip && categories.length > 0 && (

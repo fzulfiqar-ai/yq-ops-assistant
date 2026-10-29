@@ -443,6 +443,53 @@
     transform: translate3d(0, 6px, 0) scale(0.985);
   }
 }
+/* the Browse menu (K1, 29-Oct-2026): it drops from Browse over a soft dim, its right side changes
+ * with a short slide in the reading direction, and its four cards rise in a wave */
+@keyframes m-drop {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -6px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@keyframes m-drop-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scale(0.99);
+  }
+}
+@keyframes m-swap-in {
+  from {
+    opacity: 0;
+    transform: translate3d(calc(8px * var(--m-dir, 1)), 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes m-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes m-fade-out {
+  to {
+    opacity: 0;
+  }
+}
 /* The side drawer (ui/Sheet variant="drawer") sits at the inline END — the left edge in Arabic — so
  * it slides in from, and back out to, that edge: --m-dir (the "Arabic" block at the end) turns the
  * physical translate round. (The old .m-drawer-in override never matched: Sheet names the keyframes
