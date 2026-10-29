@@ -15,7 +15,8 @@ import { setScrollWriter } from '@/lib/scrollKeeper'
  *   and the glide pauses with it. Lenis's own stylesheet is not used: its paused rule
  *   (`overflow: clip`) would bring back the Windows scrollbar strip lockScroll covers.
  * - Scrollers inside the page (the mini-cart column, a sheet's body, the palette list) keep their
- *   native scroll while they can scroll (allowNestedScroll); at their end the page glides on.
+ *   native scroll while they can scroll (allowNestedScroll); at their end the wheel stops there, as
+ *   before (they are overscroll-behavior: contain).
  * - The scroll keeper's jumps (a new page to the top, Back to where it was) are immediate moves
  *   through Lenis, so a glide still running from a click made mid-scroll never carries on.
  */
@@ -47,7 +48,12 @@ export function startGlide(): void {
       glide = g
       if (scrollLocked()) g.stop()
       onScrollLock((locked) => (locked ? g.stop() : g.start()))
-      setScrollWriter((y) => g.scrollTo(y, { immediate: true, force: true }))
+      // resize first: Lenis learns a new page height through a 250 ms-debounced observer, and the Back
+      // restore must not be clamped to the old one
+      setScrollWriter((y) => {
+        g.resize()
+        g.scrollTo(y, { immediate: true, force: true })
+      })
     })
     .catch(() => {
       /* the chunk did not arrive: the page keeps native scrolling */

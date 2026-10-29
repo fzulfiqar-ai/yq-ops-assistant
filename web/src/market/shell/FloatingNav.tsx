@@ -97,7 +97,9 @@ export function FloatingNav() {
                       aria-hidden="true"
                       className={cn('absolute -end-2.5 -top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-plum px-1 text-[10.5px] font-bold tnum text-white ring-2 ring-surface', bump && 'anim-bump')}
                     >
-                      {items > 99 ? '99+' : items}
+                      <span key={items} data-cart-count="" className="anim-tick-up">
+                        {items > 99 ? '99+' : items}
+                      </span>
                     </span>
                   )}
                 </span>

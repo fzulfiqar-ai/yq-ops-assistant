@@ -297,7 +297,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
                   {desktop ? (
                     // a row rises together, left to right — .reveal on a plain wrapper whose className
                     // never changes (the card keeps its own transition and .cv-card), as GridPage does
-                    <div className="reveal grid grid-cols-1" style={{ ['--i4' as string]: i % 4, ['--i5' as string]: i % 5 }}>
+                    <div className="reveal grid grid-cols-1" style={{ ['--i4' as string]: (i >= sold.firstOut ? i - sold.firstOut : i) % 4, ['--i5' as string]: (i >= sold.firstOut ? i - sold.firstOut : i) % 5 }}>
                       <MarketCard item={it} />
                     </div>
                   ) : (

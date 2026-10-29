@@ -300,6 +300,9 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const qty = useCartQty(item.item_code)
   const saved = useIsSaved(item.item_code)
   const [added, setAdded] = useState(false)
+  // K4: once "Added" has shown, the stepper comes in (it popped in place of it); never for a line
+  // that was in the cart when the card first drew
+  const [stepIn, setStepIn] = useState(false)
   /** 'add' — no line yet, the keypad states the first quantity; 'edit' — change the line's quantity */
   const [keypad, setKeypad] = useState<'add' | 'edit' | null>(null)
   const timer = useRef<number | undefined>(undefined)
@@ -346,7 +349,10 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     flyToCart(imgWrap.current?.querySelector('img'))
     setAdded(true)
     window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setAdded(false), ADDED_MS)
+    timer.current = window.setTimeout(() => {
+      setAdded(false)
+      setStepIn(true)
+    }, ADDED_MS)
     try {
       navigator.vibrate?.(8)
     } catch {
@@ -401,7 +407,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     if (selected) {
       // a committed line must never look lighter than one that was ignored: the stepper carries
       // a plum wash of the same weight as the Add block it replaced
-      return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad('edit')} className="w-full bg-plum-wash" />
+      return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad('edit')} className={cn('w-full bg-plum-wash', stepIn && '[animation:m-pop_200ms_var(--m-ease-out)_both]')} />
     }
     /**
      * Nothing is remembered for this line yet, so there is no honest quantity to add: the button
@@ -571,7 +577,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition-[transform,box-shadow,border-color] duration-[280ms] [transition-timing-function:var(--m-ease-out)]',
         "after:pointer-events-none after:absolute after:inset-0 after:opacity-0 after:transition-opacity after:duration-300 after:content-[''] after:[background:radial-gradient(240px_circle_at_var(--mx,50%)_var(--my,30%),hsl(var(--m-plum)/0.07),transparent_70%)] group-hover:after:opacity-100",
         compact ? 'cv-compact w-[clamp(10rem,46vw,13rem)] shrink-0 lg:w-auto' : priority ? '' : 'cv-card',
-        selected ? 'border-plum/50 shadow-[0_0_0_1px_hsl(var(--m-plum)/.18),var(--m-shadow-2)]' : 'border-line shadow-1 hover:-translate-y-1 hover:border-ink/15 hover:shadow-3',
+        selected ? 'border-plum/50 shadow-[0_0_0_1px_hsl(var(--m-plum)/.18),var(--m-shadow-2)]' : 'border-line shadow-1 hover:z-[1] hover:-translate-y-1 hover:border-ink/15 hover:shadow-3',
         className,
       )}
     >

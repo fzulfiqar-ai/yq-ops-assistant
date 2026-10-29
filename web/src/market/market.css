@@ -451,13 +451,17 @@
   }
 }
 @supports (animation-timeline: scroll()) {
-  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+  /* the drift: a mouse PC only — on a touch tablet its .96 scale took the slider dots under the 36 px
+   * tap floor once the page had moved */
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) and (hover: hover) and (pointer: fine) {
     html:not([data-lite]) .hero-drift {
       transform-origin: 50% 0;
       animation: m-hero-drift linear both;
       animation-timeline: view();
       animation-range: exit 0% exit 100%;
     }
+  }
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
     .header-lift::after {
       content: '';
       position: absolute;
@@ -804,14 +808,11 @@
   }
 }
 @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) and (hover: hover) and (pointer: fine) {
-  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) .m-photo-img {
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) .m-photo {
     filter: blur(8px);
   }
-  html[data-reveal]:not([data-lite]) .reveal:not(.is-instant) .m-photo:not([data-instant]) .m-photo-img {
-    transition-property: opacity, transform, filter;
-    transition-duration: var(--m-d-2), 700ms, 640ms;
-    transition-timing-function: var(--m-ease), var(--m-ease-out), var(--m-ease-out);
-    transition-delay: 0ms, 0ms, calc(min(var(--i, 0), 6) * 60ms + 80ms);
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-instant) .m-photo:not([data-instant]) {
+    transition: filter 640ms var(--m-ease-out) calc(min(var(--i, 0), 6) * 60ms + 80ms);
   }
 }
 /* Section titles rise out of a mask as they come up the screen (F4). A scroll-driven animation: no

@@ -51,6 +51,15 @@ export function StickyHeader() {
   const openTimer = useRef<number | undefined>(undefined)
   // the pointer that pressed Browse: a mouse click never closes the menu hovering just opened
   const pressedBy = useRef('')
+  // the menu's timers never outlive the header (the shell swaps it out below 1024 px)
+  useEffect(() => {
+    const open = openTimer
+    const close = closeTimer
+    return () => {
+      window.clearTimeout(open.current)
+      window.clearTimeout(close.current)
+    }
+  }, [])
   const headerRef = useRef<HTMLElement>(null)
   const megaRef = useRef<HTMLDivElement>(null)
   const desktop = viewport === 'desktop' || viewport === 'wide'
@@ -207,7 +216,8 @@ export function StickyHeader() {
               {megaMounted && <MegaNav leaving={!mega} onGone={() => setMegaMounted(false)} onClose={() => setMega(false)} onEnter={openMega} onLeave={closeMegaSoon} />}
             </div>
           ) : (
-            <NavLink to="/shop" className={linkCls}>
+            // outside the shortcuts' hover pill: this one keeps its own wash
+            <NavLink to="/shop" className={(s) => cn(linkCls(s), !s.isActive && 'hover:bg-plum-wash')}>
               {S.nav.browse}
             </NavLink>
           )}
@@ -272,12 +282,17 @@ export function StickyHeader() {
             <span>{S.nav.restock}</span>
             {count > 0 && (
               <span aria-hidden="true" className={cn('grid h-5 min-w-[20px] place-items-center rounded-full bg-white/15 px-1.5 text-xs font-bold tnum text-white', bump && 'anim-bump')}>
-                {count > 99 ? '99+' : count}
+                {/* K8: a new number rolls in (keyed: each change remounts it with the tick) */}
+                <span key={count} data-cart-count="" className="anim-tick-up">
+                  {count > 99 ? '99+' : count}
+                </span>
               </span>
             )}
             {count > 0 && (
               <span aria-hidden="true" className="hidden border-s border-white/15 ps-2 font-display tnum 2xl:inline">
-                {bhd(total)}
+                <span key={total} className="anim-tick-up inline-block">
+                  {bhd(total)}
+                </span>
               </span>
             )}
             {min && (

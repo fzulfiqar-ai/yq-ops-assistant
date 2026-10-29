@@ -29,6 +29,10 @@ let writeScroll = (y: number) => window.scrollTo(0, y)
 export function setScrollWriter(fn: ((y: number) => void) | null): void {
   writeScroll = fn || ((y: number) => window.scrollTo(0, y))
 }
+/** a page's own jump (Track order to the top): through the same writer, so a running glide cannot undo it */
+export function jumpTo(y: number): void {
+  writeScroll(y)
+}
 
 function read(): Record<string, number> {
   try {

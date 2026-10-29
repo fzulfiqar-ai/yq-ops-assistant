@@ -23,7 +23,8 @@ createRoot(document.getElementById('root')!).render(<MarketApp />)
 /**
  * The first screen comes alive (F5, 29-Oct-2026; market.css "html[data-intro]"): once per visit, on a
  * mouse PC, when the page was opened (not Back/Forward), the opening is not playing (it is the
- * entrance then), and motion is welcome. Taken away after 2.6 s, so a later render never replays it.
+ * entrance then), and motion is welcome. Home's discs take it away 1.7 s after they come
+ * (HomeBlocks); 8 s is the backstop for a visit that opens elsewhere, so a later render never replays it.
  */
 function markIntro(): void {
   try {
@@ -33,7 +34,7 @@ function markIntro(): void {
     const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches || 'lite' in document.documentElement.dataset
     if (!fresh || !pc || calm || splashDue()) return
     document.documentElement.dataset.intro = ''
-    window.setTimeout(() => delete document.documentElement.dataset.intro, 2600)
+    window.setTimeout(() => delete document.documentElement.dataset.intro, 8000)
   } catch {
     /* no entrance: the page shows as it is */
   }

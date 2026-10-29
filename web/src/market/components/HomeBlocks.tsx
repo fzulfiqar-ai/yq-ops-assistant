@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Clock, MessageCircle, Package, RotateCcw, Tag, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -100,6 +101,14 @@ const TILE_RING = ['ring-tile-lilac', 'ring-tile-apricot', 'ring-tile-mint']
 const TILE_WASH = ['bg-tile-lilac/60', 'bg-tile-apricot/60', 'bg-tile-mint/60']
 
 export function CategoryTiles({ tiles, className }: { tiles: { category: string; count: number; newCount: number; image: ShopItem | null }[]; className?: string }) {
+  // F5: the entrance (html[data-intro], main.market.tsx) lets go once these discs and the next steps
+  // have played, counted from when they came — a catalogue that lands late still gets its entrance
+  const shown = tiles.length > 0
+  useEffect(() => {
+    if (!shown || !('intro' in document.documentElement.dataset)) return
+    const t = window.setTimeout(() => delete document.documentElement.dataset.intro, 1700)
+    return () => window.clearTimeout(t)
+  }, [shown])
   if (!tiles.length) return null
   return (
     <section className={className} aria-label={S.categories.title}>

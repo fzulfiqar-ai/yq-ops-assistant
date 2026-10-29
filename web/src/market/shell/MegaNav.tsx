@@ -10,7 +10,7 @@ import { createTrail, headingForPanel, type Pt } from '../lib/menuAim'
 import { S } from '../strings'
 
 /** how long a row the hand crosses on its way to the panel waits before it takes over (menu aim) */
-const AIM_MS = 200
+const AIM_MS = 300
 /** the height of one category row (h-11): the highlight slides by this much per row */
 const ROW_PX = 44
 

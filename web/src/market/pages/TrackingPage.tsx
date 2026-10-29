@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Check, Mail, MessageCircle, PackageSearch, RotateCcw, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { jumpTo } from '@/lib/scrollKeeper'
 import type { MarketOrderResponse, OrderStatusPayload } from '@/lib/shopApi'
 import { CheckMark } from '../components/CheckMark'
 import { SoldOutRows } from '../components/SoldOut'
@@ -189,7 +190,7 @@ export default function TrackingPage() {
   /** Track order: the same page without the confirmation hero — the live view, from the top */
   const toTracking = () => {
     navigate(location.pathname, { replace: true, state: null })
-    window.scrollTo({ top: 0 })
+    jumpTo(0)
   }
 
   if (err || !token) {

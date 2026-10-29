@@ -368,7 +368,8 @@ def reveal_flick(page: Page, speed: int = 4000, px: int = 6000) -> list[Finding]
     page.evaluate("() => window.scrollTo(0, 0)")
     page.wait_for_timeout(300)
     page.evaluate(SCROLL_FRAMES, {"speed": speed, "px": px})
-    page.wait_for_timeout(450)
+    # long enough for the PC reveal (560 ms + up to 6 x 60 ms of wave, F4): a node still rising is not stuck
+    page.wait_for_timeout(1000)
     r = page.evaluate(REVEAL_STATE)
     page.evaluate("() => window.scrollTo(0, 0)")
     out: list[Finding] = []
@@ -474,7 +475,7 @@ def photo_flight(page: Page, quick_view: str) -> list[Finding]:
         pass
     page.wait_for_timeout(60)
     during = page.evaluate(FLYING)
-    page.wait_for_timeout(900)
+    page.wait_for_timeout(1400)
     after = page.evaluate(FLYING)
     vals = {"during": during, "after": after}
     x = page.locator('[role="dialog"] button[aria-label="Close"]')
@@ -823,7 +824,7 @@ def menu_aim(page: Page) -> list[Finding]:
     first = at_first["title"]
     # diagonally into the panel, ending level with the fourth row: the second and third rows are crossed
     edge = m["panel"]["right"] - 40 if m["rtl"] else m["panel"]["left"] + 40
-    page.mouse.move(edge, r3["y"], steps=12)
+    page.mouse.move(edge, r3["y"], steps=8)
     page.wait_for_timeout(350)
     after = (page.evaluate(MENU_ROWS) or {}).get("title")
     out: list[Finding] = []
@@ -849,7 +850,7 @@ CARD_STATE = r"""
   const img = art.querySelector('.m-photo-img');
   const t = img && getComputedStyle(img).transform;
   const scale = t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1;
-  return { lift: Math.round(ty * 10) / 10, scale: Math.round(scale * 1000) / 1000 };
+  return { lift: Math.round(ty * 10) / 10, scale: Math.round(scale * 1000) / 1000, z: getComputedStyle(art).zIndex };
 }
 """
 
@@ -885,6 +886,8 @@ def card_hover(page: Page) -> list[Finding]:
         out.append(("fail", "card-hover", f"K3: a hovered card lifts {abs(s['lift'])}px (it should rise about 4 px)", s))
     if s["scale"] < 1.05:
         out.append(("fail", "card-hover", f"K3: a hovered card's photo zooms to {s['scale']} (it should settle near 1.06)", s))
+    if s.get("z") in (None, "auto", "0"):
+        out.append(("fail", "card-hover", "K3: a hovered card stays level with its neighbours, so the row below cuts its shadow", s))
     return out or [("note", "card-hover", f"K3: a hovered card lifts {abs(s['lift'])}px and its photo zooms to {s['scale']}", s)]
 
 
@@ -973,6 +976,57 @@ def first_screen(page: Page, base: str) -> list[Finding]:
     return out or [("note", "first-screen", f"F5: the discs come in one after another ({d[0]}-{d[-1]} ms), the hero is there at once", vals)]
 
 
+def first_screen_slow(page: Page, base: str, delay_ms: int = 2500) -> list[Finding]:
+    """F5 on a slow first visit (final review, 29-Oct-2026): the catalogue arrives late, so the discs
+    mount late; the entrance waits for them instead of being switched off on a wall clock."""
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/(api|public)/market(\?.*)?$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    try:
+        page.wait_for_selector("main ul li.intro-disc", timeout=20000)
+    except PWError:
+        return [("warn", "first-screen", "F5: no category discs on Home, not measured", None)]
+    r = page.evaluate(r"""() => {
+      const discs = [...document.querySelectorAll('main ul li.intro-disc')].slice(0, 8);
+      return { intro: document.documentElement.hasAttribute('data-intro'), running: discs.filter((li) => li.getAnimations().some((a) => a.animationName === 'm-intro')).length, discs: discs.length };
+    }""")
+    page.wait_for_timeout(3000)
+    r["intro_after_3s"] = page.evaluate("() => document.documentElement.hasAttribute('data-intro')")
+    if not r["intro"] or r["running"] < 3:
+        return [("fail", "first-screen", f"F5: with the catalogue {delay_ms} ms late the discs got no entrance ({r['running']} of {r['discs']} animating)", r)]
+    if r["intro_after_3s"]:
+        return [("fail", "first-screen", "F5: the entrance still held the page 3 s after the late discs came", r)]
+    return [("note", "first-screen", f"F5: with the catalogue {delay_ms} ms late the discs still come in one after another", r)]
+
+
+def calm(page: Page, base: str) -> list[Finding]:
+    """Under reduced motion nothing of the feel pass runs: no wheel glide, no entrance, no drift or title
+    rise, and every reveal is shown (the plan's `calm` guard)."""
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.wait_for_timeout(2500)
+    r = page.evaluate(r"""() => {
+      const names = new Set(document.getAnimations().map((a) => a.animationName).filter(Boolean));
+      return { lenis: document.documentElement.classList.contains('lenis'), intro: document.documentElement.hasAttribute('data-intro'),
+        moving: ['m-intro', 'm-hero-drift', 'm-title-rise', 'm-header-lift'].filter((n) => names.has(n)),
+        hidden: [...document.querySelectorAll('.reveal')].filter((n) => parseFloat(getComputedStyle(n).opacity) < 0.99).length };
+    }""")
+    out: list[Finding] = []
+    if r["lenis"]:
+        out.append(("fail", "calm", "reduced motion still glides the wheel (html.lenis)", r))
+    if r["intro"] or r["moving"]:
+        out.append(("fail", "calm", f"reduced motion still plays: {', '.join(r['moving']) or 'the entrance'}", r))
+    if r["hidden"]:
+        out.append(("fail", "calm", f"reduced motion hides {r['hidden']} reveal nodes", r))
+    return out or [("note", "calm", "reduced motion: no glide, no entrance, no drift, nothing hidden", r)]
+
+
 def reveal_wave(page: Page) -> list[Finding]:
     """F4, a PC: the cards of a grid row rise left to right (right to left in Arabic), from further
     down (about 24 px), and a section title below the fold rises with the scroll."""
@@ -986,9 +1040,12 @@ def reveal_wave(page: Page) -> list[Finding]:
       const xs = row.map((n) => n.getBoundingClientRect().left);
       const delays = row.map((n) => parseFloat(getComputedStyle(n).transitionDelay) * 1000);
       const ty = new DOMMatrixReadOnly(getComputedStyle(first).transform === 'none' ? undefined : getComputedStyle(first).transform).m42;
+      const tile = first.querySelector('.m-photo'); const img = first.querySelector('.m-photo-img');
+      const tileBlur = tile ? /blur/.test(getComputedStyle(tile).filter) : null;
+      const imgBlur = img ? /blur/.test(getComputedStyle(img).filter) : null;
       const head = [...document.querySelectorAll('[data-section-head] > :first-child')].find((h) => h.getBoundingClientRect().top > innerHeight + 40);
       const titleAnim = head ? (head.getAnimations().find((a) => a.animationName === 'm-title-rise') ? 'm-title-rise' : null) : 'no title below the fold';
-      return { xs, delays, ty, rtl: document.documentElement.dir === 'rtl', titleAnim };
+      return { xs, delays, ty, rtl: document.documentElement.dir === 'rtl', titleAnim, tileBlur, imgBlur };
     }""")
     if not r or len(r["delays"]) < 3:
         return [("warn", "reveal-wave", "F4: no grid row below the fold, not measured", r)]
@@ -1001,6 +1058,8 @@ def reveal_wave(page: Page) -> list[Finding]:
         out.append(("fail", "reveal-wave", f"F4: a card waits only {r['ty']:.0f}px below its place (a PC rise is about 24 px)", r))
     if r["titleAnim"] is None:
         out.append(("fail", "reveal-wave", "F4: a section title below the fold does not rise with the scroll", r))
+    if r.get("imgBlur") or r.get("tileBlur") is False:
+        out.append(("fail", "reveal-wave", "F4: the arriving photo's blur is on the image (a sold-out photo's own filter cannot ease with it), not on its tile", r))
     return out or [("note", "reveal-wave", f"F4: a row rises in reading order ({by_reading} ms) from {r['ty']:.0f}px; titles rise with the scroll", r)]
 
 
@@ -1131,6 +1190,11 @@ ADD_TRACK = r"""
     const s = window.__qaAdd;
     s.max = Math.max(s.max, clones.length);
     if (document.querySelector('[data-sheet-panel][data-leaving]')) s.leavingSeen = true;
+    const cnt = document.querySelector('[data-cart-count]');
+    if (cnt) { s.hasCount = true; if (cnt.getAnimations().some((a) => a.animationName === 'm-tick-up')) s.countRolled = true; }
+    const stp = document.querySelector('article[data-qa-add] [role="group"]');
+    if (stp && stp.getAnimations().some((a) => a.animationName === 'm-pop')) s.stepperIn = true;
+    if (stp) s.stepperSeen = true;
     if (clones.length) { s.seen += 1; if ([...document.querySelectorAll('[role="dialog"]')].some((d) => d.getBoundingClientRect().height > 0)) s.overSheet = (s.overSheet || 0) + 1; const r = clones[0].getBoundingClientRect(); s.last = { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width }; s.goneAt = null; }
     else if (s.seen && s.goneAt == null) s.goneAt = Math.round(performance.now() - t0);
     if (performance.now() - t0 < ms) requestAnimationFrame(loop);
@@ -1173,7 +1237,7 @@ def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Findin
         const r = el.getBoundingClientRect(); const img = el.closest('article').querySelector('.m-photo-img');
         return /^Add · /.test(el.getAttribute('aria-label') || '') && r.top > 90 && r.bottom < innerHeight - 90 && r.left >= 0 && r.right <= innerWidth && img && img.complete && img.naturalWidth > 0;
       });
-      if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      if (!b) return null; b.closest('article').dataset.qaAdd = '1'; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     }""")
     if not box:
         return [("warn", "add-flight", "K4: no direct Add button (Add · N) with its photo on screen, not measured", None)]
@@ -1197,6 +1261,10 @@ def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Findin
     if target and s["last"] and (abs(s["last"]["x"] - target["x"]) > 48 or abs(s["last"]["y"] - target["y"]) > 48):
         out.append(("fail", "add-flight", f"K4: the photo landed {round(s['last']['x'] - target['x'])}/{round(s['last']['y'] - target['y'])} px from the cart ({target['kind']})", vals))
     vals["line_slid_in"] = slid
+    if s.get("hasCount") and not s.get("countRolled"):
+        out.append(("fail", "add-flight", "K8: the Restock count changed without rolling to its new number", vals))
+    if s.get("stepperSeen") and not s.get("stepperIn"):
+        out.append(("fail", "add-flight", "K4: after Added the stepper swapped in instead of coming in", vals))
     if target and target["kind"] == "1" and slid is False:
         out.append(("fail", "add-flight", "K8: the new line appeared in the mini-cart without sliding in", vals))
     return out or [("note", "add-flight", f"K4: Add flew one photo onto the cart (target {target and target['kind']}), gone after {s['goneAt']} ms", vals)]
