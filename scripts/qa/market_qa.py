@@ -1655,7 +1655,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("card-hover", lambda pg: smooth.card_hover(pg) + smooth.press_spring(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:
-        pg = fresh(load=name not in ("lazy", "back-entry"), init=smooth.LOW_MEMORY if name == "lite" else "")
+        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
             record(job(pg))
         except PWError as exc:

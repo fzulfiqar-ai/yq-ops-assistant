@@ -941,6 +941,69 @@ def press_spring(page: Page) -> list[Finding]:
     return out or [("note", "press-spring", f"K5: a press gives to {pressed:.3f} and springs back past 1 (peak {peak:.4f})", vals)]
 
 
+# ── F5 first screen, F4 PC reveal (29-Oct-2026) ────────────────────────────────────────────────
+def first_screen(page: Page, base: str) -> list[Finding]:
+    """F5, a mouse PC, a fresh visit: the category discs come in one after another, the hero's photo
+    is fully there from the first frame (the page is never later to show), and the entrance lets go
+    of the page (html[data-intro] is gone) within 3 s."""
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    try:
+        page.wait_for_selector("main ul li a[href^='/t/']", timeout=15000)
+    except PWError:
+        return [("warn", "first-screen", "F5: no category discs on Home, not measured", None)]
+    r = page.evaluate(r"""() => {
+      const discs = [...document.querySelectorAll('main ul li a[href^="/t/"]')].slice(0, 8).map((a) => a.closest('li'));
+      const anim = discs.map((li) => { const a = li.getAnimations().find((x) => x.animationName === 'm-intro'); return a ? Math.round(a.effect.getTiming().delay) : null; });
+      // the slider itself (its photos have their own load fade): never part of the entrance
+      const hero = document.querySelector('main [aria-roledescription="carousel"]');
+      const heroAnimated = hero ? hero.getAnimations({ subtree: false }).some((x) => x.animationName === 'm-intro') : false;
+      return { delays: anim, intro: document.documentElement.hasAttribute('data-intro'), heroOpacity: hero ? getComputedStyle(hero).opacity : null, heroAnimated };
+    }""")
+    page.wait_for_timeout(3200)
+    left = page.evaluate("() => document.documentElement.hasAttribute('data-intro')")
+    vals = {**r, "intro_after_3s": left}
+    out: list[Finding] = []
+    d = [x for x in r["delays"] if x is not None]
+    if len(d) < 3 or d != sorted(d) or d[-1] == d[0]:
+        out.append(("fail", "first-screen", f"F5: the category discs do not come in one after another (delays {r['delays']})", vals))
+    if r["heroOpacity"] not in (None, "1") or r["heroAnimated"]:
+        out.append(("fail", "first-screen", f"F5: the hero photo starts hidden (opacity {r['heroOpacity']}): the page would show late", vals))
+    if left:
+        out.append(("fail", "first-screen", "F5: the entrance still holds the page after 3 s (html[data-intro])", vals))
+    return out or [("note", "first-screen", f"F5: the discs come in one after another ({d[0]}-{d[-1]} ms), the hero is there at once", vals)]
+
+
+def reveal_wave(page: Page) -> list[Finding]:
+    """F4, a PC: the cards of a grid row rise left to right (right to left in Arabic), from further
+    down (about 24 px), and a section title below the fold rises with the scroll."""
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(800)
+    r = page.evaluate(r"""() => {
+      const rows = [...document.querySelectorAll('main .reveal:not(.is-in)')].filter((n) => n.getBoundingClientRect().top > innerHeight + 40);
+      const first = rows[0]; if (!first) return null;
+      const top = Math.round(first.getBoundingClientRect().top);
+      const row = rows.filter((n) => Math.abs(Math.round(n.getBoundingClientRect().top) - top) < 4).slice(0, 6);
+      const xs = row.map((n) => n.getBoundingClientRect().left);
+      const delays = row.map((n) => parseFloat(getComputedStyle(n).transitionDelay) * 1000);
+      const ty = new DOMMatrixReadOnly(getComputedStyle(first).transform === 'none' ? undefined : getComputedStyle(first).transform).m42;
+      const head = [...document.querySelectorAll('[data-section-head] > :first-child')].find((h) => h.getBoundingClientRect().top > innerHeight + 40);
+      const titleAnim = head ? (head.getAnimations().find((a) => a.animationName === 'm-title-rise') ? 'm-title-rise' : null) : 'no title below the fold';
+      return { xs, delays, ty, rtl: document.documentElement.dir === 'rtl', titleAnim };
+    }""")
+    if not r or len(r["delays"]) < 3:
+        return [("warn", "reveal-wave", "F4: no grid row below the fold, not measured", r)]
+    order = sorted(range(len(r["xs"])), key=lambda i: r["xs"][i], reverse=r["rtl"])
+    by_reading = [r["delays"][i] for i in order]
+    out: list[Finding] = []
+    if by_reading != sorted(by_reading) or by_reading[-1] - by_reading[0] < 100:
+        out.append(("fail", "reveal-wave", f"F4: a row's cards do not rise in reading order (delays {by_reading} ms)", r))
+    if r["ty"] < 20:
+        out.append(("fail", "reveal-wave", f"F4: a card waits only {r['ty']:.0f}px below its place (a PC rise is about 24 px)", r))
+    if r["titleAnim"] is None:
+        out.append(("fail", "reveal-wave", "F4: a section title below the fold does not rise with the scroll", r))
+    return out or [("note", "reveal-wave", f"F4: a row rises in reading order ({by_reading} ms) from {r['ty']:.0f}px; titles rise with the scroll", r)]
+
+
 # ── K4 add-to-restock flight (29-Oct-2026) ─────────────────────────────────────────────────────
 ADD_TRACK = r"""
 (ms) => {

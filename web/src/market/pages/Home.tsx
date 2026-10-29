@@ -235,7 +235,7 @@ export default function Home() {
 
         <HomeBlocks.CategoryTiles tiles={tiles} />
 
-        <div className="flex flex-col gap-3 empty:hidden lg:gap-4">
+        <div className="intro-steps flex flex-col gap-3 empty:hidden lg:gap-4">
           {continueTop && continueCard}
           {recognized && openOrder && <HomeBlocks.TrackCard order={openOrder} />}
           {offer && <HomeBlocks.OfferStrip offer={offer} />}

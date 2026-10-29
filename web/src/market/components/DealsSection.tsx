@@ -93,9 +93,9 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
         // price — the honesty this section is named for — and the fifth column at 1440 left ~175 px
         // of content, which cut "2.000" to "2.0…", the sixth at 1920 to "2…". Columns stop where
         // the card stops being able to say the thing the section promises.
-        <div key={active} ref={gridRef} className="anim-fade-in mt-5 grid grid-cols-4 gap-3 xl:gap-4 3xl:grid-cols-5">
+        <div key={active} ref={gridRef} className="wave-cols anim-fade-in mt-5 grid grid-cols-4 gap-3 xl:gap-4 3xl:grid-cols-5">
           {list.slice(0, DESKTOP_MAX).map((it, i) => (
-            <div key={it.item_code} className={cn('reveal', i >= 8 && 'hidden 3xl:block')} style={{ ['--i' as string]: i }}>
+            <div key={it.item_code} className={cn('reveal', i >= 8 && 'hidden 3xl:block')} style={{ ['--i4' as string]: i % 4, ['--i5' as string]: i % 5 }}>
               <MarketCard item={it} from="deals" className="h-full" />
             </div>
           ))}

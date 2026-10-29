@@ -105,7 +105,7 @@ export function CategoryTiles({ tiles, className }: { tiles: { category: string;
     <section className={className} aria-label={S.categories.title}>
       <ul className="grid grid-cols-4 gap-x-1.5 gap-y-3.5 md:grid-cols-8 lg:gap-x-3">
         {tiles.map((t, i) => (
-          <li key={t.category} className="min-w-0">
+          <li key={t.category} className="intro-disc min-w-0" style={{ ['--k' as string]: i }}>
             <Link
               to={`/t/${categorySlug(t.category)}`}
               onClick={() => track('rail_click', { meta: { rail: 'tile', pos: i } })}

@@ -735,6 +735,97 @@
     transition: none;
   }
 }
+/* PC edition (F4, 29-Oct-2026): on a desktop a card rises further and settles (24 px, from .97 scale)
+ * over 560 ms, in a wave across its row (--i is the column: 60 ms a step, at most 6), and its photo
+ * comes into focus as it arrives (a soft blur clearing; a mouse PC only — the blur is a GPU job). A
+ * flick or a jump still shows everything at once (.is-instant), and a photo decoded mid-scroll keeps
+ * its instant show ([data-instant]). */
+@media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+  html[data-reveal]:not([data-lite]) .reveal {
+    transform: translate3d(0, 24px, 0) scale(0.97);
+    transition: opacity 560ms var(--m-ease-out), transform 560ms var(--m-ease-out);
+    transition-delay: calc(min(var(--i, 0), 6) * 60ms);
+  }
+}
+@media (prefers-reduced-motion: no-preference) and (min-width: 1024px) and (hover: hover) and (pointer: fine) {
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) .m-photo-img {
+    filter: blur(8px);
+  }
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-instant) .m-photo:not([data-instant]) .m-photo-img {
+    transition-property: opacity, transform, filter;
+    transition-duration: var(--m-d-2), 700ms, 640ms;
+    transition-timing-function: var(--m-ease), var(--m-ease-out), var(--m-ease-out);
+    transition-delay: 0ms, 0ms, calc(min(var(--i, 0), 6) * 60ms + 80ms);
+  }
+}
+/* Section titles rise out of a mask as they come up the screen (F4). A scroll-driven animation: no
+ * observer, so a title can never be left hidden; a browser without scroll timelines shows it still. */
+@keyframes m-title-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 0.5em, 0);
+    clip-path: inset(0 0 60% 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+    clip-path: inset(0 0 0 0);
+  }
+}
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+    html:not([data-lite]) [data-section-head] > :first-child {
+      animation: m-title-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 10% entry 90%;
+    }
+  }
+}
+/* The first screen comes alive (F5): on the first page of a visit, on a mouse PC, the category discs
+ * come in one after another and the next-step cards rise after them. main.market.tsx sets
+ * html[data-intro] (never on Back/Forward, under reduced motion, on a lite device or when the opening
+ * plays) and takes it away after 2.6 s. The slider is never part of it: the page is never later to show. */
+@keyframes m-intro {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+  html[data-intro] .intro-disc {
+    animation: m-intro 520ms var(--m-ease-out) both;
+    animation-delay: calc(var(--k, 0) * 60ms + 120ms);
+  }
+  html[data-intro] .intro-steps > * {
+    animation: m-intro 560ms var(--m-ease-out) both;
+    animation-delay: calc(var(--k, 0) * 90ms + 520ms);
+  }
+  .intro-steps > :nth-child(2) {
+    --k: 1;
+  }
+  .intro-steps > :nth-child(3) {
+    --k: 2;
+  }
+  .intro-steps > :nth-child(4) {
+    --k: 3;
+  }
+  .intro-steps > :nth-child(5) {
+    --k: 4;
+  }
+}
+/* the reveal wave follows the grid's own columns (F4): four of them, five from 3xl (DealsSection) */
+.wave-cols > * {
+  --i: var(--i4, 0);
+}
+@media (min-width: 1800px) {
+  .wave-cols > * {
+    --i: var(--i5, 0);
+  }
+}
 /* end v3: reveal */
 
 /* lite (lib/lite.ts): no sweeps over skeletons or waiting photos */
