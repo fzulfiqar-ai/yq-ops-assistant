@@ -1,9 +1,14 @@
 {
-  "_comment": "SECURITY BOUNDARY. This file declares the ONLY MCP servers this project may use. Servers are added deliberately, one at a time, with review. Higgsfield added 23-Aug-2026 on explicit owner request as an OWNER-SIDE production tool for the brand film (never embedded in prod, per docs/CLAUDE.md). Auth: OAuth via the owner's Higgsfield account on first use.",
+  "_comment": "SECURITY BOUNDARY. This file declares the ONLY MCP servers this project may use. Servers are added deliberately, one at a time, with review. Higgsfield added 23-Aug-2026 on explicit owner request as an OWNER-SIDE production tool for the brand film (never embedded in prod, per docs/CLAUDE.md). Auth: OAuth via the owner's Higgsfield account on first use. Chrome DevTools added 29-Oct-2026 on the owner's explicit choice as a LOCAL QA tool (performance traces, screenshots and screencasts of the marketplace in a real Chrome): Google's official server, version pinned, a throwaway Chrome profile (--isolated), usage statistics and CrUX lookups off; never part of the deployed product. See docs/MCP.md.",
   "mcpServers": {
     "higgsfield": {
       "type": "http",
       "url": "https://mcp.higgsfield.ai/mcp"
+    },
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "chrome-devtools-mcp@1.12.0", "--isolated", "--no-usage-statistics", "--no-performance-crux"]
     }
   }
 }
