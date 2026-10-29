@@ -746,6 +746,149 @@ def browse_menu(page: Page) -> list[Finding]:
     return out
 
 
+MENU_ROWS = r"""
+() => {
+  const menu = document.querySelector('header [role="menu"]');
+  if (!menu) return null;
+  const rows = [...menu.querySelectorAll('[role="menuitem"]')].slice(0, 4).map((r) => {
+    const b = r.getBoundingClientRect();
+    return { x: b.left + b.width / 2, y: b.top + b.height / 2, left: b.left, right: b.right };
+  });
+  const title = menu.querySelector('h3');
+  const panel = title ? title.parentElement.parentElement.getBoundingClientRect() : null;
+  return { rows, title: title ? title.textContent.trim() : null, rtl: document.documentElement.dir === 'rtl',
+           panel: panel ? { left: panel.left, right: panel.right, top: panel.top, bottom: panel.bottom } : null };
+}
+"""
+
+
+def menu_aim(page: Page) -> list[Finding]:
+    """K1: a hand moving diagonally from the first category into its panel crosses the next rows
+    without switching the panel to them; resting on a row still switches to it."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "menu-aim", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    btn.hover()
+    page.wait_for_timeout(700)
+    m = page.evaluate(MENU_ROWS)
+    if not m or len(m["rows"]) < 4 or not m["panel"]:
+        return [("warn", "menu-aim", "the menu has fewer than four rows or no panel, not measured", m)]
+    r0, r3 = m["rows"][0], m["rows"][3]
+    page.mouse.move(r0["x"], r0["y"], steps=6)
+    page.wait_for_timeout(400)
+    at_first = page.evaluate(MENU_ROWS)
+    if not at_first:
+        return [("fail", "menu-aim", "the menu closed while the hand moved onto its first row", None)]
+    first = at_first["title"]
+    # diagonally into the panel, ending level with the fourth row: the second and third rows are crossed
+    edge = m["panel"]["right"] - 40 if m["rtl"] else m["panel"]["left"] + 40
+    page.mouse.move(edge, r3["y"], steps=12)
+    page.wait_for_timeout(350)
+    after = (page.evaluate(MENU_ROWS) or {}).get("title")
+    out: list[Finding] = []
+    vals = {"first": first, "after_diagonal": after}
+    if after != first:
+        out.append(("fail", "menu-aim", f"heading from \"{first}\" into its panel switched it to \"{after}\" on the way", vals))
+    # back on the list, resting on the fourth row: it takes over
+    page.mouse.move(r3["x"], r3["y"], steps=6)
+    page.wait_for_timeout(450)
+    rested = (page.evaluate(MENU_ROWS) or {}).get("title")
+    vals["rested_on_fourth"] = rested
+    if rested == first:
+        out.append(("fail", "menu-aim", "resting on the fourth row did not switch the panel to it", vals))
+    return out or [("note", "menu-aim", f"the diagonal keeps \"{first}\"; resting on a row switches to \"{rested}\"", vals)]
+
+
+# ── F1 glide scrolling (29-Oct-2026) ───────────────────────────────────────────────────────────
+GLIDE_TRACK = r"""
+(ms) => {
+  window.__qaGlide = [];
+  const t0 = performance.now();
+  let last = t0;
+  const loop = (t) => {
+    window.__qaGlide.push([Math.round(t - t0), Math.round(window.scrollY * 10) / 10, Math.round((t - last) * 10) / 10]);
+    last = t;
+    if (t - t0 < ms) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+
+def glide_scroll(page: Page, notch: int = 100) -> list[Finding]:
+    """F1, a mouse: one wheel notch moves the page in a glide, not a jump. It keeps moving for at least
+    250 ms before 95% of the notch is covered and comes to rest within 1.5 s; its worst frame is
+    reported as a measured number."""
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(1800)  # the glide starts after the first paint
+    vp = page.viewport_size
+    page.mouse.move(vp["width"] * 0.4, vp["height"] * 0.6)
+    page.evaluate(GLIDE_TRACK, 2000)
+    page.wait_for_timeout(60)
+    page.mouse.wheel(0, notch)
+    page.wait_for_timeout(2100)
+    s = page.evaluate("() => window.__qaGlide || []")
+    if len(s) < 10:
+        return [("warn", "glide-scroll", "F1: too few frames sampled, not measured", {"frames": len(s)})]
+    y0, y1 = s[0][1], s[-1][1]
+    dist = y1 - y0
+    if dist <= 0:
+        return [("fail", "glide-scroll", "F1: one wheel notch did not move the page", {"from": y0, "to": y1})]
+    t_first = next(t for t, y, _ in s if y != y0)
+    t95 = next(t for t, y, _ in s if y - y0 >= 0.95 * dist)
+    t_rest = next(t for t, y, _ in s if y == y1)
+    worst = max((d for t, y, d in s if t_first <= t <= t_rest), default=0)
+    vals = {"px": dist, "to_95pct_ms": t95 - t_first, "rest_ms": t_rest - t_first, "worst_frame_ms": worst}
+    out: list[Finding] = []
+    if t95 - t_first < 250:
+        out.append(("fail", "glide-scroll", f"F1: the wheel jumped: 95% of the notch in {t95 - t_first} ms (a glide takes 250 ms or more)", vals))
+    if t_rest - t_first > 1500:
+        out.append(("fail", "glide-scroll", f"F1: the page was still moving {t_rest - t_first} ms after the notch", vals))
+    # frame times are the machine's as much as the page's (headless frames of 33-100 ms come with a
+    # page standing still), so the worst frame is a measured number, as S1 is: a warning, never fatal
+    if worst > 50:
+        out.append(("warn", "glide-scroll", f"F1: a frame of the glide took {worst} ms (measured; compare builds on one machine)", vals))
+    if not out:
+        out.append(("note", "glide-scroll", f"F1: one notch glides {dist:.0f}px: 95% in {t95 - t_first} ms, at rest in {t_rest - t_first} ms, worst frame {worst} ms", vals))
+    return out
+
+
+def glide_layers(page: Page) -> list[Finding]:
+    """F1 under a layer: with the search palette open, the wheel moves nothing behind it, and the page
+    does not shift sideways (the scroll lock keeps the 10 px Windows scrollbar strip covered)."""
+    page.evaluate("() => window.scrollTo(0, 400)")
+    page.wait_for_timeout(1800)
+    before = page.evaluate("() => ({ y: Math.round(window.scrollY), left: Math.round(document.querySelector('header').getBoundingClientRect().left) })")
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=6000)
+    except PWError:
+        return [("warn", "glide-layers", "Ctrl+K opened no palette, not measured", None)]
+    page.wait_for_timeout(500)
+    page.mouse.move(12, page.viewport_size["height"] - 12)
+    page.mouse.wheel(0, 300)
+    page.wait_for_timeout(1200)
+    during = page.evaluate("() => ({ y: Math.round(window.scrollY), left: Math.round(document.querySelector('header').getBoundingClientRect().left) })")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    vals = {"before": before, "with_palette": during}
+    out: list[Finding] = []
+    if during["y"] != before["y"]:
+        out.append(("fail", "glide-layers", f"the wheel moved the page {during['y'] - before['y']}px behind the open palette", vals))
+    if during["left"] != before["left"]:
+        out.append(("fail", "glide-layers", f"the page shifted {during['left'] - before['left']}px sideways when the palette opened", vals))
+    return out or [("note", "glide-layers", "the wheel moves nothing behind the open palette, and nothing shifts", vals)]
+
+
+def no_glide_on_touch(page: Page) -> list[Finding]:
+    """F1 is for a mouse only: a touch screen keeps its native scrolling (no html.lenis)."""
+    page.wait_for_timeout(1800)
+    if page.evaluate("() => document.documentElement.classList.contains('lenis')"):
+        return [("fail", "glide-scroll", "a touch screen got the wheel glide (html.lenis): it must keep native scrolling", None)]
+    return [("note", "glide-scroll", "a touch screen keeps native scrolling", None)]
+
+
 def browse_menu_touch(page: Page) -> list[Finding]:
     """A touch screen with the desktop header (1024x768): a tap on Browse opens the menu, a second tap
     closes it (there is no hover to leave by)."""

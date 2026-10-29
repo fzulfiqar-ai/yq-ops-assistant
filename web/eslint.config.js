@@ -31,6 +31,8 @@ export default defineConfig([
             { group: ['@/components/*', '@/components/ui/*'], message: 'Market code uses src/market/ui primitives, not portal components.' },
             { group: ['@/pages/shop/ProductSheet', '@/pages/shop/ProductImage', '@/pages/shop/Select', '@/pages/shop/shared', '@/pages/shop/ProductCard', '@/pages/shop/CartDrawer'], message: 'Market code uses src/market equivalents.' },
             { group: ['@/lib/api', '@/lib/supabase', '@/lib/auth', '@/lib/theme'], message: 'The merchant bundle must not carry the session client.' },
+            // `lenis` is allowed (29-Oct-2026): the PC wheel glide (market/lib/glide) is a scroll engine,
+            // ~5 KB, fetched by a dynamic import after the first paint, on mouse PCs only
             { group: ['motion', 'motion/*', 'recharts'], message: 'No animation/chart library in the merchant bundle (CSS/WAAPI only).' },
           ],
         },

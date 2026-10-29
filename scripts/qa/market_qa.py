@@ -1645,9 +1645,12 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("reveal", lambda pg: smooth.reveal_phone(pg)))
             jobs.append(("page-wait", lambda pg: smooth.page_wait(pg, "/shop")))
             jobs.append(("drag+jank", lambda pg: smooth.sheet_drag(pg, STR["card.quickView"], STR["states.close"]) + smooth.scroll_jank(pg)))
+            jobs.append(("no-glide", lambda pg: smooth.no_glide_on_touch(pg)))
         else:  # Ctrl K is a keyboard shortcut
             jobs.append(("palette", lambda pg: smooth.palette_focus(pg)))
             jobs.append(("palette-layers", lambda pg: smooth.palette_layers(pg, "cable", STR["card.quickView"])))
+            jobs.append(("glide", lambda pg: smooth.glide_scroll(pg)))
+            jobs.append(("glide-layers", lambda pg: smooth.glide_layers(pg)))
     for name, job in jobs:
         pg = fresh(load=name not in ("lazy", "back-entry"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:

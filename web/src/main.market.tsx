@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 import './market/market.css'
 import { installPreloadReload } from './lib/preloadReload'
 import { applyLite } from './market/lib/lite'
+import { startGlide } from './market/lib/glide'
 import MarketApp from './MarketApp'
 
 /**
@@ -16,3 +17,7 @@ installPreloadReload()
 
 applyLite()
 createRoot(document.getElementById('root')!).render(<MarketApp />)
+
+// glide scrolling (market/lib/glide): a mouse PC only, once the first page has painted
+if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(startGlide, { timeout: 1500 })
+else window.setTimeout(startGlide, 600)
