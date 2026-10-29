@@ -87,6 +87,7 @@ STR = {
     "upcoming.send": "Notify me",
     "card.quickView": "Quick view",
     "states.close": "Close",
+    "qty.apply": "Apply",
     "card.zoom": "Zoom photo",
     "states.back": "Back",
 }
@@ -126,6 +127,7 @@ STR_AR = {
     "upcoming.send": "أخبروني",
     "card.quickView": "عرض سريع",
     "states.close": "إغلاق",
+    "qty.apply": "تطبيق",
     "card.zoom": "كبّر الصورة",
     "states.back": "رجوع",
     # not UI copy keys: what the harness types or clicks in Arabic
@@ -1647,6 +1649,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("drag+jank", lambda pg: smooth.sheet_drag(pg, STR["card.quickView"], STR["states.close"]) + smooth.scroll_jank(pg)))
             jobs.append(("no-glide", lambda pg: smooth.no_glide_on_touch(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
+            jobs.append(("add-keypad", lambda pg: smooth.add_flight_keypad(pg, CART_KEY, STR["qty.apply"])))
         else:  # Ctrl K is a keyboard shortcut
             jobs.append(("palette", lambda pg: smooth.palette_focus(pg)))
             jobs.append(("palette-layers", lambda pg: smooth.palette_layers(pg, "cable", STR["card.quickView"])))
@@ -1657,6 +1660,8 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
             jobs.append(("hover-pill", lambda pg: smooth.hover_pill(pg)))
+            jobs.append(("add-keypad", lambda pg: smooth.add_flight_keypad(pg, CART_KEY, STR["qty.apply"])))
+            jobs.append(("add-palette", lambda pg: smooth.add_flight_palette(pg, CART_KEY, "cable", STR["qty.apply"])))
             jobs.append(("page-glide", lambda pg: smooth.page_glide(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:

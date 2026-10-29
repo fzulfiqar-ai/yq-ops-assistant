@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -63,6 +63,17 @@ export interface SheetProps {
   className?: string
   /** a view-transition name for the panel root (card → panel morph) */
   vtName?: string
+}
+
+/**
+ * The sheet's own animated close, for an action inside it that is done with the sheet (the keypad's
+ * Apply): it plays the exit, then calls onClose. Calling the parent's onClose directly unmounted the
+ * sheet in one frame — the keypad vanished instead of sliding away (final review, 29-Oct-2026).
+ */
+const SheetCloseCtx = createContext<(() => void) | null>(null)
+export function SheetCloser({ children }: { children: (close: () => void) => ReactNode }) {
+  const close = useContext(SheetCloseCtx)
+  return <>{children(close ?? (() => {}))}</>
 }
 
 export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size = 'md', children, footer, header, bare, className, vtName }: SheetProps) {
@@ -174,6 +185,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
   const lift = bottomSheet ? { marginBottom: 'var(--kb, 0px)', maxHeight: 'calc(92dvh - var(--kb, 0px))' } : undefined
 
   return createPortal(
+    <SheetCloseCtx.Provider value={close}>
     <div className="fixed inset-0 z-sheet flex" role="presentation">
       <button
         ref={attachBackdrop}
@@ -242,7 +254,8 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
 
         {footer ? <div className="border-t border-line-2 bg-surface px-4 pb-[max(0.875rem,var(--m-safe-b))] pt-3 md:px-5">{footer}</div> : null}
       </div>
-    </div>,
+    </div>
+    </SheetCloseCtx.Provider>,
     document.body,
   )
 }

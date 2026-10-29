@@ -1130,7 +1130,8 @@ ADD_TRACK = r"""
     const clones = [...document.querySelectorAll('body > [data-cart-flight]')];
     const s = window.__qaAdd;
     s.max = Math.max(s.max, clones.length);
-    if (clones.length) { s.seen += 1; const r = clones[0].getBoundingClientRect(); s.last = { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width }; s.goneAt = null; }
+    if (document.querySelector('[data-sheet-panel][data-leaving]')) s.leavingSeen = true;
+    if (clones.length) { s.seen += 1; if ([...document.querySelectorAll('[role="dialog"]')].some((d) => d.getBoundingClientRect().height > 0)) s.overSheet = (s.overSheet || 0) + 1; const r = clones[0].getBoundingClientRect(); s.last = { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width }; s.goneAt = null; }
     else if (s.seen && s.goneAt == null) s.goneAt = Math.round(performance.now() - t0);
     if (performance.now() - t0 < ms) requestAnimationFrame(loop);
   };
@@ -1199,6 +1200,84 @@ def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Findin
     if target and target["kind"] == "1" and slid is False:
         out.append(("fail", "add-flight", "K8: the new line appeared in the mini-cart without sliding in", vals))
     return out or [("note", "add-flight", f"K4: Add flew one photo onto the cart (target {target and target['kind']}), gone after {s['goneAt']} ms", vals)]
+
+
+def add_flight_keypad(page: Page, cart_key: str = "yq-shop-cart:market", apply_label: str = "Apply") -> list[Finding]:
+    """K4 on the most common first add (final review, 29-Oct-2026): with no remembered quantity, Add
+    opens the keypad and its Apply adds. The photo flies only once the keypad has gone - never over its
+    dim towards a cart the dim hides - and lands on the cart."""
+    page.evaluate("() => { try { localStorage.removeItem('yq-qty') } catch (e) {} }")
+    page.reload(wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.wait_for_timeout(1200)
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    box = page.evaluate(r"""() => {
+      const b = [...document.querySelectorAll('main article[data-stock] button[aria-label]')].find((el) => {
+        const r = el.getBoundingClientRect(); const img = el.closest('article').querySelector('.m-photo-img');
+        return /^Add — /.test(el.getAttribute('aria-label') || '') && r.top > 90 && r.bottom < innerHeight - 90 && r.left >= 0 && r.right <= innerWidth && img && img.complete && img.naturalWidth > 0;
+      });
+      if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }""")
+    if not box:
+        return [("warn", "add-flight", "K4: no keypad Add (Add — name) on screen, not measured", None)]
+    target = page.evaluate(CART_TARGET)
+    page.mouse.click(box["x"], box["y"])
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=4000)
+    except PWError:
+        return [("warn", "add-flight", "K4: Add opened no keypad, not measured", None)]
+    page.wait_for_timeout(350)
+    page.evaluate(ADD_TRACK, 2200)
+    page.locator('[role="dialog"] button', has_text=apply_label).last.click()
+    page.wait_for_timeout(2300)
+    s = page.evaluate("() => window.__qaAdd")
+    # sampled every frame from before the tap: on a phone the tap returns after the 200 ms exit is over
+    leaving = bool(s.get("leavingSeen"))
+    page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
+    vals = {"target": target, "flight": s, "keypad_slid_away": leaving}
+    out: list[Finding] = []
+    if not leaving:
+        out.append(("fail", "add-flight", "K4: the keypad vanished on Apply instead of sliding away", vals))
+    if not s["seen"]:
+        out.append(("fail", "add-flight", "K4: Apply in the keypad added the line but sent no photo to the cart", vals))
+    if s.get("overSheet"):
+        out.append(("fail", "add-flight", f"K4: the photo flew while the keypad was still open ({s['overSheet']} frames over its dim)", vals))
+    if target and s["last"] and (abs(s["last"]["x"] - target["x"]) > 48 or abs(s["last"]["y"] - target["y"]) > 48):
+        out.append(("fail", "add-flight", f"K4: after the keypad the photo landed {round(s['last']['x'] - target['x'])}/{round(s['last']['y'] - target['y'])} px from the cart", vals))
+    return out or [("note", "add-flight", "K4: after the keypad's Apply the photo flew to the cart once the keypad had gone", vals)]
+
+
+def add_flight_palette(page: Page, cart_key: str = "yq-shop-cart:market", query: str = "cable", apply_label: str = "Apply") -> list[Finding]:
+    """K4 from the search palette (final review, 29-Oct-2026): the palette stays open after an add, and
+    the cart is under its dim, so no photo flies over it (it would land where nobody can see it)."""
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"] input', timeout=6000)
+    except PWError:
+        return [("warn", "add-flight", "K4: Ctrl+K opened no palette, not measured", None)]
+    page.keyboard.type(query, delay=40)
+    page.wait_for_timeout(900)
+    add = page.locator('[role="dialog"] button[aria-label^="Add"]').first
+    if add.count() == 0:
+        page.keyboard.press("Escape")
+        return [("warn", "add-flight", "K4: the palette showed no Add, not measured", None)]
+    page.evaluate(ADD_TRACK, 2600)
+    add.click()
+    page.wait_for_timeout(450)
+    keypad = page.locator('[role="dialog"] button', has_text=apply_label)
+    if keypad.count():
+        keypad.last.click()
+    page.wait_for_timeout(2000)
+    s = page.evaluate("() => window.__qaAdd")
+    page.keyboard.press("Escape")
+    page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
+    if s.get("overSheet"):
+        return [("fail", "add-flight", f"K4: an add in the open search palette flew a photo over it ({s['overSheet']} frames)", s)]
+    return [("note", "add-flight", "K4: an add in the open palette flies nothing over it", s)]
 
 
 # ── F1 glide scrolling (29-Oct-2026) ───────────────────────────────────────────────────────────

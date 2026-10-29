@@ -147,11 +147,35 @@ function cartTarget(): { x: number; y: number; el: HTMLElement | null } {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2, el }
 }
 
+/** a sheet, the palette or the photo viewer on screen (one leaving counts until it has gone) */
+const layerOnScreen = () => Array.from(document.querySelectorAll('[role="dialog"]')).some((d) => d.getBoundingClientRect().height > 0)
+const LAYER_WAIT_MS = 700
+
+/**
+ * An add made inside a layer (the keypad's Apply, a row of the search palette) waits for the layer
+ * to leave, then flies from where the card's photo is: the tile never crosses a dim towards a cart the
+ * dim hides (final review, 29-Oct-2026). A layer that stays open (the palette) means no flight.
+ */
 export function flyToCart(img: HTMLImageElement | null | undefined): void {
-  if (!img || !img.complete || !img.naturalWidth || calm()) return
+  if (!img || calm()) return
+  const since = performance.now()
+  const go = () => {
+    if (!layerOnScreen()) launchToCart(img)
+    else if (performance.now() - since < LAYER_WAIT_MS) requestAnimationFrame(go)
+  }
+  go()
+}
+
+function launchToCart(img: HTMLImageElement): void {
+  if (!img.isConnected || !img.complete || !img.naturalWidth) return
   const box = contentBox(img)
   if (box.width < 24 || box.top + box.height < 0 || box.top > window.innerHeight) return
   const target = cartTarget()
+  // a cart something else covers (a toast, a dim) is no place to land: no flight
+  if (target.el) {
+    const hit = document.elementFromPoint(target.x, target.y)
+    if (hit && !target.el.contains(hit) && !hit.contains(target.el)) return
+  }
   // a square tile of the photo, centred on it, at most 140 px: that is what flies
   const side = Math.min(box.width, box.height, 140)
   const x0 = box.left + box.width / 2
@@ -197,7 +221,9 @@ export function flyToCart(img: HTMLImageElement | null | undefined): void {
     if (done) return
     done = true
     tile.remove()
-    target.el?.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.14)' }, { transform: 'scale(1)' }], { duration: 300, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' })
+    // the individual `scale` property composes with the target's own transform (the phone's active
+    // Restock tab sits at scale 1.08): a `transform` keyframe replaced it, and the icon snapped
+    target.el?.animate([{ scale: '1' }, { scale: '1.14' }, { scale: '1' }], { duration: 300, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' })
   }
   tile.animate(frames, { duration: CART_FLIGHT_MS, easing: CART_EASE, fill: 'forwards' }).onfinish = finish
   window.setTimeout(finish, CART_FLIGHT_MS + 400)
