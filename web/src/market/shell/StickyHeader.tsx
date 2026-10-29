@@ -3,7 +3,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ChevronDown, CircleUserRound, Search, Tag, Zap } from 'lucide-react'
 import { useLayerOpen } from '@/lib/sheet'
 import { cn } from '@/lib/utils'
-import { SearchHints } from '../components/SearchField'
+import { TypedHints } from '../components/SearchField'
 import { useMarket, useOrder } from '../MarketContext'
 import { isDeal } from '../lib/facets'
 import { bhd, categorySlug, niceCategory } from '../lib/format'
@@ -225,15 +225,17 @@ export function StickyHeader() {
             </NavLink>
           )}
 
-          {/* search → palette; the rotating example stands in for a placeholder */}
+          {/* search → palette; a typed example stands in for a placeholder (round 2: the owner chose
+              "Typing hint"), and the trigger answers the mouse: a plum edge and glow, the glass nudges,
+              a press gives */}
           <button
             type="button"
             onClick={() => openPalette()}
             aria-label={S.searchLabel}
-            className="group flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-md border border-line bg-surface pe-2 ps-3.5 text-start text-md transition duration-1 ease-m hover:border-ink/25 hover:shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 lg:max-w-[640px]"
+            className="m-press group flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-md border border-line bg-surface pe-2 ps-3.5 text-start text-md transition duration-1 ease-m hover:border-plum/45 hover:shadow-[0_0_0_4px_hsl(var(--m-plum)/0.08),0_8px_20px_-12px_hsl(var(--m-plum)/0.5)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 active:scale-[.985] lg:max-w-[640px]"
           >
-            <Search size={18} strokeWidth={2} aria-hidden="true" className="shrink-0 text-plum" />
-            <SearchHints hints={S.search.hints} paused={paletteOpen || layered} className="min-w-0 flex-1" leadClassName="text-ink-3" hintClassName="text-ink-2" />
+            <Search size={18} strokeWidth={2} aria-hidden="true" className="shrink-0 text-plum transition-transform duration-2 ease-m group-hover:-rotate-12 group-hover:scale-110" />
+            <TypedHints hints={S.search.hints} paused={paletteOpen || layered} className="min-w-0 flex-1" leadClassName="text-ink-3" hintClassName="text-ink-2" />
             <kbd dir="ltr" className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 xl:inline">{S.search.shortcut}</kbd>
           </button>
 

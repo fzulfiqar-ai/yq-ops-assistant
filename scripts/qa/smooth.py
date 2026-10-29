@@ -1966,3 +1966,120 @@ def no_blur(page: Page, quick_view: str) -> list[Finding]:
     if bad:
         return [("fail", "no-blur", "frosted or costly layers on a PC: " + "; ".join(f"{k}: {', '.join(v[:3])}" for k, v in bad.items()), found)]
     return [("note", "no-blur", "no backdrop blur at rest, under a product panel or under the palette; no lasting will-change or clip-path animation", found)]
+
+
+# ── the banner reel (round 2, 29-Oct-2026, the owner's choice: "product reel") ──────────────────────
+REEL_PROBE = r"""
+() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 40 && r.bottom > 0 && r.top < innerHeight; };
+  const art = [...document.querySelectorAll('.creative')].find((c) => { const s = c.closest('[data-slide-state]'); return vis(c) && (!s || s.getAttribute('data-slide-state') !== 'idle'); });
+  if (!art) return null;
+  const disc = art.querySelector('.creative-disc[data-pos="c"]');
+  if (!disc) return null;
+  const imgs = [...disc.querySelectorAll('img')].filter((i) => !i.closest('.reel-next') && parseFloat(getComputedStyle(i.closest('.reel') || i).opacity) > 0.5);
+  const top = imgs[imgs.length - 1];
+  const slide = art.closest('[data-slide-state]') || art.closest('.slide-card') || art;
+  // a disc with no photo on show: every layer still fading in (or loading) while the old one has gone
+  const white = [...art.querySelectorAll('.creative-disc')].some((d) => {
+    const on = [...d.querySelectorAll(':scope > .reel, :scope > .m-photo')].filter((l) => !l.classList.contains('reel-next') && parseFloat(getComputedStyle(l).opacity) > 0.3);
+    if (!d.querySelector('img')) return false;
+    return !on.some((l) => { const i = l.querySelector('img') || (l.tagName === 'IMG' ? l : null); return i && i.complete && i.naturalWidth > 0; });
+  });
+  return { key: (slide.textContent || '').trim().slice(0, 40), src: top ? (top.currentSrc || top.src).split('/').pop().split('?')[0] : null, white };
+}
+"""
+
+
+def banner_reel(page: Page, settle_ms: int = 800, watch_ms: int = 5600) -> list[Finding]:
+    """Round 2, A (desktop): the banner is a product reel - within a few seconds of the page settling,
+    the slide's centre disc shows at least two different products (it starts once the page has loaded
+    and gone idle, then turns every 2.2 s), and no disc is ever left white (the old photo gone before
+    the new one arrived: a swap undone by a stale state, or a fixed timer on a busy laptop, 29-Oct-2026).
+    The mouse is kept off the banner: a hovered slide holds."""
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    page.wait_for_timeout(settle_ms)
+    seen: list[str] = []
+    key = None
+    white = 0
+    for _ in range(watch_ms // 250):
+        r = page.evaluate(REEL_PROBE)
+        if r and r["src"]:
+            if key is None:
+                key = r["key"]
+            if r["key"] == key and r["src"] not in seen:
+                seen.append(r["src"])
+        if r and r.get("white"):
+            white += 1
+        page.wait_for_timeout(250)
+    vals = {"slide": key, "photos": seen, "white_samples": white}
+    if key is None:
+        return [("warn", "banner-reel", "no product slide on screen, not measured", vals)]
+    if white:
+        return [("fail", "banner-reel", f"a banner disc showed no photo in {white} of {watch_ms // 250} samples (the old photo left before the new one arrived)", vals)]
+    if len(seen) < 2:
+        return [("fail", "banner-reel", f"the banner's centre disc showed one product for {watch_ms / 1000:.1f} s (a still picture, not a reel)", vals)]
+    return [("note", "banner-reel", f"the centre disc turned through {len(seen)} products in {watch_ms / 1000:.1f} s", vals)]
+
+
+# ── the typing search hint (round 2, 29-Oct-2026, the owner's choice: "typing hint") ─────────────────
+TYPED_PROBE = r"""
+async ({ label, ms, focus }) => {
+  const btn = [...document.querySelectorAll('button[aria-label]')].find((b) => b.getAttribute('aria-label') === label && b.getBoundingClientRect().width > 120);
+  if (!btn) return null;
+  if (focus) btn.focus();
+  // the trigger's visible words (the shortcut badge aside): what the merchant reads at this moment
+  const shown = (el) => { for (let p = el; p && p !== btn; p = p.parentElement) if (parseFloat(getComputedStyle(p).opacity) < 0.5) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const read = () => { const out = []; const w = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT); for (let n = w.nextNode(); n; n = w.nextNode()) { const el = n.parentElement; if (el && !el.closest('kbd') && (n.textContent || '').trim() && shown(el)) out.push(n.textContent); } return out.join(''); };
+  const seen = []; const t0 = performance.now(); let last = null;
+  while (performance.now() - t0 < ms) {
+    const s = read();
+    if (s !== last) { seen.push([Math.round(performance.now() - t0), s]); last = s; }
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  return { seen, focused: document.activeElement === btn };
+}
+"""
+
+
+def _typed_run(seen: list) -> tuple[int, int]:
+    """The longest typing run in a text timeline: (characters gained, steps) within any 1.2 s, each step
+    a gain of 1-2 characters (a whole new hint swapped in is one big step, not typing)."""
+    best = (0, 0)
+    for i in range(len(seen)):
+        gain = steps = 0
+        for j in range(i + 1, len(seen)):
+            if seen[j][0] - seen[i][0] > 1200:
+                break
+            d = len(seen[j][1]) - len(seen[j - 1][1])
+            if d < 1 or d > 2:
+                break
+            gain += d
+            steps += 1
+            if (gain, steps) > best:
+                best = (gain, steps)
+    return best
+
+
+def search_typing(page: Page, label: str, watch_ms: int = 5600) -> list[Finding]:
+    """Round 2, B (desktop): the header's search hint is typed - an example search appears a character at a
+    time (>= 3 characters within 1.2 s, in steps of one or two), is erased, and the next is typed; once
+    the trigger has focus it stands still on a whole example (it ends on its closing quote)."""
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    r = page.evaluate(TYPED_PROBE, {"label": label, "ms": watch_ms, "focus": False})
+    if r is None:
+        return [("warn", "search-typing", "no desktop search trigger, not measured", None)]
+    gain, steps = _typed_run(r["seen"])
+    vals: dict[str, Any] = {"texts": [s for _, s in r["seen"]][:14], "gain": gain, "steps": steps}
+    if gain < 3 or steps < 3:
+        return [("fail", "search-typing", f"the search hint is not typed: its longest run gained {gain} characters in {steps} steps within 1.2 s (whole hints swapped)", vals)]
+    f = page.evaluate(TYPED_PROBE, {"label": label, "ms": 300, "focus": True})
+    held = page.evaluate(TYPED_PROBE, {"label": label, "ms": 1500, "focus": False})
+    texts = sorted({s for _, s in held["seen"]})
+    vals["focused"] = texts
+    if not f or not f["focused"]:
+        return [("warn", "search-typing", "typed; the trigger could not take focus, the hold was not measured", vals)]
+    if len(texts) != 1:
+        return [("fail", "search-typing", f"with the trigger focused the hint kept changing ({len(texts)} texts in 1.5 s)", vals)]
+    if not texts[0].rstrip().endswith(("”", "»", '"')):
+        return [("fail", "search-typing", f"with the trigger focused the hint stopped mid-word: {texts[0][-24:]!r}", vals)]
+    return [("note", "search-typing", f"typed ({gain} characters in {steps} steps within 1.2 s); still on a whole example once focused", vals)]

@@ -175,6 +175,17 @@ languages, each check on a fresh page:
 
 The empty Orders page must show its "How an order moves" steps (a needle of the `orders` state).
 
+**Round 2 (29-Oct-2026, evening: smooth on the owner's laptop, motion he can see)** adds these on the
+desktop lead viewport in English, each written to fail on the build before it:
+
+| Check | Where | What passes |
+|---|---|---|
+| `panel-still` | home, desktop | opening a product (a real click) moves nothing on the page: the header, a neighbouring card and every fixed element hold still (≤ 1 px), the drawer never steps sideways, no layout shift, the dim is not blurred, the photo lands on the panel's photo (± 4 px), and once open nothing behind keeps animating. Run it headed too: a headless browser has no scrollbar to step by |
+| `no-blur` | home, desktop | nothing is drawn through a `backdrop-filter` at rest, under a product panel or under the palette (the chat panel aside), and no lasting `will-change` or `clip-path` animation |
+| `opening-motion` | home, desktop + phone | as above, and once risen the night frame stands still: nothing larger than half the screen is scaled or looped through the hold |
+| `banner-reel` | home + category, desktop | the banner's centre disc turns through ≥ 2 products within 5.6 s of the page settling, and no disc is ever left white (the old photo gone before the new one arrived) |
+| `search-typing` | home, desktop, both languages | the header's search hint is typed: an example appears a character at a time (≥ 3 characters within 1.2 s, in steps of one or two), is erased and the next one typed; with the trigger focused it stands on a whole example |
+
 ## How it measures
 
 - **Sweep, not one screen.** Geometry and text checks run at the top of the page and then one screen

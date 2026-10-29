@@ -235,7 +235,7 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
                  incoming one only starts at 180 ms, so no frame carries two headlines. */
               className={cn('absolute inset-0 motion-reduce:transition-none', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
             >
-              <SlideCard slide={s} size="hero" priority={i === 0} where="slider" className="h-full w-full" />
+              <SlideCard slide={s} size="hero" priority={i === 0} where="slider" className="h-full w-full" live />
             </div>
           )
         })}

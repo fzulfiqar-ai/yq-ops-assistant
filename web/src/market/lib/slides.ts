@@ -44,6 +44,8 @@ export interface Slide {
   campaignId?: number | null
   /** a round word sticker the data backs (never a number): New, Price drops, Coming soon. The clearing slides carry none (R7d): their title says it, and "Clearing" does not fit the 54 px disc */
   sticker?: { label: string; tone: 'deal' | 'fresh' | 'drop' } | null
+  /** up to REEL more photos of the same pool, which a desktop's discs turn through (round 2: the reel) */
+  reel?: SlideArt[]
 }
 
 /** what a composed creative draws: a photo set and nothing a price or a stock level could be read from */
@@ -83,6 +85,8 @@ export const SOON_SLIDE_ID = 'd:soon'
 const CAMPAIGN_CYCLE: readonly SlideCanvas[] = ['lilac', 'apricot', 'mint']
 const MIN_DATA = 3
 const ART = 3
+/** the desktop reel's photos per slide, beyond the three it opens with (components/ComposedCreative) */
+const REEL = 8
 
 /**
  * The slides, in order: campaigns (by placement priority, hero before strip) → data slides, each
@@ -116,6 +120,7 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
   // slide, different categories — three look-alike chargers make a dull creative. `strict` takes
   // the pool's top photos as they are (clearing line: the best margins).
   const usedArt = new Set<string>()
+  let lastPick: ShopItem[] = []
   const art = (pool: ShopItem[], strict = false): ShopItem[] => {
     const photos = pool.filter(hasPhoto)
     let pick: ShopItem[] = photos.slice(0, ART)
@@ -133,7 +138,14 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
       }
     }
     for (const i of pick) usedArt.add(i.item_code)
+    lastPick = pick
     return pick
+  }
+  // the reel (29-Oct-2026, round 2): up to REEL more photos from the slide's own pool, in its order, the
+  // three just picked aside; read right after `art` in the same slide literal
+  const reel = (pool: ShopItem[]): SlideArt[] => {
+    const shown = new Set(lastPick.map((i) => i.item_code))
+    return pool.filter((i) => hasPhoto(i) && !shown.has(i.item_code)).slice(0, REEL)
   }
   const wants = (id: string, kind: SlideKind) => out.length < cap && allowed(id, kind) && !out.some((s) => s.id === id)
   const push = (slide: Slide) => void out.push(slide)
@@ -161,36 +173,36 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
   const best = live.filter((i) => hasBadge(i, 'best_seller'))
 
   if (deals.lastChance.length >= MIN_DATA && wants('d:last', 'data')) {
-    push({ id: 'd:last', kind: 'data', kicker: deals.hasRealDeals ? S.deals.title : null, title: S.slides.last, line: S.slides.lastLine(deals.lastChance.length), cta: S.slides.lastCta, to: '/shop?f=clearance', canvas: 'apricot', products: art(deals.lastChance, true), sticker: null })
+    push({ id: 'd:last', kind: 'data', kicker: deals.hasRealDeals ? S.deals.title : null, title: S.slides.last, line: S.slides.lastLine(deals.lastChance.length), cta: S.slides.lastCta, to: '/shop?f=clearance', canvas: 'apricot', products: art(deals.lastChance, true), sticker: null, reel: reel(deals.lastChance) })
   }
   if (deals.drops.length >= 2 && wants('d:drops', 'data')) {
-    push({ id: 'd:drops', kind: 'data', kicker: S.deals.title, title: S.slides.drops(deals.drops.length), line: S.slides.dropsLine, cta: S.slides.dropsCta, to: '/shop?f=drops', canvas: 'lilac', products: art(deals.drops), sticker: { label: S.deals.drops, tone: 'drop' } })
+    push({ id: 'd:drops', kind: 'data', kicker: S.deals.title, title: S.slides.drops(deals.drops.length), line: S.slides.dropsLine, cta: S.slides.dropsCta, to: '/shop?f=drops', canvas: 'lilac', products: art(deals.drops), sticker: { label: S.deals.drops, tone: 'drop' }, reel: reel(deals.drops) })
   }
   if (best.length >= MIN_DATA && wants('d:essentials', 'data')) {
-    push({ id: 'd:essentials', kind: 'data', kicker: null, title: S.slides.essentials, line: S.slides.essentialsLine, cta: S.slides.essentialsCta, to: '/shop?f=best', canvas: 'mint', products: art(best) })
+    push({ id: 'd:essentials', kind: 'data', kicker: null, title: S.slides.essentials, line: S.slides.essentialsLine, cta: S.slides.essentialsCta, to: '/shop?f=best', canvas: 'mint', products: art(best), reel: reel(best) })
   }
   const fresh = live.filter((i) => hasBadge(i, 'new'))
   if (fresh.length >= MIN_DATA && wants('d:fresh', 'data')) {
-    push({ id: 'd:fresh', kind: 'data', kicker: null, title: S.slides.fresh, line: S.slides.freshLine(fresh.length), cta: S.slides.freshCta, to: '/shop?f=new', canvas: 'lilac', products: art(fresh), sticker: { label: S.slides.stickerNew, tone: 'fresh' } })
+    push({ id: 'd:fresh', kind: 'data', kicker: null, title: S.slides.fresh, line: S.slides.freshLine(fresh.length), cta: S.slides.freshCta, to: '/shop?f=new', canvas: 'lilac', products: art(fresh), sticker: { label: S.slides.stickerNew, tone: 'fresh' }, reel: reel(fresh) })
   }
   const moving = live.filter((i) => hasBadge(i, 'trending') || hasBadge(i, 'selling_fast'))
   if (moving.length >= MIN_DATA && wants('d:moving', 'data')) {
-    push({ id: 'd:moving', kind: 'data', kicker: null, title: S.slides.moving, line: S.slides.movingLine, cta: S.slides.movingCta, to: '/shop?f=moving', canvas: 'apricot', products: art(moving) })
+    push({ id: 'd:moving', kind: 'data', kicker: null, title: S.slides.moving, line: S.slides.movingLine, cta: S.slides.movingCta, to: '/shop?f=moving', canvas: 'apricot', products: art(moving), reel: reel(moving) })
   }
   /* The supplier itself, in the opening's night palette (plan D11). Every other slide is a shelf,
    * so a deck built from a catalog that is all deals said "we are clearing stock" twice and never
    * what YQ is. Always eligible, but LOW: with real promotions to show, this is the one that goes.
    * Nothing here is a claim — the headline is the tagline and the count is the payload's own. */
   if (live.length >= MIN_DATA && wants('d:brand', 'data')) {
-    push({ id: 'd:brand', kind: 'data', kicker: null, title: S.tagline, line: S.slides.brandLine(live.length), cta: S.slides.brandCta, to: '/about#how', canvas: 'night', products: art(best.length ? best : live) })
+    push({ id: 'd:brand', kind: 'data', kicker: null, title: S.tagline, line: S.slides.brandLine(live.length), cta: S.slides.brandCta, to: '/about#how', canvas: 'night', products: art(best.length ? best : live), reel: reel(best.length ? best : live) })
   }
   if (wants('d:quick', 'data')) {
-    push({ id: 'd:quick', kind: 'data', kicker: null, title: S.slides.quick, line: S.slides.quickLine, cta: S.slides.quickCta, to: '/quick', canvas: 'night', products: art(best.length ? best : live) })
+    push({ id: 'd:quick', kind: 'data', kicker: null, title: S.slides.quick, line: S.slides.quickLine, cta: S.slides.quickCta, to: '/quick', canvas: 'night', products: art(best.length ? best : live), reel: reel(best.length ? best : live) })
   }
 
   /* 3 · Order again, second (its art is picked last so slide 1's art never depends on it) */
   if (withAgain) {
-    const slide: Slide = { id: 'd:again', kind: 'data', kicker: S.home.lastOrder, title: S.slides.again, line: S.slides.againLine(again.length), cta: S.slides.againCta, to: '/quick?load=last', canvas: 'plum', products: art(again) }
+    const slide: Slide = { id: 'd:again', kind: 'data', kicker: S.home.lastOrder, title: S.slides.again, line: S.slides.againLine(again.length), cta: S.slides.againCta, to: '/quick?load=last', canvas: 'plum', products: art(again), reel: reel(again) }
     out.splice(Math.min(1, out.length), 0, slide)
   }
 
@@ -332,6 +344,7 @@ export function categorySlide(campaigns: Campaign[], category: string, items?: S
   } else {
     slide = { ...base, id: 'k:shelf', title: niceCategory(category), line: null, cta: '', to: '', canvas: 'lilac', products: [...best, ...live.filter((i) => !best.includes(i))] }
   }
+  slide.reel = slide.products.filter(hasPhoto).slice(ART, ART + REEL)
   slide.products = slide.products.filter(hasPhoto).slice(0, ART)
   return slide.products.length ? slide : null
 }
@@ -607,4 +620,57 @@ export function useCarousel({ count, dwell = SLIDE_DWELL, reduced, rootRef, onAd
   }
 
   return { index, running, autoplay, userPaused, go, sync: setIndex, hold, togglePause, bind }
+}
+
+/* ───────────────────────── the banner's motion (round 2: reel, count, beam) ───────────────────────── */
+
+/**
+ * Runs `fn` once the page can be watched: loaded, idle, and no opening (components/Splash.tsx) over
+ * it, so the reel's first turn and the count never play under the night. The opening is looked for
+ * every 250 ms while it is up (a few seconds, once a week). Returns the disposer.
+ */
+export function whenWatched(fn: () => void): () => void {
+  let done = false
+  let timer = 0
+  let idle = 0
+  const check = () => {
+    if (done) return
+    if (document.querySelector('[data-splash]')) {
+      timer = window.setTimeout(check, 250)
+      return
+    }
+    done = true
+    fn()
+  }
+  const settle = () => {
+    if (typeof window.requestIdleCallback === 'function') idle = window.requestIdleCallback(check, { timeout: 2500 })
+    else timer = window.setTimeout(check, 600)
+  }
+  if (document.readyState === 'complete') settle()
+  else window.addEventListener('load', settle, { once: true })
+  return () => {
+    done = true
+    window.removeEventListener('load', settle)
+    window.clearTimeout(timer)
+    if (idle && typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(idle)
+  }
+}
+
+/** The slide holding `el` is off stage (PromoSlider and Spotlight mark data-slide-state); a card in no slider never is. */
+export function slideIdle(el: Element): boolean {
+  return el.closest('[data-slide-state]')?.getAttribute('data-slide-state') === 'idle'
+}
+
+/** Calls `fn` each time the slide holding `el` comes on stage. Returns the disposer. */
+export function onSlideActive(el: Element, fn: () => void): () => void {
+  const slide = el.closest('[data-slide-state]')
+  if (!slide) return () => {}
+  let was = slide.getAttribute('data-slide-state')
+  const watch = new MutationObserver(() => {
+    const now = slide.getAttribute('data-slide-state')
+    if (now === 'active' && was !== 'active') fn()
+    was = now
+  })
+  watch.observe(slide, { attributes: true, attributeFilter: ['data-slide-state'] })
+  return () => watch.disconnect()
 }

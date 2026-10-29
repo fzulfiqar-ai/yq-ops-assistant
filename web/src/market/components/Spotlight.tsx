@@ -124,7 +124,7 @@ export function Spotlight({ className }: { className?: string }) {
               data-slide-state={active ? 'active' : 'idle'}
               className={cn('absolute inset-0 motion-reduce:transition-none', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
             >
-              <SlideCard slide={s} size="aside" where="spotlight" className="h-full w-full" />
+              <SlideCard slide={s} size="aside" where="spotlight" className="h-full w-full" live />
             </div>
           )
         })}

@@ -388,9 +388,10 @@ Smooth by construction (29-Oct-2026, after the owner's video of it stepping, fre
 | What | How |
 |---|---|
 | No live blur | The opening's glow arcs draw their blur as radial gradients that follow the blur's own edge profile (`scripts/make_opening_glow.py` writes the block in market.css). A `filter: blur()` is re-applied by the compositor on every frame its layer moves. |
-| Motion from the first pixel | The served `#yq-boot` frame carries the horizon and its veils (`.open-veil-1/2`), so the dawn rises while the app's code is parsed (a gradient paints in the first frame; an image would not). The overlay adopts that frame as its background (`data-adopted`) and lets it go with the exit. |
+| Motion from the first pixel | The served `#yq-boot` frame carries the horizon and its veils (`.open-veils`), so the dawn rises while the app's code is parsed (a gradient paints in the first frame; an image would not). The overlay adopts that frame as its background (`data-adopted`) and lets it go with the exit. |
+| Cheap on integrated graphics (round 2) | The three glow arcs rise as one layer (`.open-glow`), the two veils are two backgrounds of one element, and once risen the night frame stands still: the camera push moves only the logo and the lines, and the logo's halo breathes. A screen-sized layer scaled or looped on every frame was what the owner's laptop (Intel UHD) could not carry. |
 | An exit that cannot be late | The hold's push and the exit are booked at mount as Web Animations on the compositor's clock (a timer used to start the exit, and the app loading underneath delayed it and starved its fade). A skip hands the current state to a 320 ms exit. |
-| Never frozen | Once risen the dawn breathes (violet and blue glows ease to 80 % and back, out of step), so a slow load or the hold never shows a still frame. |
+| Never frozen | Through the hold the foreground drifts in (the push) and the logo's halo breathes, so a slow load never shows a still frame. |
 | Guard | `opening-motion` in `scripts/qa/smooth.py`. Frame rates are judged in real Chrome on a GPU (a trace of the frames the compositor drew): headless rendering is software and steps by nature, which is what the owner's video showed. |
 
 - **At most once per device every 7 days, and never twice in a tab** (`lib/splashGate.ts`:
@@ -788,6 +789,10 @@ guard in `scripts/qa/smooth.py` that failed on the build before it.
 | Scrolling down, PC | Cards rise in a wave by column; section titles rise with the scroll; the top slider drifts slower than the page | `reveal-wave`, `hero-drift` |
 | Page change, PC | A 16 px glide over 320 ms | `page-glide` |
 | Promo slides | Through each dwell the discs float, the art breathes, a light sweeps the hero product | `slides-alive` |
+| Banners, PC (round 2) | The stage, the Spotlight and a category banner turn through their own products: every 2.2 s the centre photo zooms in over the last, the side ones follow; the number the slide carries ("24 lines we're clearing") counts up as it comes on stage; a soft light crosses it every 6 s | `banner-reel` |
+| Search, PC (round 2) | The header's search types an example ("20W charger"), holds it, erases it and types the next, a blinking plum caret after it; under the mouse its edge turns plum with a soft glow, the glass nudges, a press gives | `search-typing` |
+| Opening a product, PC (round 2) | The page behind holds still and only dims (no blur): nothing on it moves or animates; the panel slides in and the card's photo flies into the panel's photo | `panel-still` |
+| Header, PC (round 2) | Solid surfaces instead of frosted glass (a blur was recomputed on every scroll frame on integrated graphics) | `no-blur` |
 | The opening | See "The opening" above | `opening-motion`, `opening-logo` |
 
 ## Release log

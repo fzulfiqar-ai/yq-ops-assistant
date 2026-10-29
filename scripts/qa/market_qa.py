@@ -55,6 +55,7 @@ except ImportError:  # imported as scripts.qa.market_qa
 # changes instead of silently checking nothing.
 STR = {
     "search.band": "Search products or codes",
+    "searchLabel": "Search the marketplace",
     "nav.home": "Home",
     "nav.browse": "Browse",
     "nav.restock": "Restock",
@@ -98,6 +99,7 @@ STR = {
 # The WEKOME copy lives in en.ts `upcoming.ar` (one bilingual block).
 STR_AR = {
     "search.band": "ابحث عن منتج أو كود",
+    "searchLabel": "ابحث في السوق",
     "nav.home": "الرئيسية",
     "nav.browse": "تصفّح",
     "nav.restock": "الطلبية",
@@ -1785,6 +1787,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("slides-alive", lambda pg: smooth.slides_alive(pg)))
             jobs.append(("panel-still", lambda pg: smooth.panel_still(pg, STR["card.quickView"])))
             jobs.append(("no-blur", lambda pg: smooth.no_blur(pg, STR["card.quickView"])))
+            jobs.append(("banner-reel", lambda pg: smooth.banner_reel(pg)))
             jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
@@ -1834,10 +1837,14 @@ def polish_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
     jobs = [smooth.caps_labels]
     if st.key == "category":
         jobs.append(smooth.slides_alive)
+    if st.key == "category" and vp.klass == "desktop" and not vp.touch:
+        jobs.append(smooth.banner_reel)
     if LANG == "ar" and st.key == "category":
         jobs.append(smooth.bidi_chips)
     if LANG == "ar" and st.key == "home" and vp.width >= 1280:
         jobs.append(smooth.kbd_badge)
+    if st.key == "home" and vp.klass == "desktop" and not vp.touch:
+        jobs.append(lambda pg: smooth.search_typing(pg, STR["searchLabel"]))
     for job in jobs:
         pg = ctx.new_page()
         install_mocks(pg, st.order_kind)

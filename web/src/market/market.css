@@ -1574,6 +1574,122 @@ html[data-lite] .m-photo::after {
     animation-play-state: paused;
   }
 }
+/* The banner's motion (29-Oct-2026, round 2: the owner chose "Product reel"). A live SlideCard (the
+ * desktop stage, the Spotlight, a category banner) on a desktop:
+ * - The reel (components/ComposedCreative.tsx): each disc holds its photos as stacked layers; the
+ *   next zooms in from 1.1 and fades up over the last, which eases back under it. The disc clips them.
+ * - The count rises: the number in the title or the line is drawn by a CSS counter whose value
+ *   (--count, a registered integer) animates from 0 each time the slide comes on stage. The number
+ *   itself keeps its place (hidden), so the line never reflows.
+ * - The light: a soft diagonal beam crosses the card every 6 s, under the copy; transform only.
+ * All three hold on an idle slide; none runs on a phone or tablet, a lite device or under reduced motion. */
+.creative-disc > .reel {
+  position: absolute;
+  inset: 0;
+}
+.creative-disc > .reel-next {
+  opacity: 0;
+  pointer-events: none;
+}
+.creative[data-reel] .creative-disc {
+  overflow: hidden;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .creative-disc > .reel-in {
+    animation: m-reel-in 700ms var(--m-ease-out) both;
+  }
+  .creative-disc > .reel-out {
+    animation: m-reel-out 700ms var(--m-ease-in) both;
+  }
+}
+@keyframes m-reel-in {
+  from {
+    opacity: 0;
+    transform: scale(1.1);
+  }
+}
+@keyframes m-reel-out {
+  to {
+    transform: scale(0.94);
+  }
+}
+@property --count {
+  syntax: '<integer>';
+  inherits: false;
+  initial-value: 0;
+}
+@keyframes m-count {
+  from {
+    --count: 0;
+  }
+}
+.slide-beam {
+  display: none;
+}
+@keyframes m-slide-beam {
+  0% {
+    transform: translate3d(-140%, 0, 0) skewX(-16deg);
+  }
+  24%,
+  100% {
+    transform: translate3d(400%, 0, 0) skewX(-16deg);
+  }
+}
+@media (min-width: 1024px) and (prefers-reduced-motion: no-preference) {
+  html:not([data-lite]) .slide-count {
+    position: relative;
+    display: inline-block;
+    font-variant-numeric: tabular-nums;
+  }
+  html:not([data-lite]) .slide-count[data-go] {
+    --count: var(--n);
+    counter-reset: slide-count var(--count);
+    visibility: hidden;
+    animation: m-count 900ms var(--m-ease-out) 300ms both;
+  }
+  html:not([data-lite]) .slide-count[data-go]::after {
+    content: counter(slide-count);
+    visibility: visible;
+    position: absolute;
+    top: 0;
+    inset-inline-end: 0;
+  }
+  html:not([data-lite]) [data-slide-state='idle'] .slide-count[data-go] {
+    animation: none;
+  }
+  html:not([data-lite]) .slide-beam {
+    display: block;
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  html:not([data-lite]) .slide-beam::before {
+    content: '';
+    position: absolute;
+    top: -25%;
+    bottom: -25%;
+    left: 0;
+    width: 34%;
+    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / var(--beam-a, 0.34)) 50%, transparent);
+    transform: translate3d(-140%, 0, 0) skewX(-16deg);
+    animation: m-slide-beam 6s cubic-bezier(0.45, 0, 0.25, 1) var(--beam-at, 1.4s) infinite both;
+  }
+  html:not([data-lite]) .canvas-plum .slide-beam,
+  html:not([data-lite]) .canvas-night .slide-beam {
+    --beam-a: 0.16;
+  }
+  /* out of step with the stage's */
+  html:not([data-lite]) .slide-card[data-size='aside'] .slide-beam {
+    --beam-at: 4.4s;
+  }
+  html:not([data-lite]) [data-slide-state='idle'] .slide-beam::before {
+    animation-play-state: paused;
+  }
+  [dir='rtl'] .slide-beam {
+    transform: scaleX(-1);
+  }
+}
 /* end v3: slider */
 
 /* While a layer is open, the page behind it holds still (round 2, 29-Oct-2026: the slides, floats and
@@ -1627,6 +1743,27 @@ html[data-layer] #root *::after {
 }
 .anim-hint-out {
   animation: m-hint-out 200ms var(--m-ease) both;
+}
+/* The typed hint's caret (components/SearchField.tsx TypedHints, the desktop header, round 2): a thin
+ * plum bar after the example, solid while it is typed or erased, blinking while it holds. */
+.typed-caret {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 1.5px;
+  height: 1.05em;
+  margin-inline-start: 1px;
+  border-radius: 1px;
+  background-color: hsl(var(--m-plum));
+}
+@media (prefers-reduced-motion: no-preference) {
+  .typed:not([data-typing]) > .typed-caret {
+    animation: m-caret 1.06s steps(1, end) infinite;
+  }
+}
+@keyframes m-caret {
+  50% {
+    opacity: 0;
+  }
 }
 /* end v3: hints */
 
