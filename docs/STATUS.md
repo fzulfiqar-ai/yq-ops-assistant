@@ -5,6 +5,12 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Live
 
+- The marketplace polish, ship 1 (released 28-Oct-2026 on the owner's go; `docs/MARKETPLACE.md`, release log):
+  smoother photos, pages, sheets and Back, honest prices when the price check is slow or down, and the QA
+  harness's smoothness guards (`scripts/qa/smooth.py`). Open: ship 2, the same polish for the ops portal and the
+  salesman app (three finished agent branches to integrate, then the portal shell, brand and sheets); the
+  owner's call on the opening's hold time (1.9 s, 2.8 s on a first visit; the plan said 1.6 s); 11 minor
+  findings of the final review, deferred.
 - Ops skills, phase 1 and its upgrade: `/yq-load` (check, then the Windows box, then the writer, then the e-mail) and
   `/yq-brief` (with the team message). The engine is `python -m scripts.ops`. The one program that writes to the database
   is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (every

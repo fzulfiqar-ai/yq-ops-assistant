@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 import type { BadgeKind, ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
 import { track } from '../lib/events'
+import { launchFlight } from '../lib/flight'
 import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, proofText, stepOf, unitAt, variantOf } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
@@ -285,7 +286,7 @@ function TierLine({ qty, price }: { qty: number; price: string }) {
 
 export const MarketCard = memo(function MarketCard({ item, variant = 'grid', from, priority, presetQty, hideBadge, className }: MarketCardProps) {
   const m = useMarket()
-  const { openProduct, viewport } = useShell()
+  const { openProduct } = useShell()
   const toast = useToast()
   const qty = useCartQty(item.item_code)
   const saved = useIsSaved(item.item_code)
@@ -326,17 +327,10 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
 
   const open = useCallback(() => {
     if (from) track('rail_click', { item_code: item.item_code, meta: { rail: from } })
-    const phone = viewport === 'phone'
-    const img = imgWrap.current?.querySelector('img')
-    const vt = phone && typeof document !== 'undefined' && 'startViewTransition' in document && Boolean(img)
-    if (vt && img) {
-      img.style.viewTransitionName = 'product-photo'
-      window.setTimeout(() => {
-        img.style.viewTransitionName = ''
-      }, 900)
-    }
-    openProduct(item.item_code, from, vt)
-  }, [from, item.item_code, openProduct, viewport])
+    // photo flight (lib/flight): the photo lifts off this card and lands in the product sheet
+    launchFlight(item.item_code, imgWrap.current?.querySelector('img'))
+    openProduct(item.item_code, from)
+  }, [from, item.item_code, openProduct])
 
   const flash = useCallback(() => {
     setAdded(true)
@@ -532,7 +526,10 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           ) : (
             <span className="text-xs font-semibold text-ink-2">{S.card.priceOnRequest}</span>
           )}
-          <div className="w-[6.5rem] md:w-[7.5rem]">{action('sm')}</div>
+          {/* 7.5rem holds the small stepper whole (two 38 px keys, a 36 px value, padding and border:
+              118 px). At 6.5rem it spilled 14 px past the row and widened a 360 px phone's page to
+              366 px, cutting off the "+". */}
+          <div className="w-[7.5rem]">{action('sm')}</div>
         </div>
         {keypadEl}
       </article>
@@ -576,7 +573,8 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         >
           <Heart size={compact ? 15 : 16} aria-hidden="true" className={cn(saved && 'fill-current')} />
         </button>
-        <button type="button" onClick={open} className="block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
+        {/* press feedback (motion M9): the photo gives a little under the finger before the sheet opens */}
+        <button type="button" onClick={open} className="block w-full transition-transform duration-1 ease-m active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
           <div ref={imgWrap}>
             <ProductImage
               item={item}
@@ -611,7 +609,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           )}
           {/* desktop hover reveal */}
           <span aria-hidden="true" className="absolute bottom-2 end-2 hidden opacity-0 transition duration-2 ease-m group-hover:opacity-100 lg:flex">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-ink/85 px-3 py-1.5 text-xs font-semibold text-white shadow-2 backdrop-blur">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-ink/90 px-3 py-1.5 text-xs font-semibold text-white shadow-2">
               <Eye size={13} aria-hidden="true" /> {S.card.quickView}
             </span>
           </span>

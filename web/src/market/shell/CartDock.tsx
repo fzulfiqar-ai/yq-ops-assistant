@@ -18,14 +18,15 @@ import { S } from '../strings'
 export function CartDock() {
   const { pathname } = useLocation()
   const { itemsByCode } = useMarket()
-  const { quote } = useOrder()
+  const { quote, gate } = useOrder()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
   if (!lines.length) return null
   if (/^\/(cart|checkout|o\/)/.test(pathname)) return null
   const estimate = lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0)
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
-  const min = quote?.minimum && Number(quote.minimum.value_bhd) > 0 ? quote.minimum : null
+  // the shared gate (lib/cartGate): the server's minimum, else the payload's while the check is out
+  const min = gate.minimum && Number(gate.minimum.value_bhd) > 0 ? gate.minimum : null
   const remaining = min ? Math.max(0, Number(min.remaining_bhd) || 0) : 0
   const met = Boolean(min && (min.met || remaining <= 0))
   const pct = min ? Math.min(100, Math.max(0, ((Number(min.value_bhd) - remaining) / Number(min.value_bhd)) * 100)) : 0
@@ -42,7 +43,10 @@ export function CartDock() {
             <span aria-hidden="true" className="absolute inset-x-0 top-0 h-[3px] bg-white/10">
               <span className={cn('block h-full rounded-e-full transition-[width] duration-3 ease-m', met ? 'bg-fresh' : 'bg-tile-lilac')} style={{ width: `${pct}%` }} />
             </span>
-            <span className="flex h-8 items-center gap-1.5 border-b border-white/10 px-4 pt-[3px] text-xs">
+            {/* under 380 px this row folds into the one below (the wholesale line takes the summary's
+                place; the count stays on the badge): the dock and the nav took ~150 px of a 780 px
+                phone (28-Oct-2026) */}
+            <span className="flex h-8 items-center gap-1.5 border-b border-white/10 px-4 pt-[3px] text-xs max-[379px]:hidden">
               {met ? (
                 <>
                   <Check size={14} strokeWidth={2.4} className="shrink-0 text-fresh" aria-hidden="true" />
@@ -64,7 +68,12 @@ export function CartDock() {
             <span className="absolute -end-1.5 -top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-plum px-1 text-[10.5px] font-bold tnum text-white">{items}</span>
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-xs text-white/70">{S.cart.summary(items, units)}</span>
+            <span className={cn('block truncate text-xs text-white/70', min && 'max-[379px]:hidden')}>{S.cart.summary(items, units)}</span>
+            {min && (
+              <span className={cn('hidden truncate text-xs max-[379px]:block', met ? 'font-semibold text-fresh' : 'text-white/75')}>
+                {met ? S.wholesale.ready : S.wholesale.toGo(bhd(remaining))}
+              </span>
+            )}
             <span key={total} className="block font-display text-md font-bold leading-tight tnum anim-fade-in">
               {bhd(total)}
             </span>

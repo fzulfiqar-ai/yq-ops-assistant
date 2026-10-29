@@ -1,8 +1,9 @@
 import { useLayoutEffect, useRef } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import { PromiseBar } from '../components/PromiseBar'
 import { Spotlight } from '../components/Spotlight'
 import { MiniCart } from './MiniCart'
+import { RouteOutlet } from './RouteOutlet'
 import { StickyHeader } from './StickyHeader'
 import { useShell } from './ShellContext'
 import { S } from '../strings'
@@ -80,7 +81,7 @@ export default function DesktopShell() {
       <StickyHeader />
       <div className="container-m flex items-start gap-6 2xl:gap-8">
         <main ref={mainRef} id="main" className="min-w-0 flex-1 pb-[calc(var(--m-bottom-stack)+40px)]">
-          <Outlet />
+          <RouteOutlet />
         </main>
         {showAside && (
           <aside

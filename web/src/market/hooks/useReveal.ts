@@ -15,11 +15,31 @@ import { useLayoutEffect, useRef, type DependencyList, type RefObject } from 're
  * className of a `.reveal` node stable (React rewriting it drops `.is-in`); pass `deps` that change
  * when new `.reveal` nodes render — omitting them rescans (and forces layout) after EVERY render.
  * Stagger with `style={{ ['--i' as string]: index }}`.
+ *
+ * v2 (28-Oct-2026, motion list M6/M7/M16): a node starts rising just BEFORE it enters (6% below the
+ * fold) instead of 8% inside it, so the row is moving as it arrives rather than appearing late; a
+ * flick faster than FLICK_PX_S, or a jump past a node, shows it at once (`.is-instant`) so nothing
+ * trails behind the finger; and html[data-lite] (a weak phone, lib/lite.ts) hides nothing at all.
  */
 
 const PENDING = '.reveal:not(.is-in)'
+const FLICK_PX_S = 2000
 
 let observer: IntersectionObserver | null = null
+
+// the page's latest scroll speed, sampled by one passive listener (no layout read: scrollY only)
+let lastY = 0
+let lastT = 0
+let speed = 0
+function sampleScroll() {
+  const t = performance.now()
+  const y = window.scrollY
+  const dt = t - lastT
+  speed = dt > 0 && dt < 200 ? (Math.abs(y - lastY) / dt) * 1000 : 0
+  lastY = y
+  lastT = t
+}
+const flicking = () => speed > FLICK_PX_S && performance.now() - lastT < 150
 
 /**
  * The nodes already waiting for the shared observer. A re-run skips them, so a node that is simply
@@ -31,22 +51,29 @@ const observed = new WeakSet<Element>()
 
 function sharedObserver(): IntersectionObserver {
   if (!observer) {
+    window.addEventListener('scroll', sampleScroll, { passive: true })
     observer = new IntersectionObserver(
       (entries, io) => {
+        const fast = flicking()
         for (const entry of entries) {
-          // entering, or already scrolled past (a jump) — either way the reader should see it
-          if (entry.isIntersecting || entry.boundingClientRect.bottom <= 0) {
+          // entering, or already scrolled past (a jump) — either way the reader should see it; a
+          // jump or a flick shows it at once, a calm scroll lets it rise
+          const past = entry.boundingClientRect.bottom <= 0
+          if (entry.isIntersecting || past) {
+            if (fast || past) entry.target.classList.add('is-instant')
             entry.target.classList.add('is-in')
             io.unobserve(entry.target)
             observed.delete(entry.target)
           }
         }
       },
-      { rootMargin: '0px 0px -8% 0px', threshold: 0 },
+      { rootMargin: '0px 0px 6% 0px', threshold: 0 },
     )
   }
   return observer
 }
+
+const lite = () => 'lite' in document.documentElement.dataset
 
 function prefersReducedMotion(): boolean {
   try {
@@ -74,7 +101,7 @@ export function useReveal(ref: RefObject<HTMLElement | null>, deps?: DependencyL
     // Show everything first, then measure: the forced style flush sees these nodes visible, so the
     // ones that stay visible never start a fade.
     for (const node of nodes) node.classList.add('is-in')
-    if (!supported || prefersReducedMotion()) return
+    if (!supported || prefersReducedMotion() || lite()) return
 
     const fold = window.innerHeight || document.documentElement.clientHeight
     const below = nodes.filter((node) => node.getBoundingClientRect().top >= fold)

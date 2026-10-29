@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react'
+import { useState, type CSSProperties, type SyntheticEvent } from 'react'
 import { Package } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
@@ -17,7 +17,42 @@ import { S } from '../strings'
  * legacy 256 px JPEG thumb, then the full photo, then an honest "Photo coming soon" tile (7 SKUs
  * today). The box always reserves its aspect ratio, so the grid never jumps while loading.
  * If a srcset candidate 404s the whole srcset is dropped and the fallback chain walks on.
+ *
+ * Photo fade-in (28-Oct-2026): until the photo decodes the tile wears the skeleton tint (`.m-photo`,
+ * market.css; a light sweep over it where a mouse drives the page), then the photo fades in. The
+ * state lives on the tile's `data-state`, flipped by the image's own load event: no React render per
+ * photo, so a fast flick past forty photos costs nothing but the fades. A photo already in the cache
+ * shows at once, with no fade.
  */
+
+/* Smart fade (motion list M7's rule, for photos): a photo that decodes while the page is scrolling
+ * shows at once over its tint; only a photo that lands on a page at rest fades. Fading every photo
+ * that arrived mid-scroll cost frames on a mid phone (measured at 4x CPU) for a fade nobody sees
+ * while the page moves. One passive listener for the whole page; nothing per photo. */
+let lastScroll = -1e9
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'scroll',
+    () => {
+      lastScroll = performance.now()
+    },
+    { passive: true, capture: true },
+  )
+}
+const SETTLE_MS = 150
+
+/** the photo decoded: its tile drops the tint and the photo fades in (at once, mid-scroll) */
+function shown(img: HTMLImageElement | null) {
+  const tile = img?.parentElement
+  if (!tile || tile.dataset.state === 'in') return
+  if (performance.now() - lastScroll < SETTLE_MS) tile.dataset.instant = ''
+  tile.dataset.state = 'in'
+}
+
+/** a photo already complete when it mounts (memory cache) shows at once, before the first paint */
+function cached(img: HTMLImageElement | null) {
+  if (img && img.complete && img.naturalWidth > 0) shown(img)
+}
 
 export interface ProductImageProps {
   item?: Pick<ShopItem, 'thumb_url' | 'thumb_urls' | 'product_image_url' | 'package_image_url'> | null
@@ -68,8 +103,9 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
   }
 
   return (
-    <div className={cn('bg-surface', className)} style={{ aspectRatio: '1 / 1', ...style }}>
+    <div className={cn('m-photo bg-surface', className)} data-state="wait" style={{ aspectRatio: '1 / 1', ...style }}>
       <img
+        ref={cached}
         src={src}
         srcSet={useSet ? srcset! : undefined}
         sizes={useSet ? sizes : undefined}
@@ -81,8 +117,9 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
         fetchPriority={priority ? 'high' : undefined}
         draggable={false}
         style={vtName ? { viewTransitionName: vtName } : undefined}
+        onLoad={(e: SyntheticEvent<HTMLImageElement>) => shown(e.currentTarget)}
         onError={() => setState(useSet ? { key, idx: 0, srcsetDead: true } : { key, idx: idx + 1, srcsetDead })}
-        className={cn('h-full w-full object-contain', imgClassName)}
+        className={cn('m-photo-img h-full w-full object-contain', imgClassName)}
       />
     </div>
   )

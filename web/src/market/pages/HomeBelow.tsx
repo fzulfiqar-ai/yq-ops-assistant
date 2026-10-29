@@ -1,5 +1,6 @@
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { LayoutGrid, List } from 'lucide-react'
+import { ErrorBoundary } from '../ui/ErrorBoundary'
 import type { OrderStatusPayload } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { BrandTiles } from '../components/BrandTiles'
@@ -47,9 +48,11 @@ const DEALS: Set<QuickFilter> = new Set<QuickFilter>(['deals'])
 const STACK = 'flex flex-col gap-7 lg:gap-14 [&>*]:!mt-0'
 
 /**
- * One home section slot: collapses when its content renders nothing. `reveal` (desktop) lets the
- * whole section rise in — only for sections that do not already reveal their own cards (Rail and
- * DealsSection stagger their grid cards; a second rise on the wrapper would double the motion).
+ * One home section slot: collapses when its content renders nothing. `reveal` lets the whole
+ * section rise in (since 28-Oct-2026 on phones too, lighter) — only where the section does not
+ * already reveal its own cards. On a desktop Rail and DealsSection stagger their grid cards (a
+ * second rise on the wrapper would double the motion), so those slots pass `!desktop`: on a phone
+ * their rows scroll sideways and reveal nothing, so the section rises as one.
  */
 function Sect({ reveal = false, children }: { reveal?: boolean; children: ReactNode }) {
   return <div className={cn('min-w-0 empty:hidden [&>*]:!mt-0', reveal && 'reveal')}>{children}</div>
@@ -115,22 +118,32 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
     return homeGridOrder(r, filtering ? new Set<string>() : railCodes)
   }, [items, inStockOnly, dealsOnly, filtering, railCodes])
 
-  // the first grid page is on screen; the rest of the first chunk arrives on idle
+  // the first grid page is on screen; the rest of the first chunk arrives on idle, one row of FIRST
+  // cards per idle moment: the whole chunk in one task (48 cards on a desktop) was one long frame
+  // right where the merchant began to scroll. Once the chunk is reached, or a filter is touched,
+  // "Show more" takes over.
   const chunk = desktop ? CHUNK.desktop : CHUNK.phone
+  const grown = useRef(false)
   useEffect(() => {
+    if (grown.current) return
+    if (visible >= chunk) {
+      grown.current = true
+      return
+    }
     let idle = 0
     let t = 0
-    const grow = () => setVisible((v) => (v < chunk ? chunk : v))
+    const grow = () => setVisible((v) => (v < chunk ? Math.min(chunk, v + FIRST) : v))
     if (typeof window.requestIdleCallback === 'function') idle = window.requestIdleCallback(grow, { timeout: 2500 })
-    else t = window.setTimeout(grow, 1200)
+    else t = window.setTimeout(grow, 600)
     return () => {
       window.clearTimeout(t)
       if (idle) window.cancelIdleCallback(idle)
     }
-  }, [chunk])
+  }, [visible, chunk])
   const toggleFilter = (which: 'stock' | 'deals') => {
     if (which === 'stock') setInStockOnly((v) => !v)
     else setDealsOnly((v) => !v)
+    grown.current = true
     setVisible(FIRST)
   }
   const shownCount = Math.min(visible, grid.length)
@@ -142,7 +155,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
 
   return (
     <div ref={rootRef} className={cn(STACK, 'mt-7 lg:mt-14')}>
-      <Sect>
+      <Sect reveal={!desktop}>
         {showRegulars && (
           <Rail id="regular" title={S.home.regular} seeAllTo="/quick?load=regular">
             {regulars.map((r) => (
@@ -151,7 +164,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           </Rail>
         )}
       </Sect>
-      <Sect>
+      <Sect reveal={!desktop}>
         {rails.essentials.length >= 3 && (
           <Rail id="essentials" title={S.rails.essentials} seeAllTo="/shop?f=best">
             {rails.essentials.map((it) => (
@@ -160,10 +173,10 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           </Rail>
         )}
       </Sect>
-      <Sect>
+      <Sect reveal={!desktop}>
         <DealsSection items={dealItems} offers={offerRules} layout={desktop ? 'desktop' : 'phone'} />
       </Sect>
-      <Sect>
+      <Sect reveal={!desktop}>
         {rails.fresh.length >= 3 && (
           <Rail id="fresh" title={S.rails.fresh} seeAllTo="/shop?f=new">
             {rails.fresh.map((it) => (
@@ -172,10 +185,10 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           </Rail>
         )}
       </Sect>
-      <Sect reveal={desktop}>
+      <Sect reveal>
         <BrandTiles items={items} />
       </Sect>
-      <Sect>
+      <Sect reveal={!desktop}>
         {rails.moving.length >= 3 && (
           // the one tinted block in the middle of the page: after the cream deals panel the home
           // runs white-on-warm for thousands of pixels, and this is the section that earns a canvas
@@ -188,7 +201,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           </div>
         )}
       </Sect>
-      <Sect>
+      <Sect reveal={!desktop}>
         {viewed.length >= 3 && (
           <Rail id="viewed" title={S.home.viewed}>
             {viewed.map((it) => (
@@ -203,19 +216,23 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           always outranks what it cannot order yet, and nothing sold out or unavailable may render
           above it. A workstream that adds rails to this file (e.g. sold-out / clearing) must
           place them above this block only if they are in-stock rails, otherwise below the grid. */}
-      <Sect>
-        <Suspense fallback={null}>
-          <ComingSoonRail />
-        </Suspense>
+      <Sect reveal={!desktop}>
+        <ErrorBoundary silent>
+          <Suspense fallback={null}>
+            <ComingSoonRail />
+          </Suspense>
+        </ErrorBoundary>
       </Sect>
-      <Sect reveal={desktop}>{continueCard}</Sect>
+      <Sect reveal>{continueCard}</Sect>
 
       {/* ── the grid ── */}
-      <Sect reveal={desktop}>
+      {/* not one slab: the heading row rises, then on a desktop each card by its row (below) — the
+          whole 60-card grid used to fade in as one block (28-Oct-2026) */}
+      <Sect>
         <section aria-labelledby="home-all">
           {/* phone: heading and count on one line, then the filters flush left with the view
               toggle at the end — one row of pills instead of three styles fighting for the line */}
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-2.5">
+          <div className="reveal flex flex-wrap items-center gap-x-2 gap-y-2.5">
             <h2 id="home-all" className="font-display text-lg font-bold text-ink lg:text-xl">
               {S.home.all}
             </h2>
@@ -277,7 +294,15 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
               {grid.slice(0, shownCount).map((it, i) => (
                 <Fragment key={it.item_code}>
                   {i === sold.firstOut && <SoldOutDivider count={sold.soldTotal} className="col-span-full mt-3" />}
-                  <MarketCard item={it} />
+                  {desktop ? (
+                    // a row rises together, left to right — .reveal on a plain wrapper whose className
+                    // never changes (the card keeps its own transition and .cv-card), as GridPage does
+                    <div className="reveal grid grid-cols-1" style={{ ['--i' as string]: i % 4 }}>
+                      <MarketCard item={it} />
+                    </div>
+                  ) : (
+                    <MarketCard item={it} />
+                  )}
                 </Fragment>
               ))}
             </div>
@@ -296,7 +321,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
       {/* the closing statement spans the container: on desktop the shell hosts it below the main
           column + mini-cart row (PageTail), elsewhere it stays right here */}
       <PageTail>
-        <Sect reveal={desktop}>
+        <Sect reveal>
           <CtaBand canReorder={lastLines.length > 0} />
         </Sect>
         <Footer prices={fmtDate(data?.prices_updated)} stock={fmtDate(data?.stock_as_of)} rep={rep} />

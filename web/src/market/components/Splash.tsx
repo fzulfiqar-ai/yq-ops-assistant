@@ -197,6 +197,11 @@ export function Splash() {
       data-splash={still ? 'still' : 'motion'}
       onClick={dismiss}
       onWheel={dismiss}
+      // a swipe skips it too (touch-none keeps a swipe from ever becoming a click): any touch that
+      // is not on the shortcut button starts the exit
+      onPointerDown={(e) => {
+        if (!(e.target as HTMLElement).closest('button,a')) dismiss()
+      }}
       className="fixed inset-0 z-[90] touch-none select-none overflow-hidden bg-night text-white"
     >
       <div className="horizon is-opening is-rising" aria-hidden="true">

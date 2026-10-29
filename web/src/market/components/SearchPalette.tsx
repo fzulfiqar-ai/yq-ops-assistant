@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Clock, Hash, Search } from 'lucide-react'
 import type { ShopItem } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
-import { useMarket } from '../MarketContext'
+import { useMarket, useMarketSearch } from '../MarketContext'
 import { recentSearches, rememberSearch } from '../lib/device'
 import { track, trackSearch } from '../lib/events'
 import { sortItems } from '../lib/facets'
@@ -35,6 +35,7 @@ function popularRestocks(items: ShopItem[]): ShopItem[] {
  */
 export default function SearchPalette() {
   const m = useMarket()
+  const { index, ensureIndex } = useMarketSearch()
   const { closePalette, paletteQuery, openProduct } = useShell()
   const navigate = useNavigate()
   const [q, setQ] = useState(paletteQuery)
@@ -43,14 +44,14 @@ export default function SearchPalette() {
   const [navigated, setNavigated] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
-    void m.ensureIndex()
-  }, [m])
+    void ensureIndex()
+  }, [ensureIndex])
 
   const empty = !q.trim()
-  const grouped = useMemo(() => groupResults(q, m.items, m.index, searchItems), [q, m.items, m.index])
+  const grouped = useMemo(() => groupResults(q, m.items, index, searchItems), [q, m.items, index])
   const popular = useMemo(() => popularRestocks(m.items), [m.items])
   const flat = useMemo(() => (empty ? popular : [...grouped.codes, ...grouped.products]), [empty, popular, grouped])
-  const hints = useMemo(() => (m.index && q.trim() && !flat.length ? suggest(m.index, q) : []), [m.index, q, flat.length])
+  const hints = useMemo(() => (index && q.trim() && !flat.length ? suggest(index, q) : []), [index, q, flat.length])
   const [qSeen, setQSeen] = useState(q)
   if (qSeen !== q) {
     setQSeen(q)
@@ -60,9 +61,9 @@ export default function SearchPalette() {
   // with a query the first result is the Enter target; with none, nothing is selected until ↑↓
   const activeCode = empty && !navigated ? null : flat[active]?.item_code || null
   useEffect(() => {
-    if (!q.trim() || !m.index) return
+    if (!q.trim() || !index) return
     trackSearch(q, flat.length)
-  }, [q, flat.length, m.index])
+  }, [q, flat.length, index])
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
@@ -164,7 +165,7 @@ export default function SearchPalette() {
       <div id="palette-results" className="px-4 py-4 md:px-5">
         {empty ? (
           <PaletteEmpty popular={popular} activeCode={activeCode} onPick={setQ} />
-        ) : !m.index ? (
+        ) : !index ? (
           <SearchPreparing />
         ) : (
           <SearchGroups q={q} grouped={grouped} hints={hints} onPick={setQ} activeCode={activeCode} from="palette" />

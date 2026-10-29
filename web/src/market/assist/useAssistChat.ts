@@ -4,7 +4,7 @@ import { ShopApiError, type ShopItem } from '@/lib/shopApi'
 import { currentRef, deviceId, rememberedOrders } from '../lib/device'
 import { normalizeQty } from '../lib/format'
 import { searchItems } from '../lib/search'
-import { useMarket } from '../MarketContext'
+import { useMarket, useMarketSearch } from '../MarketContext'
 import { locale } from '../strings'
 import { pageTemplate, postAsk, postFeedback, postPhoto, type AskHistory, type AskResponse, type FeedbackKind } from './assistApi'
 import { forgetPhotos, keepPhoto, photoOf } from './media'
@@ -53,7 +53,8 @@ interface Run {
 }
 
 export function useAssistChat(itemCodeProp: string | null) {
-  const { ensureIndex, items, itemsByCode } = useMarket()
+  const { items, itemsByCode } = useMarket()
+  const { ensureIndex } = useMarketSearch()
   const { pathname } = useLocation()
   const [state, setState] = useState<Saved>(load)
   const [busy, setBusy] = useState(false)

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
-import { bhd, productName } from '../lib/format'
+import { bhd, distinctNames, productName } from '../lib/format'
 import { bestSellers } from '../lib/home'
 import { buildSlides, useCarousel, useClaimedSlides, useSlideClaimsActive } from '../lib/slides'
 import { useUpcoming } from '../lib/upcoming'
@@ -169,6 +169,8 @@ export function PopularRows({ limit = 3 }: { limit?: number }) {
   const onRail = useMemo(() => new Set(bestSellers(items).map((i) => i.item_code)), [items])
   const pool = items.filter((it) => it.badges?.includes('best_seller') && it.stock_status !== 'out_of_stock' && !inCart.has(it.item_code))
   const rows = [...pool.filter((it) => !onRail.has(it.item_code)), ...pool.filter((it) => onRail.has(it.item_code))].slice(0, limit)
+  // two rows that read the same carry their codes (lib/format distinctNames)
+  const names = distinctNames(rows)
   if (!rows.length) return null
   return (
     <div className="border-t border-line-2 px-4 pb-4 pt-3 text-start">
@@ -184,11 +186,11 @@ export function PopularRows({ limit = 3 }: { limit?: number }) {
                   part at the END of the name ("… (2USB Port)" vs "… (USB + Type-C Port)", "1Mtr"
                   vs "2Mtr"), so a single clamped line offers three identical-looking chargers */}
               <span {...ltrText} className="line-clamp-2 text-sm font-semibold leading-snug text-ink rtl:text-right">
-                {productName(it)}
+                {names.get(it.item_code) || productName(it)}
               </span>
               <span className="block text-xs tnum text-ink-2">{bhd(it.price_bhd)}</span>
             </span>
-            <button type="button" onClick={() => add(it, undefined, 'minicart_popular')} aria-label={`${S.card.add} ${defaultQty(it)} — ${productName(it)}`} className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-line text-plum transition duration-1 ease-m hover:border-plum hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+            <button type="button" onClick={() => add(it, undefined, 'minicart_popular')} aria-label={`${S.card.add} ${defaultQty(it)} — ${names.get(it.item_code) || productName(it)}`} className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-line text-plum transition duration-1 ease-m hover:border-plum hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
               <Plus size={16} aria-hidden="true" />
             </button>
           </li>

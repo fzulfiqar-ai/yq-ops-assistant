@@ -143,12 +143,17 @@
     --m-font-sans: 'Instrument Sans', 'Instrument Sans Fallback', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --m-font-display: 'Sora', 'Sora Fallback', var(--m-font-sans);
 
-    /* motion */
+    /* motion (one language with the portal, 28-Oct-2026): only transform and opacity move */
     --m-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-    --m-ease-spring: cubic-bezier(0.22, 1.18, 0.36, 1);
+    --m-ease-spring: cubic-bezier(0.22, 1.18, 0.36, 1); /* small pops only — never a sheet */
+    --m-ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* enter: arrives fast, settles */
+    --m-ease-in: cubic-bezier(0.4, 0, 1, 1); /* exit */
+    --m-ease-sheet: cubic-bezier(0.32, 0.72, 0, 1); /* sheets: settle without a bounce */
     --m-d-1: 120ms;
     --m-d-2: 200ms;
     --m-d-3: 320ms;
+    --m-d-sheet: 280ms;
+    --m-d-4: 420ms;
 
     color-scheme: only light;
   }
@@ -160,6 +165,10 @@
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+    /* keep the scrollbar's gutter, so a short page and a long one line up (classic Windows
+     * scrollbars shifted everything 10 px). While a sheet is open lib/sheet's lock trades the gutter
+     * for body padding, so the overlay covers the whole window and still nothing moves. */
+    scrollbar-gutter: stable;
   }
   html,
   body,
@@ -176,7 +185,9 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     font-feature-settings: 'kern', 'liga';
-    overscroll-behavior-y: none;
+    /* contain, not none: the page keeps its native bounce (iOS) and stretch (Android) at the ends,
+     * while Android's pull-to-refresh still cannot reload the shop mid-order */
+    overscroll-behavior-y: contain;
   }
   h1,
   h2,
@@ -252,15 +263,19 @@
     scroll-snap-align: start;
     flex: 0 0 auto;
   }
-  /* frosted surface (nav, header). Opaque fallback first for browsers without backdrop-filter. */
+  /* frosted surface (nav, header). A near-solid surface first; the frost only where a mouse
+   * drives the page. On a phone the blur under a fixed bar is recomputed on every scroll frame —
+   * the main jank on mid and low Android — for a bar that is 96% opaque anyway. */
   .glass {
     background-color: hsl(var(--m-surface) / 0.96);
   }
   @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
-    .glass {
-      background-color: hsl(var(--m-surface) / 0.78);
-      -webkit-backdrop-filter: blur(18px) saturate(1.4);
-      backdrop-filter: blur(18px) saturate(1.4);
+    @media (hover: hover) and (pointer: fine) {
+      .glass {
+        background-color: hsl(var(--m-surface) / 0.78);
+        -webkit-backdrop-filter: blur(18px) saturate(1.4);
+        backdrop-filter: blur(18px) saturate(1.4);
+      }
     }
   }
   .skeleton {
@@ -275,6 +290,58 @@
     transform: translateX(-100%);
     background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
     animation: m-shimmer 1.4s linear infinite;
+  }
+  /* photo fade-in (ui/ProductImage.tsx): while the photo decodes, the tile wears the skeleton tint
+   * (::before); then the photo fades in and the tint fades out with it, back to the white shelf
+   * tile. Only opacity moves. Where a mouse drives the page a light sweep runs over the tint
+   * (::after); a phone keeps the still tint — one sweep per waiting tile is one more layer per photo
+   * on a flick, for a hint the tint already gives. */
+  .m-photo {
+    position: relative;
+    overflow: hidden;
+  }
+  .m-photo::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-color: hsl(var(--m-surface-2));
+    transition: opacity var(--m-d-2) var(--m-ease);
+    pointer-events: none;
+  }
+  .m-photo[data-state='in']::before {
+    opacity: 0;
+  }
+  .m-photo-img {
+    position: relative;
+    transition: opacity var(--m-d-2) var(--m-ease);
+  }
+  /* A card's photo carries `transition-transform` for its hover zoom, and that utility (emitted later,
+   * same specificity) set transition-property to transform alone: card photos popped in over the
+   * tint instead of fading (final review, 28-Oct-2026). Two classes outrank any one utility; the
+   * transform keeps the zoom's own duration (duration-3). */
+  .m-photo .m-photo-img {
+    transition-property: opacity, transform;
+    transition-duration: var(--m-d-2), var(--m-d-3);
+    transition-timing-function: var(--m-ease), var(--m-ease);
+  }
+  .m-photo[data-state='wait'] .m-photo-img {
+    opacity: 0;
+  }
+  /* decoded while the page was scrolling (ui/ProductImage.tsx): shown at once, no fade */
+  .m-photo[data-instant]::before,
+  .m-photo[data-instant] .m-photo-img {
+    transition: none;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .m-photo[data-state='wait']::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
+      animation: m-shimmer 1.4s linear infinite;
+      pointer-events: none;
+    }
   }
   /* cards below the fold skip layout/paint until they scroll near (React still renders them).
    * Placeholder heights = card v3 (components/MarketCard.tsx) without the optional rows, measured
@@ -316,6 +383,21 @@
   to {
     transform: translateX(100%);
   }
+}
+/* page glide (shell/RouteOutlet): the next page fades up the moment it mounts; never on the first
+ * page of a visit. `both` leaves transform: none behind, so nothing stays a containing block. */
+@keyframes m-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.m-page-in {
+  animation: m-page-in var(--m-d-2) var(--m-ease-out) both;
 }
 @keyframes m-fade-in {
   from {
@@ -513,6 +595,10 @@
   .skeleton::after {
     display: none;
   }
+  /* a waiting photo tile is a still tint (::before), not a sweep */
+  .m-photo[data-state='wait']::after {
+    display: none;
+  }
 }
 
 /* ══════════════════════════════ v3 — wholesale redesign ══════════════════════════════
@@ -547,19 +633,51 @@
  * must sit inside an element passed to useReveal. Put it on a section wrapper or a wrapper around a
  * desktop grid card — never on compact rail cards, inside a .cv-* element, or on an element with its
  * own transition (this shorthand would replace it). Stagger: style={{ ['--i' as string]: index }}. */
+/* v2 (28-Oct-2026): 240 ms with the enter curve, a stagger of at most 4 × 40 ms (it was 6 × 45 on
+ * 320 ms, so a row's last card arrived 590 ms after the scroll), 8 px on a phone, none at all on a
+ * weak phone (html[data-lite]), and a flick or a jump shows the node at once (.is-instant). */
 @media (prefers-reduced-motion: no-preference) {
-  html[data-reveal] .reveal {
+  html[data-reveal]:not([data-lite]) .reveal {
     opacity: 0;
     transform: translateY(12px);
-    transition: opacity var(--m-d-3) var(--m-ease), transform var(--m-d-3) var(--m-ease);
-    transition-delay: calc(min(var(--i, 0), 6) * 45ms);
+    transition: opacity 240ms var(--m-ease-out), transform 240ms var(--m-ease-out);
+    transition-delay: calc(min(var(--i, 0), 4) * 40ms);
   }
-  html[data-reveal] .reveal.is-in {
+  html[data-reveal]:not([data-lite]) .reveal.is-in {
     opacity: 1;
     transform: none;
   }
+  html[data-reveal]:not([data-lite]) .reveal.is-instant {
+    transition: none;
+  }
+}
+/* A phone moves only the section's header (8 px), never the whole section: a rail of photos rising
+ * as one promoted layer cost frames on a mid phone (measured: 4x CPU, more frames over 50 ms with
+ * whole-section reveals). The section itself stays still and visible; the hook still observes it. */
+@media (prefers-reduced-motion: no-preference) and (max-width: 767px) {
+  html[data-reveal]:not([data-lite]) .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  html[data-reveal]:not([data-lite]) .reveal [data-section-head] {
+    transition: opacity 240ms var(--m-ease-out), transform 240ms var(--m-ease-out);
+  }
+  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) [data-section-head] {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  html[data-reveal]:not([data-lite]) .reveal.is-instant [data-section-head] {
+    transition: none;
+  }
 }
 /* end v3: reveal */
+
+/* lite (lib/lite.ts): no sweeps over skeletons or waiting photos */
+html[data-lite] .skeleton::after,
+html[data-lite] .m-photo::after {
+  display: none;
+}
 
 /* v3: horizon */
 /* The portal's glow horizon (web/src/components/ui/glow-horizon.tsx) in CSS, mirrored so the arcs
@@ -647,16 +765,17 @@
   @media (prefers-reduced-motion: no-preference) {
     .horizon.is-rising > i {
       animation: m-horizon-rise var(--arc-dur) cubic-bezier(0.16, 1, 0.3, 1) var(--arc-delay) both;
-      will-change: transform, opacity, filter;
+      will-change: transform, opacity;
     }
   }
 }
-/* `to` is implicit: each arc lands on its resting transform and blur declared above. */
+/* `to` is implicit: each arc lands on its resting transform declared above. The arcs rise at their
+ * resting blur: animating filter re-rasterised four large blurred layers every frame while the
+ * merchant scrolled past the night band (28-Oct-2026). Only transform and opacity move. */
 @keyframes m-horizon-rise {
   from {
     opacity: 0;
     transform: translate3d(0, calc(var(--horizon-y, 50%) + var(--arc-rise)), 0) scale(var(--arc-s), var(--arc-s-y0));
-    filter: blur(var(--arc-blur-0));
   }
 }
 /* .is-opening (components/Splash.tsx, full-screen): the arcs' box is wider than the screen and sunk
@@ -879,7 +998,11 @@
 }
 .slide-card[data-size='tile'] .slide-title {
   font-size: 20px;
-  font-size: clamp(17px, 7cqi, 26px);
+  font-size: clamp(17px, 6.4cqi, 24px);
+  /* the tile drops the slide's line, so its headline may take a third line rather than end in
+   * "…": "32 prices cut in our price…" read as a broken sentence (28-Oct-2026) */
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 .slide-card[data-size='aside'] .slide-title {
   font-size: 20px;

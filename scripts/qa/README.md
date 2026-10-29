@@ -108,6 +108,34 @@ machine) · `gap-filler-mix` (every gap-filler row tagged "completes your order"
 mix lines, not push one SKU) · `paste-repeat` (home sends the merchant to `/quick` more than twice) · `copy-drift` (a literal this harness checks is no longer in
 `web/src/market/i18n/en.ts`, or `ar.ts` under `--lang ar`) · a missing rep slug.
 
+**Smoothness and motion (`smooth.py`, 28-Oct-2026)**
+
+These run in English with motion on, on the lead viewports only (430×932 and 1366×768), each on a
+fresh page of the state's context, so nothing they scroll or open reaches the other checks. A result
+within its target is kept as a run note. Not run under `--reduced-motion` or `--lang ar`.
+
+| check | state | rule |
+|---|---|---|
+| `scroll-jank` (S1) | home, phone | frame times of a scripted 900 px/s scroll over the first 6000 px at 4× CPU: p95, frames over 50 ms and the worst frame. A warning above p95 20 ms or any frame over 50 ms, **never fatal** (frame times depend on the machine); compare builds on one machine, interleaved |
+| `photo-blank` (S2) | home | 150 ms after landing on a screen, every photo tile is loaded or drawing its placeholder (tint, shimmer or a running fade), never an empty white box |
+| `panel-scroll` (S3) | home | closing a product panel leaves the page where it was (± 2 px) |
+| `back-scroll` (S4) | home | Back from a page lands with the same card at the same place on screen (± 24 px) |
+| `lazy-blank` (S5) | shop | opened while its code is still downloading (CDP holds every chunk the HTML does not name), the page shows the shell and a skeleton |
+| `sheet-drag` / `sheet-overshoot` / `sheet-dim` (S6) | home, phone | a product sheet follows a touch drag, never rises above its resting place on the way in, and the dim behind it lifts with the drag |
+| `photo-fade` (M1) | home | every product photo on screen transitions its own opacity (a card's `transition-transform` utility once replaced the fade) |
+| `photo-flight` (M4) | home | tapping a card flies its photo into the sheet; the clone is removed and the sheet's photo is visible |
+| `escape-stack` | home | Escape in the photo viewer over a product panel closes the viewer only |
+| `page-wait` (M3) | home, phone | after the shell sat idle, the Browse tab opens the shop with no page skeleton (warm pages never flash one) |
+| `palette-layers` | home, desktop | a product opened from a Ctrl+K result sits on top: the focus is in it, and Escape closes it first and leaves the palette |
+| `reveal-flick` / `reveal-stuck` (M7) | home | a 4000 px/s flick shows the rows at once (`is-instant`), and nothing stays hidden |
+| `lite-mode` (M16) | home | with `navigator.deviceMemory = 1` the page runs `html[data-lite]` and hides nothing |
+| `reveal-phone` (M6) | home, phone | a phone has sections that rise in below the fold |
+| `palette-focus` | home, desktop | Ctrl+K opens the search palette with the typing focus in its field |
+| `back-entry` | shop, phone | arriving from another site on `/shop?f=clearance` and tapping a filter chip (which replaces the history entry), the header's Back goes to Home, never out of the shop |
+
+A Playwright error inside one of them is the hard failure `smooth-error`. A check that finds nothing
+to measure (no quick-view card, no zoom button) is a warning, never a pass.
+
 ## How it measures
 
 - **Sweep, not one screen.** Geometry and text checks run at the top of the page and then one screen
@@ -135,7 +163,7 @@ production except GET requests and the quote**:
 | `review_run.py` | Serves one built `dist-market` with `vite preview --strictPort` and takes lab Lighthouse (mobile and desktop, median of 3). It runs the harness on the 8 review screens with `--reduced-motion`, which gives stable frames, and with `--full-check` also runs every state with motion on. It also writes `meta.json` and `bundle.json`. It refuses a build that is not pointed at the stub. |
 | `review_pack.py` | Makes before\|after composites per screen × viewport (side by side for portrait, stacked for landscape, in CSS pixels, ≤ 1560 px) and pairs long pages tile by tile, plus `findings.json` per screen. |
 | `bundle_sizes.py` | The first-load script / stylesheet gzip and the market's fonts against `.github/lighthouserc.json`. A font counts only when a file of the build names it (CSS `@font-face`, the HTML, a script or the service worker); the portal's fonts, copied by the shared `public/`, are listed as not loaded. `--gate` exits 1 on a broken budget (CI's web job). The Arabic faces (R5) load on an Arabic page only, so they are held to their own budget (`FONT_ARABIC_BUDGET`, 90 KB) and the lighthouserc font budget stays the English page's. |
-| `design_review.py` | Builds one self-contained `index.html` of the two runs, with WebP data URIs, the harness counts (BEFORE failures that come from rules new in R4 are labelled "expected"), Lighthouse and bundle budgets. |
+| `design_review.py` | Builds one self-contained `index.html` of the two runs, with WebP data URIs, the harness counts (BEFORE failures of the checks named in `--new-checks` are labelled "expected"; `--r4` is the R4 review's preset), Lighthouse and bundle budgets. `--title`, `--after-name` and `--data-note` say what the page compares. |
 
 ```bash
 python scripts/qa/readonly_api.py --cache <scratch>/stub --upcoming business_data/upcoming_review/2026-09-24 &
@@ -143,7 +171,7 @@ python scripts/qa/readonly_api.py --cache <scratch>/stub --upcoming business_dat
 python scripts/qa/review_run.py --dist <before>/web/dist-market --out business_data/design_review/<date>/before --label before --commit <sha> --port 5173 --full-check
 python scripts/qa/review_run.py --dist web/dist-market --out business_data/design_review/<date>/after --label after --commit <sha> --port 5174 --full-check
 python scripts/qa/review_pack.py --before .../before --after .../after --out .../pack
-python scripts/qa/design_review.py --before .../before --after .../after --out .../index.html [--notes notes.html]
+python scripts/qa/design_review.py --before .../before --after .../after --out .../index.html [--notes notes.html] [--new-checks photo-blank,lazy-blank]
 ```
 
 Run the two sides one after the other, never in parallel. The `--reduced-motion` flag is also

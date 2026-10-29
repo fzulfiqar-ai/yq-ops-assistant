@@ -8,6 +8,10 @@ import { deviceId } from './device'
  */
 const MAX_PER_SESSION = 3
 let sent = 0
+/** the deployed bundle (vite.config.ts `define`). import.meta.env.VITE_BUILD_ID, read here before
+ *  28-Oct-2026, is never set, so every error arrived without its build. */
+declare const __BUILD_ID__: string
+const BUILD = typeof __BUILD_ID__ !== 'undefined' ? __BUILD_ID__ : 'dev'
 
 function report(kind: string, raw: unknown) {
   if (sent >= MAX_PER_SESSION) return
@@ -17,7 +21,7 @@ function report(kind: string, raw: unknown) {
     pingMarketEvent({
       event: 'error',
       device_id: deviceId(),
-      meta: { from: kind, code: msg.replace(/\s+/g, ' ').slice(0, 120), to: location.pathname.slice(0, 80), value: String(import.meta.env.VITE_BUILD_ID || '').slice(0, 24) },
+      meta: { from: kind, code: msg.replace(/\s+/g, ' ').slice(0, 120), to: location.pathname.slice(0, 80), value: BUILD.slice(0, 24) },
     })
   } catch {
     /* never throw from the reporter */

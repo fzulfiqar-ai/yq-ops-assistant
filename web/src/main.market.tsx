@@ -1,5 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import './market/market.css'
+import { installPreloadReload } from './lib/preloadReload'
+import { applyLite } from './market/lib/lite'
 import MarketApp from './MarketApp'
 
 /**
@@ -9,21 +11,8 @@ import MarketApp from './MarketApp'
  */
 
 // A tab opened before a deploy still holds the old index.html, whose lazy chunks no longer exist
-// once the new build is live. Both hosts answer a missing /assets/* file with the SPA index.html
-// (HTTP 200, text/html, and the immutable cache header), so the import fails and the app is stuck
-// until the merchant closes the tab. Vite reports that as `vite:preloadError`; one reload fetches
-// the new index.html and its chunks. Once per session, so a genuinely broken build cannot loop.
-window.addEventListener('vite:preloadError', (event) => {
-  let already = false
-  try {
-    already = sessionStorage.getItem('yq-preload-reload') === '1'
-    sessionStorage.setItem('yq-preload-reload', '1')
-  } catch {
-    /* ignore */
-  }
-  if (already) return
-  event.preventDefault()
-  window.location.reload()
-})
+// once the new build is live: one reload per build fetches the new one (lib/preloadReload).
+installPreloadReload()
 
+applyLite()
 createRoot(document.getElementById('root')!).render(<MarketApp />)

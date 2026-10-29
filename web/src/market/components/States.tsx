@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { WifiOff } from 'lucide-react'
+import { PackageSearch, WifiOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { RepCard as Rep } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
@@ -10,9 +10,14 @@ import { Button, LinkButton } from '../ui/Button'
 import { CardSkeleton, Skeleton } from '../ui/Skeleton'
 import { RepCard } from './RepCard'
 
-export function EmptyState({ title, hint, action, className }: { title: string; hint?: string; action?: ReactNode; className?: string }) {
+/** Nothing to show: a soft plum disc with a line icon (a shelf to fill, unless the caller names
+ *  another), the sentence, and one way on — never a bare grey box. */
+export function EmptyState({ title, hint, action, icon, className }: { title: string; hint?: string; action?: ReactNode; icon?: ReactNode; className?: string }) {
   return (
     <div className={cn('rounded-lg border border-line bg-surface px-6 py-12 text-center', className)}>
+      <div aria-hidden="true" className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-full bg-plum-soft text-plum ring-8 ring-plum-wash">
+        {icon ?? <PackageSearch size={24} strokeWidth={1.75} />}
+      </div>
       <p className="font-display text-base font-bold text-ink">{title}</p>
       {hint && <p className="mt-1 text-sm leading-snug text-ink-2">{hint}</p>}
       {action && <div className="mt-5 flex justify-center">{action}</div>}

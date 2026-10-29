@@ -29,7 +29,8 @@ export interface SectionHeaderProps {
  */
 export function SectionHeader({ title, line, seeAllTo, seeAllLabel = S.home.seeAll, action, id, as: Heading = 'h2', className }: SectionHeaderProps) {
   return (
-    <div className={cn('grid grid-cols-[minmax(0,1fr)_auto_auto] items-baseline', className)}>
+    // data-section-head: on a phone the scroll reveal moves only this header, not the section under it (market.css)
+    <div data-section-head="" className={cn('grid grid-cols-[minmax(0,1fr)_auto_auto] items-baseline', className)}>
       <Heading id={id} className={cn('col-start-1 row-start-1 min-w-0 text-balance font-display text-lg font-bold text-ink lg:text-xl', (action || seeAllTo) && 'pe-3')}>
         {title}
       </Heading>

@@ -17,7 +17,8 @@ import { S } from '../strings'
  * compatibility mouse events a touch screen fires around a tap never open, close or preview
  * anything (StickyHeader opens the panel on the first tap). Keyboard focus still previews.
  */
-export function MegaNav({ onClose, onEnter, onLeave }: { onClose: () => void; onEnter: () => void; onLeave: () => void }) {
+/** `leaving`: the menu plays its exit, then `onGone` lets the header unmount it (it used to vanish). */
+export function MegaNav({ onClose, onEnter, onLeave, leaving = false, onGone }: { onClose: () => void; onEnter: () => void; onLeave: () => void; leaving?: boolean; onGone?: () => void }) {
   const { categories, items } = useMarket()
   const [hover, setHover] = useState<string>(categories[0] || '')
   const cat = hover || categories[0] || ''
@@ -34,7 +35,13 @@ export function MegaNav({ onClose, onEnter, onLeave }: { onClose: () => void; on
       role="menu"
       onPointerEnter={(e) => e.pointerType === 'mouse' && onEnter()}
       onPointerLeave={(e) => e.pointerType === 'mouse' && onLeave()}
-      className="absolute start-0 top-full z-header mt-2 flex w-[min(960px,calc(100vw-2*var(--m-gutter)))] overflow-hidden rounded-xl border border-line bg-surface shadow-3 [animation:m-pop_180ms_var(--m-ease-spring)_both]"
+      onAnimationEnd={(e) => {
+        if (leaving && e.target === e.currentTarget) onGone?.()
+      }}
+      className={cn(
+        'absolute start-0 top-full z-header mt-2 flex w-[min(960px,calc(100vw-2*var(--m-gutter)))] overflow-hidden rounded-xl border border-line bg-surface shadow-3',
+        leaving ? 'pointer-events-none [animation:m-pop-out_140ms_var(--m-ease-in)_both]' : '[animation:m-pop_200ms_var(--m-ease-out)_both]',
+      )}
     >
       <ul className="w-[240px] shrink-0 border-e border-line-2 bg-canvas p-2">
         {categories.map((c) => {

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Outlet, useLocation } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import { MessageCircleQuestion } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAssistEnabled } from './enabled'
@@ -35,7 +35,8 @@ function useStackHidden(): boolean {
 }
 
 /**
- * The floating "Ask YQ" button, mounted once (see AssistHost). Renders nothing unless the catalog
+ * The floating "Ask YQ" button, mounted once in the Shell (ShellBody, beside the page slot, so a page
+ * change never remounts it). Renders nothing unless the catalog
  * says the assistant is on, and nothing on checkout, /ask and the tracking page. Phone: a round
  * 52px plum button at the bottom-end, riding above the bottom stack. md and up: a pill. The panel
  * is lazy, so the first download carries only this button.
@@ -111,18 +112,5 @@ export function AssistLauncher() {
       </button>
     </>,
     document.body,
-  )
-}
-
-/**
- * A pathless layout route wrapped around the shell's pages: it sits INSIDE the Shell (so product
- * cards in the chat can open the product panel) and renders the launcher beside the page.
- */
-export function AssistHost() {
-  return (
-    <>
-      <Outlet />
-      <AssistLauncher />
-    </>
   )
 }

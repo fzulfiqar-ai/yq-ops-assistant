@@ -137,9 +137,10 @@ function PhoneSlider({ slides, className }: { slides: Slide[]; className?: strin
               className={cn(
                 n > 1 ? 'slider-cell' : 'w-full md:w-[60%]',
                 'max-w-[560px]',
-                // the neighbour reads as depth; focus (or one flick) brings it back to full strength
-                n > 1 && 'transition-[opacity,filter] duration-3 ease-m focus-within:opacity-100 focus-within:saturate-100 motion-reduce:transition-none',
-                n > 1 && i !== c.index && 'opacity-70 saturate-[.85]',
+                // the neighbour reads as depth; focus (or one flick) brings it back to full strength.
+                // Opacity only: a saturate filter on a slide cell repainted it on every frame of a swipe.
+                n > 1 && 'transition-opacity duration-3 ease-m focus-within:opacity-100 motion-reduce:transition-none',
+                n > 1 && i !== c.index && 'opacity-70',
               )}
             >
               <SlideCard slide={s} size="phone" priority={i === 0} where="slider" />

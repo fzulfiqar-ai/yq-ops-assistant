@@ -147,10 +147,10 @@ interface GapFillers {
  * the state card and the filler list as two separate blocks without computing the rows twice.
  */
 function useGapFillers(max: number): GapFillers {
-  const { quote } = useOrder()
+  const { quote, gate } = useOrder()
   const { itemsByCode } = useMarket()
   const [expanded, setExpanded] = useState(false)
-  const minimum = quote?.minimum
+  const minimum = gate.minimum
   const remaining = Math.max(0, Number(minimum?.remaining_bhd) || 0)
   const met = !minimum || Boolean(minimum.met) || remaining <= 0
   const all: Filler[] = met ? [] : shareOut(quote?.gap_suggestions || [], itemsByCode, remaining, max)
@@ -162,20 +162,22 @@ function useGapFillers(max: number): GapFillers {
 }
 
 export function WholesaleState({ variant, onRequestSmall, actions = true, fillers: withFillers = true, announce = false, className }: WholesaleStateProps) {
-  const { quote, quoting } = useOrder()
+  const { quote, quoting, gate } = useOrder()
   const { viewport } = useShell()
   const { items: cartItems } = useCartCounts()
   const navigate = useNavigate()
   const headingId = useId()
   const gap = useGapFillers(variant === 'home' ? FIRST : MAX_FILLERS)
-  const minimum = quote?.minimum
-  if (!quote || !minimum) return null
+  // the server's minimum when the cart is priced; while the price check is out (or failed) the one
+  // the payload sets, against the shelf prices — the card no longer vanishes on a slow connection
+  const minimum = gate.minimum
+  if (!minimum) return null
 
   const need = Math.max(0, Number(minimum.value_bhd) || 0)
   const remaining = Math.max(0, Number(minimum.remaining_bhd) || 0)
   const met = Boolean(minimum.met) || remaining <= 0
   // what counts toward the minimum: the order after discounts, before delivery (price_cart's net_after)
-  const net = Math.max(0, (Number(quote.subtotal_bhd) || 0) - (Number(quote.discount_bhd) || 0))
+  const net = quote ? Math.max(0, (Number(quote.subtotal_bhd) || 0) - (Number(quote.discount_bhd) || 0)) : need - remaining
   const have = met ? Math.max(need, net) : Math.max(0, need - remaining)
   const canSmall = !met && minimum.mode !== 'block' && Boolean(onRequestSmall)
   // the last stretch reads differently from the first: "Almost there" + the amber kicker
