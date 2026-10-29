@@ -877,7 +877,7 @@ guard in `scripts/qa/smooth.py` that failed on the build before it.
 
 ## Release log
 
-- **The feel pass (29-Oct-2026, branch `market-feel`, not released yet)** — the motion table above, the
+- **The feel pass (29-Oct-2026, branch `market-feel`, released 30-Oct-2026 as `c559ac1`, web and API)** — the motion table above, the
   Browse menu fix (released on its own on 29-Oct-2026 as `dbe8899`), a fresh design review's nine gaps
   (Add never moves the page, a shelf's first frame draws sooner, one label style, an Orders page that
   explains, Arabic chips and the ⌘K badge that read right, stronger hover), the opening made smooth
@@ -886,6 +886,9 @@ guard in `scripts/qa/smooth.py` that failed on the build before it.
   (`cecb744`), the opening cheap on integrated graphics (`4930dd8`), the banner reel and the typed
   search (`dd07157`), calm but alive and a pause that holds the banner (`d4580d9`); the Lenis glide
   kept on measurement (native scrolling stalled 236-297 ms on his busy laptop, the glide 51-59 ms).
+  The release review (`4de3b07`): toasts and the opening keep moving under a layer (a toast froze
+  invisible over the panel's Add), no "0 lines" on load, the strip holds its row while the catalogue
+  arrives, the dim fades out, opaque bars.
 - **Polish, ship 1 (28-Oct-2026, branch `worktree-polish-market`, `6258a44` → `e15a774`, released on the
   owner's go)** — smoothness and honesty. The photo fade-in, Back that lands where you were, the page
   glide with page-shaped skeletons (`RouteOutlet`, `lib/lazyPage` with an idle warm-up of the main
