@@ -250,7 +250,8 @@ def _():
         assert r["add"] == [{"item_code": "CC1", "qty": 10}], r["add"]      # moq 10 wins over 4
     with Rig({"intent": "add", "query": "", "codes": ["LT1"], "qty": 20, "lang": "en"}, reply="x") as _rig:
         r = _ask(message="20 LT1")
-        assert r["add"] == [] and r["items"] == ["LT1"]                       # sold out: shown, not offered
+        assert r["add"] == [] and r["items"][0] == "LT1"                      # sold out: shown, not offered
+        assert r["alts"] == {} and r["items"] == ["LT1"]    # v2: a USB-C cable is no stand-in for a Lightning one
 
 
 @test("fallback: no model answers -> the page searches by itself; the daily cap does the same without a call")

@@ -285,6 +285,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         item_code: str | None = Field(default=None, max_length=64)
         order_tokens: list[str] = Field(default_factory=list, max_length=20)
         referral_code: str | None = Field(default=None, max_length=32)
+        # v2: a tile or chip (market_assist.ACTIONS), answered from data with no model call; `message` is its label
+        action: str | None = Field(default=None, max_length=16)
 
     class FeedbackRequest(BaseModel):
         kind: str = Field(max_length=16)
