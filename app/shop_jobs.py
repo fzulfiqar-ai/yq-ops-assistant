@@ -866,8 +866,8 @@ JOBS = (("notify_retry", notify_retry), ("unassigned_reminder", unassigned_remin
         ("unconfirmed_reminder", unconfirmed_reminder), ("cleanup", cleanup),
         ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless),
         ("badge_log", badge_log), ("market_safety_sweep", market_safety_sweep),
-        ("market_demand_rollup", market_demand_rollup),
-        ("assist_ticket_sla", assist_ticket_sla), ("assist_retention", assist_retention))
+        ("assist_ticket_sla", assist_ticket_sla), ("assist_retention", assist_retention),
+        ("market_demand_rollup", market_demand_rollup))         # the heavy weekly roll-up runs last in a tick
 
 
 def run_shop_jobs() -> dict:

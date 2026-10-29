@@ -932,7 +932,7 @@ def _():
     assert '@app.post("/public/market/ticket")' in src and '"/shop/me/tickets/{ticket_id}"' in src
     from app import shop_jobs
     names = [n for n, _ in shop_jobs.JOBS]
-    assert names[-2:] == ["assist_ticket_sla", "assist_retention"]
+    assert names[-3:] == ["assist_ticket_sla", "assist_retention", "market_demand_rollup"]   # the roll-up stays last
     from datetime import datetime, timezone
     saved = shop_jobs._now
     try:
