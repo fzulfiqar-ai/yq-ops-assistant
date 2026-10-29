@@ -257,6 +257,8 @@ export function StickyHeader() {
 
           <button
             type="button"
+            // K4: where an added photo lands below 1280 px (lib/flight: the mini-cart column is 1)
+            data-cart-target={2}
             onClick={() => (wide ? navigate('/cart') : pathname === '/cart' ? undefined : openCart())}
             className={cn(
               'relative ms-1 inline-flex h-11 shrink-0 items-center gap-2 overflow-hidden rounded-sm px-3.5 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',

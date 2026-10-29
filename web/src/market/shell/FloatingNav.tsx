@@ -90,7 +90,7 @@ export function FloatingNav() {
                   isActive ? 'text-plum-ink' : 'text-ink-2',
                 )}
               >
-                <span className={cn('relative transition-transform duration-2 ease-spring', isActive && 'scale-[1.08]')}>
+                <span data-cart-target={'cart' in rest ? 3 : undefined} className={cn('relative transition-transform duration-2 ease-spring', isActive && 'scale-[1.08]')}>
                   <Icon size={22} strokeWidth={isActive ? 2.1 : 1.75} aria-hidden="true" />
                   {showBadge && (
                     <span

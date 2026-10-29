@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import type { BadgeKind, ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
 import { track } from '../lib/events'
-import { launchFlight } from '../lib/flight'
+import { flyToCart, launchFlight } from '../lib/flight'
 import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, proofText, stepOf, unitAt, variantOf } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
@@ -342,6 +342,8 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   }, [from, item.item_code, openProduct])
 
   const flash = useCallback(() => {
+    // K4: the photo flies to the cart (lib/flight), from the direct Add and from the keypad alike
+    flyToCart(imgWrap.current?.querySelector('img'))
     setAdded(true)
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => setAdded(false), ADDED_MS)
@@ -385,13 +387,13 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     if (added) {
       return round ? (
         <div className="flex justify-end">
-          <div aria-live="polite" className="grid h-10 w-10 place-items-center rounded-full bg-plum text-white shadow-1">
+          <div aria-live="polite" className="grid h-10 w-10 place-items-center rounded-full bg-plum text-white shadow-1 [animation:m-pop_200ms_var(--m-ease-out)_both]">
             <Check size={18} aria-hidden="true" />
             <span className="sr-only">{S.card.added}</span>
           </div>
         </div>
       ) : (
-        <div aria-live="polite" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm bg-plum text-sm font-semibold text-white', tall)}>
+        <div aria-live="polite" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm bg-plum text-sm font-semibold text-white [animation:m-pop_200ms_var(--m-ease-out)_both]', tall)}>
           <Check size={16} aria-hidden="true" /> {S.card.added}
         </div>
       )

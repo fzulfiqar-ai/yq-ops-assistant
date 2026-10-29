@@ -941,6 +941,86 @@ def press_spring(page: Page) -> list[Finding]:
     return out or [("note", "press-spring", f"K5: a press gives to {pressed:.3f} and springs back past 1 (peak {peak:.4f})", vals)]
 
 
+# ── K4 add-to-restock flight (29-Oct-2026) ─────────────────────────────────────────────────────
+ADD_TRACK = r"""
+(ms) => {
+  window.__qaAdd = { max: 0, seen: 0, last: null, goneAt: null };
+  const t0 = performance.now();
+  const loop = () => {
+    const clones = [...document.querySelectorAll('body > [data-cart-flight]')];
+    const s = window.__qaAdd;
+    s.max = Math.max(s.max, clones.length);
+    if (clones.length) { s.seen += 1; const r = clones[0].getBoundingClientRect(); s.last = { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width }; s.goneAt = null; }
+    else if (s.seen && s.goneAt == null) s.goneAt = Math.round(performance.now() - t0);
+    if (performance.now() - t0 < ms) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+CART_TARGET = r"""
+() => {
+  const vis = [...document.querySelectorAll('[data-cart-target]')].filter((el) => {
+    const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight;
+  }).sort((a, b) => +a.dataset.cartTarget - +b.dataset.cartTarget);
+  const el = vis[0]; if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { kind: el.dataset.cartTarget, x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
+}
+"""
+
+
+def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Finding]:
+    """K4: "Add" sends one copy of the card's photo to where the cart lives (the mini-cart column on a
+    wide PC, the header's Restock button, the bottom bar's Restock tab on a phone); it lands there and
+    is gone within a second. The test line is taken out of the cart again afterwards."""
+    # a fresh device remembers no quantity, so its Add opens the keypad: remember 12 of the cards on
+    # the page (the yq-qty store, as an earlier order would) and reload, so Add adds at once
+    codes = page.evaluate(r"""() => [...document.querySelectorAll('main article[data-stock] img')]
+      .map((i) => (i.currentSrc || i.src).match(/thumbs\/([^/]+?)-product-/)).filter(Boolean).map((m) => decodeURIComponent(m[1])).slice(0, 60)""")
+    page.evaluate("(codes) => { const m = {}; for (const c of codes) m[c] = { last: 12, at: Date.now() }; try { localStorage.setItem('yq-qty', JSON.stringify(m)) } catch (e) {} }", codes)
+    page.reload(wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.wait_for_timeout(1200)
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    box = page.evaluate(r"""() => {
+      const b = [...document.querySelectorAll('main article[data-stock] button[aria-label]')].find((el) => {
+        const r = el.getBoundingClientRect(); const img = el.closest('article').querySelector('.m-photo-img');
+        return /^Add · /.test(el.getAttribute('aria-label') || '') && r.top > 90 && r.bottom < innerHeight - 90 && r.left >= 0 && r.right <= innerWidth && img && img.complete && img.naturalWidth > 0;
+      });
+      if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }""")
+    if not box:
+        return [("warn", "add-flight", "K4: no direct Add button (Add · N) with its photo on screen, not measured", None)]
+    target = page.evaluate(CART_TARGET)
+    page.evaluate(ADD_TRACK, 1300)
+    page.mouse.click(box["x"], box["y"])
+    page.wait_for_timeout(350)
+    # K8: on a wide PC the new line slides into the mini-cart column (the cart was empty: it is the only line)
+    slid = page.evaluate("() => { const li = document.querySelector('aside section li'); return li ? li.getAnimations().some((a) => a.animationName === 'm-rise') : null }")
+    page.wait_for_timeout(1050)
+    s = page.evaluate("() => window.__qaAdd")
+    page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
+    vals = {"target": target, "flight": s}
+    if not s["seen"]:
+        return [("fail", "add-flight", "K4: Add sent nothing to the cart (no flying photo)", vals)]
+    out: list[Finding] = []
+    if s["max"] > 1:
+        out.append(("fail", "add-flight", f"K4: one Add made {s['max']} flying photos", vals))
+    if s["goneAt"] is None or s["goneAt"] > 1100:
+        out.append(("fail", "add-flight", "K4: the flying photo was still there after a second", vals))
+    if target and s["last"] and (abs(s["last"]["x"] - target["x"]) > 48 or abs(s["last"]["y"] - target["y"]) > 48):
+        out.append(("fail", "add-flight", f"K4: the photo landed {round(s['last']['x'] - target['x'])}/{round(s['last']['y'] - target['y'])} px from the cart ({target['kind']})", vals))
+    vals["line_slid_in"] = slid
+    if target and target["kind"] == "1" and slid is False:
+        out.append(("fail", "add-flight", "K8: the new line appeared in the mini-cart without sliding in", vals))
+    return out or [("note", "add-flight", f"K4: Add flew one photo onto the cart (target {target and target['kind']}), gone after {s['goneAt']} ms", vals)]
+
+
 # ── F1 glide scrolling (29-Oct-2026) ───────────────────────────────────────────────────────────
 GLIDE_TRACK = r"""
 (ms) => {
