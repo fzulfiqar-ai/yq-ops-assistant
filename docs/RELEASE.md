@@ -587,6 +587,60 @@ python -m scripts.ops status                                                  # 
   reverse lines at the top of `scripts/market_assist_v2_migration.sql` with `apply_sql`, then `audit_grants`.
 - Then tell Claude.
 
+## Release assist2.1: YQ Assist 2.1, the salesman voice (built 29-Oct-2026)
+
+**What ships** (docs/MARKETPLACE.md § YQ Assist 2.1):
+- **It asks before guessing.** "Does it fit my phone?" gets "Which phone is it for?" with phone chips. A question
+  that names nothing never gets "not in our catalogue".
+- **One next step per answer, with up to four quick replies.** The extra suggestion is what shops buy with the item
+  (in stock), then a real deal in its category.
+- **A salesman's 2–3 sentences** in the shop's language for typed questions. Tiles and chips stay instant (no model).
+- **It speaks first when opened**: the product open, this phone's usual items, or what shops order most.
+- **A small line beside the button**, once per visit, after 15 s on a shop or product page (Settings → *Chat
+  reaches out (bubble)*, on by default).
+- **"How do I report damaged goods?" gets the steps.** What happens after a report stays the rep's.
+
+**No migration**; the API and the web change. **Order:** the API first, from the release branch, so the merge then
+deploys the web onto it (the first way at the top of this file). Either half also works alone: the new web on the
+assist2 API shows no quick replies and the plain welcome, and the assist2 web ignores the new fields.
+
+**Before step 1.**
+- CI is green for the release commit Claude names on the branch `worktree-assist-sales`, which Claude first makes a
+  fast-forward of `main`.
+- `python -m scripts.probe_models` shows Groq available.
+
+```
+python -m scripts.yq_backup release assist2-1                                 # 1. the encrypted backup
+python -m scripts.render_deploy status                                        # 2. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                  #    <sha> = the assist2.1 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                  # 3. "commit" = the first 12 characters of <sha>
+```
+
+**4. The web.** Claude pushes `main` (the same commit, a fast-forward), and the web deploys itself after CI. In the
+main folder, run `git pull --ff-only`, then `python -m scripts.ops status`, which must not say "merged but not live".
+
+**5. Check on your phone** at yqmarketplace.com:
+1. Stay on the home page about 15 s. "Want today's best sellers?" appears beside the chat button once. Tap it: the
+   best sellers, all in stock, with category chips.
+2. Open the chat again: it speaks first.
+3. Tap *Does it fit my phone?*. It asks which phone; tap *iPhone 14 or older*: Lightning items and a suggestion.
+4. Type "what is the process of damage stock": the reporting steps and your rep's WhatsApp (with tickets on, a
+   *Report a problem* chip).
+5. Type "what is selling most?": a sentence that ends on a question, the cards and the chips.
+6. The same in Arabic (عربي at the top).
+
+**Then:**
+- Settings → *Chat problem reports (tickets)* → on, so the damage answer can start a report in the chat.
+- YQ Assist → Insights → *Teach the assistant*: write the returns and damage answer once. The chat then gives it as
+  the "Official YQ answer".
+
+**If something is wrong.**
+- The bubble: Settings → *Chat reaches out (bubble)* → off (a minute).
+- The chat: *Marketplace chat (YQ Assist)* → off.
+- The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 2> --wait`. The web on `main` can
+  stay: it works with the assist2 API (no quick replies, no opening line).
+- Then tell Claude.
+
 ---
 
 ## Reference: what R6 added to the checks

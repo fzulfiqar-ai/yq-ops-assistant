@@ -1,4 +1,4 @@
-import type { AskAddLine, AskCard, AskHandoff, AskIntent, AskOrder, AskPlan, AskTicketCard, AskTicketRow, LineStatus, TicketReceipt } from './assistApi'
+import type { AskAddLine, AskCard, AskHandoff, AskIntent, AskNext, AskOrder, AskPlan, AskTicketCard, AskTicketRow, LineStatus, TicketReceipt } from './assistApi'
 
 /**
  * What the chat keeps for this tab (sessionStorage, key 'yq-assist'): the last 30 messages and the
@@ -64,6 +64,8 @@ export interface Msg {
   escalated?: boolean
   /** the cards arrived, the sentence is still being written */
   pending?: boolean
+  /** 2.1: the quick replies under this answer (shown under the newest answer only) */
+  next?: AskNext[]
 }
 
 export interface Saved {

@@ -760,12 +760,44 @@ scores six checks against their gates:
 It also prints p50/p95. Run it before every assist release and put the table in the release note. CI checks the
 case file only (`tests/test_assist_v2.py`).
 
+## YQ Assist 2.1: the salesman voice (built 29-Oct-2026, release assist2.1)
+
+The owner's phone test of assist2 (29-Oct-2026) hit two dead ends:
+- "Does it fit my phone?" (the welcome chip's own words) answered "not in our catalogue" and logged a demand signal for
+  nothing.
+- "What is the process of damage stock" went straight to the rep.
+
+His brief: proactive, talks like a person, asks questions, pushes the sale like a salesman. His decisions:
+- The bubble beside the button is on from release, with a Settings switch.
+- The one extra suggestion is what shops buy with the item first, then a real deal in its category.
+
+Release steps: docs/RELEASE.md § Release assist2.1.
+
+**The rule that keeps it safe.** Python picks every product, reason, next step and quick reply; the model only puts
+them into words. `_ANSWER` is now a salesman persona with one grounded example, and every v2 safety line is kept.
+
+| What | How (`app/market_assist.py` unless named) |
+|---|---|
+| Asks before guessing | An ask that names nothing to look up gets one question with quick replies (`_h_clarify`, intent `clarify`): "Which phone is it for?" (phone chips) or "What are you looking for today?" (category chips). It is never a miss and never a demand signal. A fit question about a product with no phone shows the card and asks the phone. A cable ask with no connector asks USB-C, Lightning or micro USB. |
+| Never the same question twice | The history's assistant lines carry their intent. Right after a `clarify`, the chat makes a best guess (what sells) instead of asking again. |
+| Reads the answer to its question | `understand` gains `phone` and a rule: an answer keeps the earlier intent and goes into the query. A phone named settles the connector (`with_phone_connector`): "does it fit iphone 11?" after a USB-C charger searches Lightning. An AUX audio cable goes after the charging lines unless audio was asked. |
+| One next step per answer | `next_step()` picks, in order: the phone when missing; the connector for a broad cable ask; what shops add with the first card (`pair_for`: in stock, not on screen, not offered earlier in the chat); a real deal in its category (`deal_for`); otherwise the quantity or the whole order. The model gets it as "Next step: …" and the page gets it as quick replies. |
+| Quick replies | `next: [{label, say} or {label, action, q}]`, at most 4, in English or Arabic. A `say` chip is sent as the merchant's own words. An action chip is answered from data: `top` (`q` = `cat:<CATEGORY>`), `show` (codes), `find` (catalogue words), `fit`, `plan`, `deals`, `usual`, `ticket`, `handoff`. Request field `q` is at most 60 characters. |
+| The salesman's sentence | Typed what sells, usual, find, fit, add and chat: the model writes 2–3 sentences from the facts (each card's `why`, how many shops order it, the next step, the chat so far) and ends on the next step. A plan and the offers keep their data lines, because on the live scorecard a model wording a plan invented a rule and one wording offers praised stock beyond its facts. Tiles and chips use data lines that end on a question, with no model. |
+| It speaks first | `action: hello` (no model, no budget, not a turn). It picks the product open and what shops add with it (or what is in stock instead when it is sold out), else this phone's usual items in stock, else what shops order most. The chips answer its question. |
+| The bubble | `web/src/market/assist/AssistLauncher.tsx`. It shows after 15 s on home, a category, a brand, search or a product page, once per visit, for 12 s. "Not now" rests it for 24 h. It never shows on cart, checkout, orders, `/o/` or `/ask`, or once the chat was opened. A tap opens the chat on the answer it offered: what sells, or the phone question for the product. Setting `shop_ai_nudge_enabled` (default 1, no migration) becomes payload `ai_nudge` and needs the chat switch too. |
+| The damage question | Returns or warranty with no approved text: how to report a problem. With tickets on it is in the chat, with a "Report a problem" chip; with tickets off, the order number and a photo go to the rep on WhatsApp. The rep confirms what happens next, and the chat never promises a refund, replacement, credit, warranty or time. Other topics go to the rep, with a call back when tickets are on. |
+| No model | `rule_action` also reads "does it fit my phone?" and answers with the phone question. |
+| Tests; the scorecard | `tests/test_assist_sales.py`; `tests/assist_cases.yaml` (`before`, `clarify`, `cards_like`) and `scripts/eval_assist.py` (gates `clarify` 100%, `next` ≥ 90%, `context` ≥ 90%; `asks` and fallbacks printed) |
+
 ## Not done yet (in order)
 
 - **YQ Assist, after v2** (each on the owner's go): voice sent at once when the transcript is clear; "Add to quality
   case" from a damage ticket (Market Intel cases); the same brain on WhatsApp (Cloud API keys); web push for
   back-in-stock and ticket updates; a salesman co-pilot ("what to push to this shop today"); Urdu, Hindi and
-  Malayalam template lines; seeding the scorecard from real chat turns.
+  Malayalam template lines; seeding the scorecard from real chat turns. After 2.1: the rep offered after two misses
+  or two thumbs-down in one chat; "Notify me" on a sold-out chat card; a shop's preferences remembered across visits
+  beyond "my usual".
 - **7 SKUs still have no photo.**
 - Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
   from Focus history (needs `focus_customer_id` links) · web push · a real `shop_clearance_pct`

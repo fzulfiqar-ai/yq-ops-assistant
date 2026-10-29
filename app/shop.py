@@ -187,6 +187,9 @@ SETTING_DEFAULTS: dict[str, str] = {
     # needs shop_market_ai_enabled as well
     "shop_ai_voice_enabled": "1",
     "shop_ai_photo_enabled": "1",
+    # YQ Assist 2.1 (29-Oct-2026, owner: "proactive", the bubble on from release): a small line beside the chat
+    # button once per visit ("Want today's best sellers?"); needs shop_market_ai_enabled as well
+    "shop_ai_nudge_enabled": "1",
     # YQ Assist v2 (29-Oct-2026, market_assist_v2_migration.sql). Tickets: a merchant reports a damaged,
     # wrong or missing item or asks for a call-back in the chat; off until the office switches them on.
     # Retention (Bahrain PDPL, owner 29-Oct): chat turns 180 days; tickets and their photos 730 days after
@@ -1434,6 +1437,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "ai_enabled": _flag(vals, "shop_market_ai_enabled"),
             "ai_voice": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_voice_enabled"),
             "ai_photo": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_photo_enabled"),
+            "ai_nudge": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_nudge_enabled"),
             "areas": [a.strip() for a in str(vals.get("shop_areas") or "").split(",") if a.strip()],
             # R7d: {area (lower-cased): the rep's first name} — the checkout's "Your area representative"
             "area_reps": area_rep_names(ctx),

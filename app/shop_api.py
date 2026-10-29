@@ -287,6 +287,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         referral_code: str | None = Field(default=None, max_length=32)
         # v2: a tile or chip (market_assist.ACTIONS), answered from data with no model call; `message` is its label
         action: str | None = Field(default=None, max_length=16)
+        # 2.1: what a chip narrows its action to (a category "cat:CABLE", catalogue words, a card's code)
+        q: str | None = Field(default=None, max_length=60)
         # v2: the ids of the turns on screen; the server reads the chat so far from its own log (`history` is
         # still accepted from older pages and ignored: a page could forge an "assistant" line)
         history_ids: list[int] = Field(default_factory=list, max_length=6)

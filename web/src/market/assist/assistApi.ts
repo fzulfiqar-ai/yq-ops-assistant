@@ -6,9 +6,21 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
 export type AskIntent = 'find' | 'fit' | 'add' | 'order_status' | 'usual' | 'handoff' | 'feedback' | 'chat' | 'list' | 'photo'
   | 'top' | 'deals' | 'plan' | 'ticket' | 'ticket_status' | 'policy' | 'account'
+  // 2.1: a question asked back, a suggested card, the opening line
+  | 'clarify' | 'show' | 'hello'
 
-/** v2: the chat's tiles, answered from data with no model call (app/market_assist.py ACTIONS) */
+/** v2: the chat's tiles, answered from data with no model call (app/market_assist.py ACTIONS); 2.1 adds the phone
+ * question, a card by its code, catalogue words and the opening line */
 export type AskAction = 'top' | 'deals' | 'plan' | 'usual' | 'orders' | 'handoff' | 'ticket' | 'tickets'
+  | 'fit' | 'show' | 'find' | 'hello'
+
+/** 2.1: a quick reply under an answer: `say` is sent as the merchant's words; `action` (+ `q`) is answered from data */
+export interface AskNext {
+  label: string
+  say?: string
+  action?: AskAction
+  q?: string
+}
 
 export interface AskHistory {
   role: 'user' | 'assistant'
@@ -26,6 +38,8 @@ export interface AskBody {
   referral_code: string | null
   /** v2: a tile tapped (the message is its label) */
   action?: AskAction
+  /** 2.1: what a chip narrows its action to (a category, catalogue words, a card's code) */
+  q?: string
   /** v2: the turn ids on screen; the server reads the chat so far from its own log */
   history_ids?: number[]
 }
@@ -121,6 +135,8 @@ export interface AskResponse {
   callback?: boolean
   /** the rep was brought in */
   escalated?: boolean
+  /** 2.1: the quick replies (absent on an older API) */
+  next?: AskNext[]
 }
 
 export type AskStage = 'reading' | 'checking' | 'writing'

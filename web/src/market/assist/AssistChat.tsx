@@ -39,7 +39,7 @@ import { useMarket } from '../MarketContext'
 import { useReducedMotion } from '../shell/useViewport'
 import { AnchorButton, Button, IconButton } from '../ui/Button'
 import { useToast } from '../ui/Toast'
-import type { AskAction, AskStage } from './assistApi'
+import type { AskAction, AskNext, AskResponse, AskStage } from './assistApi'
 import { enabledDevForced } from './enabled'
 import { whatsappWith } from './handoff'
 import { ListReview } from './ListReview'
@@ -57,6 +57,9 @@ import { useVoice } from './useVoice'
  * replies are clean text beside the orb, never a price in the words (the cards carry the catalogue's own); six
  * tiles answer from data with no model call; a visible stage while it thinks, never a bare spinner; the line
  * under the composer says it is an AI that can make mistakes, and the stock date it shows.
+ *
+ * 2.1: the chat speaks first (an opening line from this phone's history, with quick replies), and the newest
+ * answer carries up to four quick replies: tap instead of type.
  */
 
 const TILES: { key: keyof typeof A.tiles; action: AskAction; icon: LucideIcon }[] = [
@@ -238,10 +241,31 @@ function ReplyActions({ m, onVote }: { m: Msg; onVote: (m: Msg, v: 'up' | 'down'
   )
 }
 
+/** 2.1: the quick replies under the newest answer (or the opening line): tap instead of type. */
+function NextChips({ next, onPick }: { next: AskNext[]; onPick: (n: AskNext) => void }) {
+  if (!next.length) return null
+  return (
+    <div role="group" aria-label={A.suggested} className="assist-rise flex flex-wrap gap-2">
+      {next.map((n, i) => (
+        <button
+          key={`${n.label}-${i}`}
+          type="button"
+          onClick={() => onPick(n)}
+          className="inline-flex min-h-11 items-center rounded-full border border-plum/30 bg-plum-wash px-3.5 py-2 text-start text-sm font-semibold text-plum-ink transition-colors hover:border-plum/50 hover:bg-plum-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
+        >
+          {n.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /* ───────────────────────── one turn ───────────────────────── */
 
 function Turn({
   m,
+  next,
+  onNext,
   onRetry,
   onVote,
   onPatch,
@@ -250,6 +274,9 @@ function Turn({
   onCallback,
 }: {
   m: Msg
+  /** the quick replies to show (only the newest answer's, and not while a question is in flight) */
+  next?: AskNext[]
+  onNext: (n: AskNext) => void
   onRetry: (m: Msg) => void
   onVote: (m: Msg, v: 'up' | 'down') => void
   onPatch: (id: string, p: Partial<Msg>) => void
@@ -410,6 +437,8 @@ function Turn({
         {wantsHandoff ? <HandoffCard m={m} onCallback={onCallback} /> : null}
 
         {!m.pending && (m.turnId != null || m.text) ? <ReplyActions m={m} onVote={onVote} /> : null}
+
+        {next?.length && !m.pending ? <NextChips next={next} onPick={onNext} /> : null}
       </div>
     </div>
   )
@@ -488,13 +517,31 @@ function IdeaForm({ onSend, onBack }: { onSend: (kind: 'idea' | 'problem', text:
 
 /* ───────────────────────── the welcome: a greeting, six tiles, three chips ───────────────────────── */
 
-function Welcome({ onTile, onChip }: { onTile: (action: AskAction, label: string) => void; onChip: (key: 'paste' | 'fit' | 'idea') => void }) {
+function Welcome({
+  hello,
+  onTile,
+  onChip,
+  onNext,
+}: {
+  hello: AskResponse | null
+  onTile: (action: AskAction, label: string) => void
+  onChip: (key: 'paste' | 'fit' | 'idea') => void
+  onNext: (n: AskNext) => void
+}) {
   return (
     <div className="assist-rise flex flex-col gap-4">
       <div>
         <p className="font-display text-xl font-bold text-ink">{A.greeting(partOfDay())}</p>
-        <p className="mt-1 text-sm leading-relaxed text-ink-2">{A.welcome2}</p>
+        {/* 2.1: the chat speaks first; until its line arrives (or when it cannot), the plain welcome */}
+        {hello ? (
+          <p key="hello" className="assist-in mt-1 text-[15px] leading-relaxed text-ink">
+            {hello.reply}
+          </p>
+        ) : (
+          <p className="mt-1 text-sm leading-relaxed text-ink-2">{A.welcome2}</p>
+        )}
       </div>
+      {hello?.next?.length ? <NextChips next={hello.next} onPick={onNext} /> : null}
       <div className="grid grid-cols-2 gap-2">
         {TILES.map(({ key, action, icon: Icon }) => (
           <button
@@ -532,8 +579,19 @@ function Welcome({ onTile, onChip }: { onTile: (action: AskAction, label: string
 
 /* ───────────────────────── the conversation ───────────────────────── */
 
-export function AssistChat({ itemCode, first, onClose, titleId }: { itemCode: string | null; first?: { id: number; text: string } | null; onClose?: () => void; titleId?: string }) {
-  const { msgs, itemCode: subject, busy, stage, slow, send, sendAction, sendPhoto, retryPhoto, reset, patch, feedback, vote, submitTicket } = useAssistChat(itemCode)
+export function AssistChat({
+  itemCode,
+  first,
+  onClose,
+  titleId,
+}: {
+  itemCode: string | null
+  /** sent once as soon as the chat is open: words, or (2.1, the launcher's line) a tile's action */
+  first?: { id: number; text: string; action?: AskAction } | null
+  onClose?: () => void
+  titleId?: string
+}) {
+  const { msgs, itemCode: subject, busy, stage, slow, hello, send, sendAction, sendNext, sendPhoto, retryPhoto, reset, patch, feedback, vote, submitTicket } = useAssistChat(itemCode)
   const { itemsByCode, settings, stockAsOf } = useMarket()
   const navigate = useNavigate()
   const forced = enabledDevForced()
@@ -584,13 +642,14 @@ export function AssistChat({ itemCode, first, onClose, titleId }: { itemCode: st
       barsRef.current?.style.setProperty('--lv', v)
     },
   )
-  // opened from somewhere with a first message (a search that found nothing): send it once
+  // opened from somewhere with a first message (a search that found nothing, the launcher's line): send it once
   useEffect(() => {
     if (first && handled.current !== first.id) {
       handled.current = first.id
-      send(first.text)
+      if (first.action) sendAction(first.action, first.text)
+      else send(first.text)
     }
-  }, [first, send])
+  }, [first, send, sendAction])
 
   // a click anywhere else closes the photo menu
   useEffect(() => {
@@ -631,8 +690,12 @@ export function AssistChat({ itemCode, first, onClose, titleId }: { itemCode: st
     else if (key === 'paste') {
       setHint(true)
       taRef.current?.focus()
-    } else submit(A.chips.fit)
+    } else if (!busy) sendAction('fit', A.chips.fit)   // 2.1: the server asks "which phone?" back (no model)
   }
+
+  // 2.1: quick replies belong to the newest answer only, and wait while a question is in flight
+  const lastAnswer = busy ? undefined : [...msgs].reverse().find((m) => m.role === 'assistant')
+  const lastNext = lastAnswer && !lastAnswer.error ? lastAnswer.next : undefined
 
   const onCallback = async (m: Msg): Promise<string | null> => {
     const r = await submitTicket(m, { kind: 'callback', lines: [], client_ticket_id: newId() })
@@ -692,13 +755,15 @@ export function AssistChat({ itemCode, first, onClose, titleId }: { itemCode: st
             ) : null}
 
             {!msgs.length ? (
-              <Welcome onTile={sendAction} onChip={onChip} />
+              <Welcome hello={hello} onTile={sendAction} onChip={onChip} onNext={sendNext} />
             ) : (
               <div className="flex flex-col gap-5">
                 {msgs.map((m) => (
                   <Turn
                     key={m.id}
                     m={m}
+                    next={lastAnswer && m.id === lastAnswer.id ? lastNext : undefined}
+                    onNext={sendNext}
                     onRetry={(x) => (x.retryPhoto ? retryPhoto(x) : send(x.retryText || '', x.id))}
                     onVote={vote}
                     onPatch={patch}

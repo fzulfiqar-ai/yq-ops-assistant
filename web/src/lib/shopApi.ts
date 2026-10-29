@@ -163,6 +163,8 @@ export interface ShopSettings {
   ai_voice?: boolean
   /** YQ Assist: the camera button (photo of a product or an order list) is offered. */
   ai_photo?: boolean
+  /** YQ Assist 2.1: the small line beside the chat button, once per visit. */
+  ai_nudge?: boolean
   /** Marketplace v2.1: the promise bar, edited by the office. */
   promises?: MarketPromise[] | null
   min_order_bhd?: number | null

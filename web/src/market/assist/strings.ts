@@ -132,6 +132,8 @@ const en = {
   callBack: 'Ask for a call back',
   callBackDone: (ref: string, name: string | null) => `Call-back request ${ref} is with ${name || 'your representative'}.`,
   replyReady: 'Your answer is ready',
+  // 2.1
+  suggested: 'Suggested replies',
   myTickets: 'Your reports',
   ticketStatus: { new: 'Received', in_progress: 'Being handled', waiting_shop: 'Waiting for you', resolved: 'Resolved', rejected: 'Closed' } as Record<string, string>,
   ticketKind: { damaged: 'Damaged', wrong_item: 'Wrong item', missing: 'Missing pieces', not_working: 'Not working', delivery: 'Delivery problem', return: 'Return', other: 'Other problem', callback: 'Call back', account: 'Account' } as Record<string, string>,
@@ -288,6 +290,8 @@ const ar: typeof en = {
   callBack: 'اطلب أن يتصل بك',
   callBackDone: (ref: string, name: string | null) => `طلب الاتصال ${ref} لدى ${name || 'مندوبك'}.`,
   replyReady: 'إجابتك جاهزة',
+  // 2.1
+  suggested: 'ردود مقترحة',
   myTickets: 'بلاغاتك',
   ticketStatus: { new: 'مستلم', in_progress: 'قيد المعالجة', waiting_shop: 'بانتظارك', resolved: 'تم الحل', rejected: 'مغلق' } as Record<string, string>,
   ticketKind: { damaged: 'تالف', wrong_item: 'صنف خطأ', missing: 'قطع ناقصة', not_working: 'لا يعمل', delivery: 'مشكلة توصيل', return: 'إرجاع', other: 'مشكلة أخرى', callback: 'اتصال', account: 'حساب' } as Record<string, string>,
