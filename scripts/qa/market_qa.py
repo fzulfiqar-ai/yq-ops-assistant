@@ -1814,6 +1814,10 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("panel-still", lambda pg: smooth.panel_still(pg, STR["card.quickView"])))
             jobs.append(("no-blur", lambda pg: smooth.no_blur(pg, STR["card.quickView"])))
             jobs.append(("banner-reel", lambda pg: smooth.banner_reel(pg, pause_label=STR["slides.pause"])))
+            jobs.append(("layer-overlays", lambda pg: smooth.layer_overlays(pg, base, STR["card.quickView"])))
+            jobs.append(("strip-held", lambda pg: smooth.strip_held(pg, base)))
+            jobs.append(("count-on-load", lambda pg: smooth.count_on_load(pg, base)))
+            jobs.append(("dim-fades", lambda pg: smooth.dim_fades(pg, STR["card.quickView"])))
             jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
@@ -1823,7 +1827,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("page-glide", lambda pg: smooth.page_glide(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:
-        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm", "calm-alive", "opening-logo", "opening-motion", "discs-photos"), init=smooth.LOW_MEMORY if name == "lite" else "")
+        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm", "calm-alive", "layer-overlays", "strip-held", "count-on-load", "opening-logo", "opening-motion", "discs-photos"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
             record(job(pg))
         except PWError as exc:

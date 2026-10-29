@@ -61,6 +61,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     <ToastCtx.Provider value={toast}>
       {children}
       <div
+        data-toasts=""
         className="pointer-events-none fixed inset-x-3 z-toast flex flex-col items-center gap-2 md:inset-x-auto md:end-5 md:w-full md:max-w-sm md:items-end"
         style={{ bottom: 'calc(var(--m-bottom-stack) + var(--m-safe-b) + 12px)' }}
         aria-live="polite"

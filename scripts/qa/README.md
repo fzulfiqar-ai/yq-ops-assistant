@@ -181,11 +181,15 @@ desktop lead viewport in English, each written to fail on the build before it:
 | Check | Where | What passes |
 |---|---|---|
 | `panel-still` | home, desktop | opening a product (a real click) moves nothing on the page: the header, a neighbouring card and every fixed element hold still (≤ 1 px), the drawer never steps sideways, no layout shift, the dim is not blurred, the photo lands on the panel's photo (± 4 px), and once open nothing behind keeps animating. Run it headed too: a headless browser has no scrollbar to step by |
-| `no-blur` | home, desktop | nothing is drawn through a `backdrop-filter` at rest, under a product panel or under the palette (the chat panel aside), and no lasting `will-change` or `clip-path` animation |
+| `no-blur` | home, desktop | nothing is drawn through a `backdrop-filter` at rest, under a product panel or under the palette (the chat panel aside), and no lasting `will-change` or `clip-path` animation; the header bars are fully opaque |
 | `opening-motion` | home, desktop + phone | as above, and once risen the night frame stands still: nothing larger than half the screen is scaled or looped through the hold |
 | `banner-reel` | home + category, desktop | the banner's centre disc turns through ≥ 2 products within 5.6 s of the page settling, and no disc is ever left white (the old photo gone before the new one arrived); on Home, the slideshow's pause button holds the reel and the light |
 | `calm-alive` | home, desktop | under reduced motion the page is calm but alive: within 6.5 s the banner changes (a slide or a reel photo) and the search hint changes, a product panel fades in (≥ 120 ms from first sight to whole), and nothing moves (no transform animation runs, the panel never slides) |
-| `search-typing` | home, desktop, both languages | the header's search hint is typed: an example appears a character at a time (≥ 3 characters within 1.2 s, in steps of one or two), is erased and the next one typed; with the trigger focused it stands on a whole example |
+| `search-typing` | home, desktop, both languages | the header's search hint is typed: an example appears a character at a time (≥ 3 characters within 1.2 s, in steps of one or two), is erased and the next one typed, never showing a lone opening quote; with the trigger focused it stands on a whole example |
+| `layer-overlays` | home, desktop | with a layer open the page holds still, but not what lives above it: a toast fired under an open product panel shows (it froze invisible yet caught the clicks meant for the panel's Add), and the opening, the toasts and the chat's button keep their motion |
+| `strip-held` | home, desktop | with the catalogue 2 s late, the category strip and the deals link hold their place from the first paint: the page never drops when the categories arrive (it fell 45 px) |
+| `count-on-load` | home, desktop | the banner's number stays whole on a slide's first view: it counts up only as a slide comes on stage (on load it read 24, then 0, then counted back) |
+| `dim-fades` | home, desktop | closing a panel, the dim fades out with it over several frames (it cut out in one) |
 
 ## How it measures
 

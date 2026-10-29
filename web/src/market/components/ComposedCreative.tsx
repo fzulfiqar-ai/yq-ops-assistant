@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState, type CSSProperties, type RefObject } from 'react'
-import { useLayerOpen } from '@/lib/sheet'
+import { scrollLocked } from '@/lib/sheet'
 import { cn } from '@/lib/utils'
 import { onSlideActive, slideIdle, whenWatched, SLIDE_THUMB_SIZES, type SlideArt, type SlideCanvas, type SlideSize } from '../lib/slides'
 import { useShellViewport } from '../shell/ShellContext'
@@ -116,7 +116,6 @@ function reelStep(s: Reel, a: ReelAct): Reel {
 
 function useReel(root: RefObject<HTMLDivElement | null>, products: SlideArt[], reel: SlideArt[] | undefined) {
   const viewport = useShellViewport()
-  const layered = useLayerOpen()
   const codes = products.map((p) => p.item_code).join(' ')
   const pool = reel ? reel.map((p) => p.item_code).join(' ') : ''
   const on = codes !== '' && pool !== '' && isDesktopLike(viewport)
@@ -127,10 +126,8 @@ function useReel(root: RefObject<HTMLDivElement | null>, products: SlideArt[], r
     setSeen(codes)
     dispatch({ type: 'reset', products })
   }
-  const layeredRef = useRef(layered)
   const pools = useRef({ products, reel })
   useEffect(() => {
-    layeredRef.current = layered
     pools.current = { products, reel }
   })
 
@@ -141,9 +138,23 @@ function useReel(root: RefObject<HTMLDivElement | null>, products: SlideArt[], r
     const cycle = [...reel, ...products]
     let started = false
     const chain: number[] = []
-    // the slide in view and not held: not idle, not hovered or focused, not under a panel, not in a hidden
-    // tab, its slideshow turning (paused by the merchant, focused, off screen: it holds)
-    const live = () => !(document.hidden || layeredRef.current || 'lite' in document.documentElement.dataset || slideIdle(el) || el.closest('.slide-card')?.matches(':hover, :focus-visible') || el.closest('[data-carousel="held"], [data-carousel="paused"]'))
+    // on screen: a category banner has no slideshow to hold it once the grid scrolls it away
+    let inView = true
+    const io = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
+      inView = entries[entries.length - 1].isIntersecting
+    })
+    io?.observe(el)
+    const touched = (card: Element | null) => {
+      if (!card) return false
+      try {
+        return card.matches(':hover, :focus-visible')
+      } catch {
+        return card.matches(':hover, :focus') // an engine without :focus-visible
+      }
+    }
+    // the slide in view and not held: on screen, not idle, not hovered or focused, not under a panel, not in
+    // a hidden tab, its slideshow turning (paused by the merchant, focused, off screen: it holds)
+    const live = () => inView && !(document.hidden || scrollLocked() || 'lite' in document.documentElement.dataset || slideIdle(el) || touched(el.closest('.slide-card')) || el.closest('[data-carousel="held"], [data-carousel="paused"]'))
     const schedule = (k: number, delay: number) => {
       chain[k] = window.setTimeout(() => {
         if (live()) dispatch({ type: 'turn', k, cycle, at: performance.now() })
@@ -166,6 +177,7 @@ function useReel(root: RefObject<HTMLDivElement | null>, products: SlideArt[], r
     return () => {
       stopWatch()
       stopActive()
+      io?.disconnect()
       for (const t of chain) window.clearTimeout(t)
     }
   }, [on, codes, pool, root])

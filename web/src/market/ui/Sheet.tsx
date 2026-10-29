@@ -198,8 +198,10 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         onClick={close}
         // the entrance fills `backwards` only: with `both` its finished keyframe outranked the opacity
         // the drag writes, so the dim stayed full under a dragged sheet and cut out at the end
-        style={{ animation: closing ? `m-fade-in ${OUT_MS}ms ease-in reverse both` : 'm-fade-in 200ms ease-out backwards' }}
-        className="calm-fade absolute inset-0 h-full w-full cursor-default bg-ink/45"
+        // the exit is its own keyframes: the entrance's, reversed, kept its finished clock and cut to 0 at once
+        style={{ animation: closing ? `m-fade-out ${OUT_MS}ms ease-in both` : 'm-fade-in 200ms ease-out backwards' }}
+        // darker on a desktop, where no blur sets the layer apart any more (round 2: solid surfaces)
+        className="calm-fade absolute inset-0 h-full w-full cursor-default bg-ink/45 lg:bg-ink/55"
       />
       <div
         ref={attachPanel}

@@ -4,7 +4,7 @@ import { ArrowRight, Clock, ClipboardList, Megaphone, Package, RotateCcw } from 
 import { cn } from '@/lib/utils'
 import { track } from '../lib/events'
 import { useCountdown } from '../lib/format'
-import { endsSoon, firstSlideImage, whenWatched, type Slide, type SlideSize } from '../lib/slides'
+import { endsSoon, firstSlideImage, onSlideActive, whenWatched, type Slide, type SlideSize } from '../lib/slides'
 import { S } from '../strings'
 import { ComposedCreative } from './ComposedCreative'
 
@@ -115,10 +115,29 @@ function EndsChip({ endsAt, dark, className }: { endsAt: string; dark: boolean; 
   )
 }
 
-/** A live card's number, drawn by a CSS counter that counts up to it as its slide comes on stage; armed once the page can be watched, so it never counts under the opening. */
+/**
+ * A live card's number, drawn by a CSS counter that counts up to it as its slide comes on stage. Never on a
+ * slide's first view (release review, 29-Oct-2026: a number already on screen reset to 0 and counted back),
+ * never under the opening, and only where the browser animates a registered integer (elsewhere the number
+ * would flip to 0 and back).
+ */
 function Count({ n }: { n: string }) {
   const ref = useRef<HTMLSpanElement>(null)
-  useEffect(() => whenWatched(() => ref.current?.setAttribute('data-go', '')), [])
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof CSS === 'undefined' || !('registerProperty' in CSS)) return
+    let watched = false
+    const stopWatch = whenWatched(() => {
+      watched = true
+    })
+    const stopActive = onSlideActive(el, () => {
+      if (watched) el.setAttribute('data-go', '')
+    })
+    return () => {
+      stopWatch()
+      stopActive()
+    }
+  }, [])
   return (
     <span ref={ref} className="slide-count" style={{ '--n': n } as CSSProperties}>
       {n}
@@ -144,8 +163,10 @@ export function SlideCard({ slide, size, priority, className, where, live }: Sli
   const cover = slide.image?.fit === 'cover'
   const img = slide.image ? firstSlideImage(slide, size) : null
   const kicker = slide.kicker || slide.sponsored || null
-  const countTitle = Boolean(live) && /\d/.test(slide.title)
-  const countLine = Boolean(live) && !countTitle && Boolean(slide.line && /\d/.test(slide.line))
+  // only the data's own numbers count up: a campaign's words ("iPhone 17 cases", "65W") are the merchant's
+  const counts = Boolean(live) && slide.kind === 'data'
+  const countTitle = counts && /\d/.test(slide.title)
+  const countLine = counts && !countTitle && Boolean(slide.line && /\d/.test(slide.line))
 
   const imgTag = img && (
     <img

@@ -283,9 +283,9 @@
   }
   /* The desktop header and category strip are solid (29-Oct-2026, round 2): their frost was recomputed on
    * every scroll frame and under every open layer on a PC's integrated graphics, the same reason the
-   * phone's bars never blurred. 97 % of the surface, so the page does not show through. */
+   * phone's bars never blurred. Fully opaque (release review: at 97 % the card titles ghosted through). */
   .bar-solid {
-    background-color: hsl(var(--m-surface) / 0.97);
+    background-color: hsl(var(--m-surface));
   }
   .skeleton {
     position: relative;
@@ -1676,18 +1676,22 @@ html[data-lite] .m-photo::after {
     display: inline-block;
     font-variant-numeric: tabular-nums;
   }
+  /* the number itself stays in place, transparent (still the text a screen reader reads); the counter is
+   * drawn over it, its units digit where the number's is (right: digits run left to right in Arabic too),
+   * and hidden from assistive tech */
   html:not([data-lite]) .slide-count[data-go] {
     --count: var(--n);
     counter-reset: slide-count var(--count);
-    visibility: hidden;
-    animation: m-count 900ms var(--m-ease-out) 300ms both;
+    -webkit-text-fill-color: transparent;
+    animation: m-count 900ms var(--m-ease-out) both;
   }
   html:not([data-lite]) .slide-count[data-go]::after {
     content: counter(slide-count);
-    visibility: visible;
+    content: counter(slide-count) / '';
+    -webkit-text-fill-color: currentcolor;
     position: absolute;
     top: 0;
-    inset-inline-end: 0;
+    right: 0;
   }
   html:not([data-lite]) [data-slide-state='idle'] .slide-count[data-go] {
     animation: none;
@@ -1732,11 +1736,16 @@ html[data-lite] .m-photo::after {
 
 /* While a layer is open, the page behind it holds still (round 2, 29-Oct-2026: the slides, floats and
  * shimmers kept moving under the product panel's dim). lib/sheet.ts lockScroll sets html[data-layer];
- * layers are portalled outside #root, so they keep their own motion. */
-html[data-layer] #root *,
-html[data-layer] #root *::before,
-html[data-layer] #root *::after {
-  animation-play-state: paused !important;
+ * layers are portalled outside #root, so they keep their own motion. Desktop only, and never what lives
+ * in #root above the page (release review): the opening (a shared product link opening during it froze
+ * its words at 0), the toasts (one fired under a panel froze invisible at its first frame, yet caught
+ * the clicks meant for the panel's Add) and the chat's button and line. */
+@media (min-width: 1024px) {
+  html[data-layer] #root *:not([data-splash], [data-splash] *, [data-toasts] *, [data-assist-launcher], [data-assist-launcher] *, [data-assist-peek], [data-assist-peek] *),
+  html[data-layer] #root *:not([data-splash] *, [data-toasts] *, [data-assist-launcher] *, [data-assist-peek] *)::before,
+  html[data-layer] #root *:not([data-splash] *, [data-toasts] *, [data-assist-launcher] *, [data-assist-peek] *)::after {
+    animation-play-state: paused !important;
+  }
 }
 
 /* v3: hints */

@@ -1968,6 +1968,11 @@ def no_blur(page: Page, quick_view: str) -> list[Finding]:
     # section titles: off the compositor, a main-thread paint per scroll frame)
     found.update(page.evaluate(PAINT_SCAN))
     bad = {k: v for k, v in found.items() if v}
+    # review (29-Oct-2026): with the frost gone the bars are fully opaque, or the cards show through them
+    found["bars"] = page.evaluate("() => [...document.querySelectorAll('.bar-solid')].map((b) => getComputedStyle(b).backgroundColor)")
+    thin = [c for c in found["bars"] if c.startswith("rgba(") and not c.rstrip(")").endswith(", 1")]
+    if thin:
+        bad["see-through bars"] = thin
     if bad:
         return [("fail", "no-blur", "frosted or costly layers on a PC: " + "; ".join(f"{k}: {', '.join(v[:3])}" for k, v in bad.items()), found)]
     return [("note", "no-blur", "no backdrop blur at rest, under a product panel or under the palette; no lasting will-change or clip-path animation", found)]
@@ -2097,6 +2102,10 @@ def search_typing(page: Page, label: str, watch_ms: int = 5600) -> list[Finding]
         return [("warn", "search-typing", "no desktop search trigger, not measured", None)]
     gain, steps = _typed_run(r["seen"])
     vals: dict[str, Any] = {"texts": [s for _, s in r["seen"]][:14], "gain": gain, "steps": steps}
+    # review (29-Oct-2026): the quotes come with the first and the last character - never a lone quote
+    lone = sorted({s for _, s in r["seen"] if s.rstrip().endswith(("“", "«"))})
+    if lone:
+        return [("fail", "search-typing", f"the search hint showed a lone opening quote between examples: {lone[0]!r}", vals)]
     if gain < 3 or steps < 3:
         return [("fail", "search-typing", f"the search hint is not typed: its longest run gained {gain} characters in {steps} steps within 1.2 s (whole hints swapped)", vals)]
     f = page.evaluate(TYPED_PROBE, {"label": label, "ms": 300, "focus": True})
@@ -2191,3 +2200,125 @@ def calm_alive(page: Page, base: str, quick_view: str, label: str, watch_ms: int
         if slid > 1:
             out.append(("fail", "calm-alive", f"under reduced motion the product panel slides ({slid:.0f} px)", vals))
     return out or [("note", "calm-alive", "reduced motion: the banner and the search hint change, a panel fades in; nothing moves", vals)]
+
+
+# ── release review (29-Oct-2026, night): the gaps an independent re-rate and code review found ─────────
+def layer_overlays(page: Page, base: str, quick_view: str, code: str = "X01") -> list[Finding]:
+    """Review: what lives in #root above the page keeps moving while a layer is open. A toast fired under an
+    open product panel shows (it was frozen at opacity 0 by the page pause, yet caught clicks over the
+    panel's Add); and an opening that plays over a shared product link shows its words."""
+    out: list[Finding] = []
+    vals: dict[str, Any] = {}
+    # 1. a toast under the panel: Share without the Web Share API copies the link and says so
+    page.add_init_script("try { delete Navigator.prototype.share; Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.resolve() } }) } catch (e) {}")
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "layer-overlays", "no quick-view card, not measured", None)]
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(400)
+    btn.evaluate("(el) => el.click()")
+    page.wait_for_timeout(900)
+    share = page.locator('[data-sheet-panel] button:has-text("Share this product")').first
+    if share.count():
+        share.evaluate("(el) => el.click()")
+        page.wait_for_timeout(700)
+        t = page.evaluate("() => { const s = [...document.querySelectorAll('[role=status]')].find((x) => x.textContent.trim()); if (!s) return null; const cs = getComputedStyle(s); return { text: s.textContent.trim().slice(0, 40), opacity: +(+cs.opacity).toFixed(2), state: cs.animationPlayState }; }")
+        vals["toast"] = t
+        if t is None:
+            out.append(("warn", "layer-overlays", "Share under the panel raised no toast, not measured", vals))
+        elif t["opacity"] < 0.5:
+            out.append(("fail", "layer-overlays", f"a toast fired under an open panel is invisible (opacity {t['opacity']}, {t['state']}) and still catches clicks", vals))
+    else:
+        out.append(("warn", "layer-overlays", "no Share button in the panel, the toast was not measured", vals))
+    # 2. the opening plays over a shared product link (a rep's /p/CODE?ref= when the weekly opening is due):
+    #    with a layer open, what sits in the opening, the toasts and the chat's button keeps its motion
+    s = page.evaluate("""() => {
+      const root = document.getElementById('root'); if (!root) return null;
+      const box = document.createElement('div');
+      box.innerHTML = '<div data-splash="motion"><p style="animation: m-fade-in 10s linear infinite">o</p></div><div data-toasts=""><p style="animation: m-fade-in 10s linear infinite">t</p></div><div data-assist-peek=""><p style="animation: m-fade-in 10s linear infinite">c</p></div><p data-qa-page="" style="animation: m-fade-in 10s linear infinite">p</p>';
+      root.appendChild(box);
+      const had = 'layer' in document.documentElement.dataset;
+      document.documentElement.dataset.layer = '';
+      const st = (sel) => getComputedStyle(box.querySelector(sel)).animationPlayState;
+      const out = { opening: st('[data-splash] p'), toast: st('[data-toasts] p'), chat: st('[data-assist-peek] p'), page: st('[data-qa-page]') };
+      if (!had) delete document.documentElement.dataset.layer;
+      box.remove();
+      return out;
+    }""")
+    vals["paused"] = s
+    if s:
+        frozen = [k for k in ("opening", "toast", "chat") if s[k] == "paused"]
+        if frozen:
+            out.append(("fail", "layer-overlays", "with a layer open the page pause also freezes " + ", ".join(frozen) + " (an opening over a product link plays without its words)", vals))
+        if s["page"] != "paused":
+            out.append(("fail", "layer-overlays", "with a layer open the page behind no longer holds still", vals))
+    return out or [("note", "layer-overlays", "a toast under a panel shows, and the opening over a product link keeps its words", vals)]
+
+
+def strip_held(page: Page, base: str, delay_ms: int = 2000) -> list[Finding]:
+    """Review (desktop): with the catalogue late, the category strip holds its row from the first paint, so
+    the page never drops when the categories arrive (it fell 45 px about 1.5-3 s after load)."""
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/(api|public)/market(\?.*)?$"), slow)
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    r = page.evaluate("""() => new Promise((done) => {
+      const out = []; const t0 = performance.now();
+      const look = () => { const m = document.querySelector('main'); if (m) out.push(Math.round(m.getBoundingClientRect().top + scrollY)); if (performance.now() - t0 < 4500) requestAnimationFrame(look); else done(out); };
+      look();
+    })""")
+    page.unroute_all(behavior="ignoreErrors")
+    tops = sorted(set(r))
+    vals = {"tops": tops[:6], "frames": len(r)}
+    if len(tops) > 1 and tops[-1] - tops[0] > 1:
+        return [("fail", "strip-held", f"the page dropped {tops[-1] - tops[0]} px after load when the categories arrived", vals)]
+    return [("note", "strip-held", "the page held its place from the first paint while the catalogue arrived", vals)]
+
+
+def count_on_load(page: Page, base: str) -> list[Finding]:
+    """Review (desktop): a number already on screen never resets - the banner's count runs only as a slide
+    comes on stage, never on the first view (on load it read '24', then '0', then counted back)."""
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    r = page.evaluate("""() => new Promise((done) => {
+      const low = new Set(); const t0 = performance.now(); let first = null;
+      const look = () => {
+        const s = document.querySelector('.slider-stage [data-slide-state="active"]');
+        if (s && first === null) first = s;
+        const c = first && first.getAttribute('data-slide-state') === 'active' ? first.querySelector('.slide-count') : null;
+        if (c && c.hasAttribute('data-go')) { const v = parseInt(getComputedStyle(c).getPropertyValue('--count'), 10); const n = parseInt(c.textContent, 10); if (v < n) low.add(v + ' of ' + n); }
+        if (performance.now() - t0 < 4200) requestAnimationFrame(look); else done([...low]);
+      };
+      look();
+    })""")
+    if r:
+        return [("fail", "count-on-load", "the banner's number reset on its first view: " + ", ".join(r[:4]), {"seen": r[:8]})]
+    return [("note", "count-on-load", "the first slide's number stayed whole on its first view", None)]
+
+
+def dim_fades(page: Page, quick_view: str) -> list[Finding]:
+    """Review: closing a panel, the dim fades out with it (it cut to nothing in one frame, a flash)."""
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "dim-fades", "no quick-view card, not measured", None)]
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(400)
+    btn.evaluate("(el) => el.click()")
+    page.wait_for_timeout(900)
+    page.keyboard.press("Escape")
+    seen = page.evaluate("""() => new Promise((done) => {
+      const out = []; const t0 = performance.now();
+      const look = () => { const d = document.querySelector('[role=presentation] > button[tabindex="-1"]'); out.push(d ? +(+getComputedStyle(d).opacity).toFixed(2) : -1); if (performance.now() - t0 < 450) requestAnimationFrame(look); else done(out); };
+      look();
+    })""")
+    mid = [o for o in seen if 0.05 < o < 0.95]
+    vals = {"opacity": seen[:16]}
+    if len(mid) < 2:
+        return [("fail", "dim-fades", f"closing a panel, the dim cut out ({len(mid)} frames mid-fade)", vals)]
+    return [("note", "dim-fades", f"the dim fades out with the panel ({len(mid)} frames mid-fade)", vals)]
