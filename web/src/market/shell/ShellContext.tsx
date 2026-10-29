@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useReveal } from '../hooks/useReveal'
@@ -55,6 +55,18 @@ interface ShellValue {
 
 const Ctx = createContext<ShellValue | null>(null)
 
+/**
+ * What lists need from the shell, kept apart from it (29-Oct-2026, round 2): a product panel opening
+ * changes the shell's value, and every card that read `openProduct` from it, up to 60, re-rendered on
+ * each open before the panel could start. These two change only when they must: `openProduct` never,
+ * the viewport class on a resize across a breakpoint.
+ */
+interface ShellActions {
+  openProduct: (code: string, from?: string, viewTransition?: boolean) => void
+}
+const ActionsCtx = createContext<ShellActions | null>(null)
+const ViewportCtx = createContext<Viewport | null>(null)
+
 export function ShellProvider({ children }: { children: ReactNode }) {
   const viewport = useViewport()
   const navigate = useNavigate()
@@ -73,14 +85,20 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   const routeCode = location.pathname.startsWith('/p/') ? decodeURIComponent(location.pathname.slice(3).split('/')[0] || '') : null
   const panelCode = state?.panel || routeCode || null
 
+  // read when called, not when made, so the callback stays the same from one open to the next
+  const here = useRef(location)
+  useLayoutEffect(() => {
+    here.current = location
+  })
   const openProduct = useCallback(
     (code: string, from?: string, viewTransition?: boolean) => {
-      navigate(`${location.pathname}${location.search}`, {
-        state: { ...(location.state as object | null), panel: code, from: from || 'card' },
+      const at = here.current
+      navigate(`${at.pathname}${at.search}`, {
+        state: { ...(at.state as object | null), panel: code, from: from || 'card' },
         viewTransition: Boolean(viewTransition),
       })
     },
-    [navigate, location.pathname, location.search, location.state],
+    [navigate],
   )
   const closeProduct = useCallback(() => {
     if (state?.panel) {
@@ -130,7 +148,30 @@ export function ShellProvider({ children }: { children: ReactNode }) {
     }),
     [viewport, title, barHost, tailHost, hasPageBar, cartOpen, paletteOpen, paletteQuery, openProduct, panelCode, closeProduct, hideNav, searchBand],
   )
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
+  const actions = useMemo<ShellActions>(() => ({ openProduct }), [openProduct])
+  return (
+    <ViewportCtx.Provider value={viewport}>
+      <ActionsCtx.Provider value={actions}>
+        <Ctx.Provider value={value}>{children}</Ctx.Provider>
+      </ActionsCtx.Provider>
+    </ViewportCtx.Provider>
+  )
+}
+
+/** `openProduct` without the rest of the shell: a list's cards do not re-render when a panel opens. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function useShellActions(): ShellActions {
+  const v = useContext(ActionsCtx)
+  if (!v) throw new Error('useShellActions must be used inside ShellProvider')
+  return v
+}
+
+/** The viewport class without the rest of the shell (for the same reason as useShellActions). */
+// eslint-disable-next-line react-refresh/only-export-components
+export function useShellViewport(): Viewport {
+  const v = useContext(ViewportCtx)
+  if (!v) throw new Error('useShellViewport must be used inside ShellProvider')
+  return v
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

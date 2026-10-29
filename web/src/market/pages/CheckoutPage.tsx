@@ -14,7 +14,7 @@ import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { errorText } from '../lib/serverWords'
 import { useServerWords } from '../lib/useServerWords'
 import { clearSmallAck } from '../lib/smallOrder'
-import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
+import { PageBar, useHideNav, usePageTitle, useShellViewport } from '../shell/ShellContext'
 import { useReducedMotion } from '../shell/useViewport'
 import { cartStore, useCartCounts, useCartLines } from '../store/cart'
 import { ltrText } from '../i18n'
@@ -47,7 +47,7 @@ export default function CheckoutPage() {
   const totalText = quote ? bhd(quote.total_bhd) : `≈ ${bhd(estimate)}`
   const { rep, data, itemsByCode, recognized } = m
   const words = useServerWords()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const reduced = useReducedMotion()
   const lines = useCartLines()
   const { items, units } = useCartCounts()

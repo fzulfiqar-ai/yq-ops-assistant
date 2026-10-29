@@ -56,10 +56,12 @@ export default function ProductPanel({ code }: { code: string }) {
     rememberViewed(item.item_code)
     track('item', { item_code: item.item_code })
   }, [item])
-  // photo flight (lib/flight): the tapped card's photo lands here. A callback ref runs as the photo
-  // mounts, before the first paint, while the sheet still sits at the start of its slide.
+  // photo flight (lib/flight): the tapped card's photo lands here, before the first paint, while the
+  // sheet still sits at the start of its slide. Measured at the end of the commit (a microtask from the
+  // photo's ref): by then the sheet's layout effect has locked the scroll, so the landing box is where
+  // the photo rests once the scrollbar's gutter has gone (it landed ~10 px off on a PC: round 2)
   const heroRef = useCallback((el: HTMLDivElement | null) => {
-    if (el) landFlight(code, el)
+    if (el) queueMicrotask(() => landFlight(code, el))
   }, [code])
   /**
    * The sticky bar repeats the price only once the real one has scrolled away — otherwise the

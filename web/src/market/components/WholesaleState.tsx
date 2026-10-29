@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils'
 import { useMarket, useOrder } from '../MarketContext'
 import { track } from '../lib/events'
 import { bhd, minQtyOf, normalizeQty, productName, variantOf } from '../lib/format'
-import { useShell } from '../shell/ShellContext'
+import { useShellActions, useShellViewport } from '../shell/ShellContext'
 import { isPhoneLike } from '../shell/useViewport'
 import { useCartCounts, useCartQty } from '../store/cart'
 import { ltrText } from '../i18n'
@@ -163,7 +163,7 @@ function useGapFillers(max: number): GapFillers {
 
 export function WholesaleState({ variant, onRequestSmall, actions = true, fillers: withFillers = true, announce = false, className }: WholesaleStateProps) {
   const { quote, quoting, gate } = useOrder()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const { items: cartItems } = useCartCounts()
   const navigate = useNavigate()
   const headingId = useId()
@@ -485,7 +485,7 @@ const ADDED_MS = 700
 function FillerRow({ f, dense }: { f: Filler; dense?: boolean }) {
   const { g, item, qty, closes } = f
   const m = useMarket()
-  const { openProduct } = useShell()
+  const { openProduct } = useShellActions()
   const inCart = useCartQty(g.item_code) > 0
   const [flash, setFlash] = useState(false)
   const timer = useRef<number | undefined>(undefined)

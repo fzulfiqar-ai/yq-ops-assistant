@@ -6,7 +6,7 @@ import { useMarket } from '../MarketContext'
 import { track } from '../lib/events'
 import { flyToCart, launchFlight } from '../lib/flight'
 import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, proofText, stepOf, unitAt, variantOf } from '../lib/format'
-import { useShell } from '../shell/ShellContext'
+import { useShellActions } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
 import { ltrText } from '../i18n'
@@ -295,7 +295,7 @@ function TierLine({ qty, price }: { qty: number; price: string }) {
 
 export const MarketCard = memo(function MarketCard({ item, variant = 'grid', from, priority, presetQty, hideBadge, className }: MarketCardProps) {
   const m = useMarket()
-  const { openProduct } = useShell()
+  const { openProduct } = useShellActions()
   const toast = useToast()
   const qty = useCartQty(item.item_code)
   const saved = useIsSaved(item.item_code)

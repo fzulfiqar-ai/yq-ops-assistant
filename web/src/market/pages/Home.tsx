@@ -15,7 +15,7 @@ import { currentRef, forgetRef, isSlugShaped, rememberedOrders, rememberRef } fr
 import { categoryTiles, heroSplit, liveOffer, orderLines, splitReorder } from '../lib/home'
 import { buildSlides, heroDeck, SECTION_SLIDE_IDS, SOON_SLIDE_ID, useClaimSlides } from '../lib/slides'
 import { useUpcoming } from '../lib/upcoming'
-import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
+import { usePageTitle, useSearchBand, useShellViewport } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
 import { S } from '../strings'
@@ -91,7 +91,7 @@ export default function Home() {
   const navigate = useNavigate()
   const m = useMarket()
   const { myOrders } = useOrder()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const { data, status, items, itemsByCode, categories, rep, recognized, campaigns } = m
   const lines = useCartLines()
   // the cart this visit to Home opened with: an Add made here never drops a card in above the hand

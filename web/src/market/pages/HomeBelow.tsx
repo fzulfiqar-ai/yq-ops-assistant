@@ -13,6 +13,7 @@ import { EmptyState, Footer } from '../components/States'
 import { useReveal } from '../hooks/useReveal'
 import { useMarket } from '../MarketContext'
 import { applyQuickFilters, homeGridOrder, soldOutSplit, type QuickFilter } from '../lib/facets'
+import { recentlyViewed } from '../lib/device'
 import { fmtDate } from '../lib/format'
 import { dealSets, homeRails, pickedUpAgain, regularStock, type RegularLine } from '../lib/home'
 import { PageTail } from '../shell/ShellContext'
@@ -65,7 +66,10 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
 
   /* ── rails: each product in at most one ── */
   const offerRules = useMemo(() => data?.offers || null, [data])
-  const inCart = useMemo(() => new Set(lines.map((l) => l.item_code)), [lines])
+  // "Picked up again" is decided by the cart and the viewed list the visit opened with, as Continue
+  // your restock is (round 2): an Add from a product panel made the rail come or go, and Home re-flowed
+  // under the closing panel by a rail's height
+  const [atStart] = useState(() => ({ inCart: new Set(lines.map((l) => l.item_code)), viewed: recentlyViewed() }))
   const regulars = useMemo(() => regularStock(recent, itemsByCode, lastCodes), [recent, itemsByCode, lastCodes])
   const showRegulars = recognized && lastLines.length > 0 && regulars.length >= 3
   const regularCodes = useMemo(() => new Set<string>(showRegulars ? regulars.map((r) => r.item.item_code) : []), [showRegulars, regulars])
@@ -75,8 +79,8 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
   const viewed = useMemo(() => {
     if (!recognized) return []
     const taken = new Set<string>([...regularCodes, ...dealCodes, ...[...rails.essentials, ...rails.fresh, ...rails.moving].map((i) => i.item_code)])
-    return pickedUpAgain(items, inCart).filter((i) => !taken.has(i.item_code))
-  }, [recognized, regularCodes, dealCodes, rails, items, inCart])
+    return pickedUpAgain(items, atStart.inCart, atStart.viewed).filter((i) => !taken.has(i.item_code))
+  }, [recognized, regularCodes, dealCodes, rails, items, atStart])
 
   const railCodes = useMemo(() => {
     const s = new Set<string>([...lastCodes, ...regularCodes, ...dealCodes])

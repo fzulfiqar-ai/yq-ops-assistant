@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent, type PointerEvent, type RefObject } from 'react'
+import { useLayerOpen } from '@/lib/sheet'
 import type { Campaign, CampaignCanvas, ShopItem } from '@/lib/shopApi'
 import { locale, S } from '../strings'
 import { categorySlug, countdownLabel, hasBadge, niceCategory } from './format'
@@ -520,7 +521,9 @@ export function useCarousel({ count, dwell = SLIDE_DWELL, reduced, rootRef, onAd
   const hidden = useSyncExternalStore(subscribeVisibility, getHidden, getShown)
   const index = count ? Math.min(rawIndex, count - 1) : 0
   const autoplay = count > 1 && !reduced
-  const running = autoplay && !userPaused && !held && !hover && !focused && !hidden && onScreen
+  // a slide behind an open panel or sheet holds still with the rest of the page (round 2)
+  const layered = useLayerOpen()
+  const running = autoplay && !userPaused && !held && !hover && !focused && !hidden && onScreen && !layered
 
   const holdTimer = useRef(0)
   const hold = useCallback(() => {

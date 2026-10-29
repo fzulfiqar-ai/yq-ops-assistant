@@ -14,7 +14,7 @@ import { track } from '../lib/events'
 import { applyQuickFilters, facetsFor, isDeal, isEssential, isMoving, isOffer, isRealDrop, matchesFacets, parseFilters, readFacets, shelfOrder, soldOutSplit, sortItems, type QuickFilter, type SortMode } from '../lib/facets'
 import { hasBadge, isClearing } from '../lib/format'
 import { dealSets } from '../lib/home'
-import { useShell } from '../shell/ShellContext'
+import { useShellViewport } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useSaved } from '../store/saved'
 import { S } from '../strings'
@@ -81,7 +81,7 @@ const CHIPS: ChipDef[] = [
 
 export function GridPage({ title, line, items, category, breadcrumb, lead }: { title: string; /** one muted line under the title (destination shelves) */ line?: string | null; items: ShopItem[]; category?: string; breadcrumb?: { label: string; to: string }; /** content between the title and the chips (Browse: the category tiles) */ lead?: ReactNode }) {
   const [params, setParams] = useSearchParams()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const desktop = isDesktopLike(viewport)
   const { campaigns, data, status, reload } = useMarket()
   const savedCodes = useSaved()

@@ -1780,3 +1780,102 @@ def slides_alive(page: Page, settle_ms: int = 1500, window_ms: int = 900) -> lis
     if grew < 0.5:
         out.append(("fail", "slides-alive", f"the slide's art does not push in through its dwell (grew {grew:.2f} px in {window_ms} ms)", vals))
     return out or [("note", "slides-alive", f"the discs float ({moved:.1f} px) and the art pushes in ({grew:.1f} px) in {window_ms} ms", vals)]
+
+
+# ── round 2 (29-Oct-2026, the owner: "when I open a product the whole screen moves") ────────────────
+PANEL_ARM = r"""
+(clicked) => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight; };
+  const cards = [...document.querySelectorAll('main article[data-stock]')].filter(vis);
+  const ref = cards.find((a) => !a.contains(clicked)) || null;
+  const header = document.querySelector('header');
+  const fixed = [...document.querySelectorAll('#root *, body > *')].filter((el) => !el.matches('[role="presentation"], [role="presentation"] *') && getComputedStyle(el).position === 'fixed' && vis(el));
+  const st = { frames: 0, header: 0, card: 0, fixed: 0, fixedWho: '', step: 0, shift: 0, land: null, blur: null, behind: null };
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top]; };
+  const base = { header: header && box(header), card: ref && box(ref), fixed: fixed.map(box) };
+  try { new PerformanceObserver((l) => { for (const e of l.getEntries()) st.shift += e.value; }).observe({ type: 'layout-shift', buffered: false }); } catch (e) {}
+  let rightSeen = null;
+  const t0 = performance.now();
+  const step = () => {
+    st.frames++;
+    const d = (a, b) => (a && b ? Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1])) : 0);
+    if (header) st.header = Math.max(st.header, d(box(header), base.header));
+    if (ref) st.card = Math.max(st.card, d(box(ref), base.card));
+    fixed.forEach((el, i) => { const m = d(box(el), base.fixed[i]); if (m > st.fixed) { st.fixed = m; st.fixedWho = (el.getAttribute('aria-label') || el.className || el.tagName).toString().slice(0, 40); } });
+    const panel = document.querySelector('[data-sheet-panel]');
+    if (panel) {
+      const m = new DOMMatrixReadOnly(getComputedStyle(panel).transform === 'none' ? undefined : getComputedStyle(panel).transform);
+      const right = panel.getBoundingClientRect().right - m.m41;
+      if (rightSeen != null) st.step = Math.max(st.step, Math.abs(right - rightSeen));
+      rightSeen = right;
+      const dim = panel.parentElement && panel.parentElement.querySelector(':scope > button');
+      if (dim && st.blur == null) st.blur = getComputedStyle(dim).backdropFilter || getComputedStyle(dim).webkitBackdropFilter || 'none';
+      const clone = [...document.querySelectorAll('body > img[aria-hidden="true"]')].find((i) => getComputedStyle(i).position === 'fixed');
+      const hero = panel.querySelector('.m-photo-img');
+      if (clone && hero && parseFloat(getComputedStyle(clone).opacity) > 0.99) {
+        const c = clone.getBoundingClientRect(); const h = hero.getBoundingClientRect(); const cs = getComputedStyle(hero);
+        const hl = h.left + (parseFloat(cs.paddingLeft) || 0); const ht = h.top + (parseFloat(cs.paddingTop) || 0);
+        st.land = Math.round(Math.max(Math.abs(c.left - hl), Math.abs(c.top - ht)) * 10) / 10;
+      }
+    }
+    if (performance.now() - t0 < 1400) requestAnimationFrame(step);
+    else {
+      // once open: what still animates on the page behind (not the sheet, not a flight; a CSS animation
+      // whose computed play state is paused counts as paused - Chrome reports a just-paused one as
+      // running for a frame)
+      const root = document.getElementById('root');
+      st.behind = root ? root.getAnimations({ subtree: true }).filter((a) => a.playState === 'running' && a.timeline === document.timeline && !(typeof CSSTransition !== 'undefined' && a instanceof CSSTransition) && !(a.animationName && /paused/.test(getComputedStyle(a.effect.target, a.effect.pseudoElement || null).animationPlayState))).map((a) => a.animationName || a.transitionProperty || 'waapi').slice(0, 8) : [];
+      window.__ps = st;
+    }
+  };
+  requestAnimationFrame(step);
+}
+"""
+
+
+def panel_still(page: Page, quick_view: str) -> list[Finding]:
+    """Round 2, C (desktop): opening a product moves nothing on the page. Through the open the header, a
+    neighbouring card and every fixed element hold still (<= 1 px), the drawer never steps sideways
+    (its position less its own slide), no layout shift, the dim is not blurred, the photo lands on the
+    panel's photo (+- 4 px), and once open nothing on the page behind keeps animating. A real mouse
+    click; run headed too, since a headless browser has no scrollbar to step by."""
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "panel-still", "no quick-view card, not measured", None)]
+    # the first card, centred on screen (its row revealed, its photo decoded), as a merchant reaches it
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(900)
+    try:
+        page.wait_for_function("(el) => { const i = el.querySelector('img'); return i && i.complete && i.naturalWidth > 0 }", arg=btn.element_handle(), timeout=6000)
+    except PWError:
+        return [("warn", "panel-still", "the card's photo did not load, not measured", None)]
+    btn.hover()
+    page.wait_for_timeout(400)
+    btn.evaluate(PANEL_ARM)
+    btn.click()
+    try:
+        page.wait_for_function("() => window.__ps", timeout=6000)
+    except PWError:
+        return [("warn", "panel-still", "the panel did not open, not measured", None)]
+    r = page.evaluate("() => window.__ps")
+    x = page.locator('[role="dialog"] button[aria-label="Close"]')
+    if x.count():
+        x.first.evaluate("(el) => el.click()")
+        page.wait_for_timeout(400)
+    out: list[Finding] = []
+    moved = max(r["header"], r["card"])
+    if moved > 1:
+        out.append(("fail", "panel-still", f"the page behind moved while the product opened (header {r['header']:.1f} px, a card {r['card']:.1f} px)", r))
+    if r["fixed"] > 1:
+        out.append(("fail", "panel-still", f"a fixed element stepped {r['fixed']:.1f} px when the panel opened ({r['fixedWho']})", r))
+    if r["step"] > 1:
+        out.append(("fail", "panel-still", f"the drawer stepped sideways {r['step']:.1f} px during its slide (the scroll lock landed late)", r))
+    if r["shift"] > 0.001:
+        out.append(("fail", "panel-still", f"opening the product shifted the layout (score {r['shift']:.4f})", r))
+    if r["blur"] and r["blur"] != "none":
+        out.append(("fail", "panel-still", f"the dim behind the panel is blurred ({r['blur']}): a full-screen blur, every frame", r))
+    if r["land"] is not None and r["land"] > 4:
+        out.append(("fail", "panel-still", f"the photo landed {r['land']} px off the panel's photo", r))
+    if r["behind"]:
+        out.append(("fail", "panel-still", f"the page behind the open panel keeps animating: {', '.join(r['behind'][:4])}", r))
+    return out or [("note", "panel-still", f"the page held still, the photo landed {r['land']} px from its place, nothing animates behind", r)]

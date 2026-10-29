@@ -107,10 +107,22 @@ export function landFlight(code: string, hero: HTMLElement | null): void {
   const finish = () => {
     if (done) return
     done = true
-    // hand over: the photo's own fade brings it in while the clone fades out over it
-    target.style.transition = ''
-    target.style.opacity = ''
-    clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: 'linear' }).onfinish = () => clone.remove()
+    // hand over once the sheet's own photo can paint, at most 600 ms on: it is a larger file than the
+    // card's and may still be loading as the clone lands, so the clone holds its place instead of an
+    // empty tile (round 2). Then the photo's own fade brings it in while the clone fades out over it.
+    let handed = false
+    const handOver = () => {
+      if (handed) return
+      handed = true
+      target.style.transition = ''
+      target.style.opacity = ''
+      clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: 'linear' }).onfinish = () => clone.remove()
+    }
+    if (target.complete && target.naturalWidth) handOver()
+    else {
+      target.decode().then(handOver, handOver)
+      window.setTimeout(handOver, 600)
+    }
   }
   const flight = clone.animate([{ transform: 'translate3d(0, 0, 0) scale(1)' }, { transform: `translate3d(${dx}px, ${dy}px, 0) scale(${scale})` }], {
     duration: FLIGHT_MS,

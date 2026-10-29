@@ -10,7 +10,7 @@ import { track } from '../lib/events'
 import { bhd, fmtDateShort, isOut, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
 import { bestSellers, orderLines, regularStock } from '../lib/home'
 import { parseList, resolveQuick } from '../lib/quickParse'
-import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
+import { PageBar, usePageTitle, useShellViewport } from '../shell/ShellContext'
 import { MarketCard } from '../components/MarketCard'
 import { TellBackButton } from '../components/RestockAsk'
 import { Spotlight } from '../components/Spotlight'
@@ -90,7 +90,7 @@ function writeLists(lists: SavedList[]) {
 export default function QuickOrderPage() {
   const m = useMarket()
   const { index, ensureIndex } = useMarketSearch()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const navigate = useNavigate()
   const toast = useToast()
   const [params, setParams] = useSearchParams()

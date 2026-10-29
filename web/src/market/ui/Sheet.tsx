@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -108,12 +108,15 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
   // focus back to the opener, moved it to the panel again (the keypad's keyboard closed mid-number)
   // and re-stacked the layer, so a palette could land above the product opened from it (final
   // review, 28-Oct-2026). The key handler reads the latest close from here.
+  // A layout effect (29-Oct-2026, round 2): the scroll lock lands before the sheet's first paint. As a
+  // passive effect it ran a frame late, so the drawer stepped sideways by the scrollbar's width during
+  // its slide and the photo flight measured its landing before that step (10 px off on a PC).
   const closeRef = useRef(close)
   useEffect(() => {
     closeRef.current = close
   }, [close])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     restoreRef.current = document.activeElement as HTMLElement | null
     const unlock = lockScroll()
@@ -196,7 +199,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         // the entrance fills `backwards` only: with `both` its finished keyframe outranked the opacity
         // the drag writes, so the dim stayed full under a dragged sheet and cut out at the end
         style={{ animation: closing ? `m-fade-in ${OUT_MS}ms ease-in reverse both` : 'm-fade-in 200ms ease-out backwards' }}
-        className="absolute inset-0 h-full w-full cursor-default bg-ink/45 [@media(hover:hover)_and_(pointer:fine)]:backdrop-blur-[2px]"
+        className="absolute inset-0 h-full w-full cursor-default bg-ink/45"
       />
       <div
         ref={attachPanel}

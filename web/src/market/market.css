@@ -1548,6 +1548,15 @@ html[data-lite] .m-photo::after {
 }
 /* end v3: slider */
 
+/* While a layer is open, the page behind it holds still (round 2, 29-Oct-2026: the slides, floats and
+ * shimmers kept moving under the product panel's dim). lib/sheet.ts lockScroll sets html[data-layer];
+ * layers are portalled outside #root, so they keep their own motion. */
+html[data-layer] #root *,
+html[data-layer] #root *::before,
+html[data-layer] #root *::after {
+  animation-play-state: paused !important;
+}
+
 /* v3: hints */
 /* Rotating search hints (components/SearchField.tsx): the outgoing hint lifts out of the one-line
  * window and has faded before the next one rises in, so the pill never shows two sliced lines at
