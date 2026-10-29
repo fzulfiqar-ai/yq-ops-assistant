@@ -66,6 +66,10 @@ jobs:
       # tickets only on orders the device holds, the v2 migration's pins
       - name: YQ Assist v2 suite (no DB, no network)
         run: python -m tests.test_assist_v2
+      # YQ Assist 2.1 (29-Oct-2026): a vague ask gets one question (never "not in our catalogue"), never the same
+      # question twice, the next step is what shops buy with it (in stock), tiles and the opening line model-free
+      - name: YQ Assist 2.1 suite (no DB, no network)
+        run: python -m tests.test_assist_sales
       # R2 loader / costs / margin truth / receivables: pure tests here; the "local:" replay
       # tests print SKIP without the scratch Postgres
       - name: R2 loader suite (no DB)

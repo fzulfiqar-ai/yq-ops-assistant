@@ -199,11 +199,14 @@ def _():
         assert rig.sent == [], "a tile reached a model"
 
 
-@test("typed 'what is selling most?': one model call (understand), the template, never a sold-out card")
+@test("typed 'what is selling most?': understand + the salesman's sentence (2.1), the template when it says nothing")
 def _():
     with Rig(U("top", query="")) as rig:
         r = _ask(message="what is selling most these days?")
-        assert len(rig.sent) == 1 and r["reply"].startswith("These are selling best") and not SOLD_OUT & set(r["items"])
+        assert len(rig.sent) == 2 and r["reply"].startswith("Shops are ordering UK20") and not SOLD_OUT & set(r["items"])
+    with Rig(U("top", query=""), reply="UK20 is our best seller with shops. Which do you sell most?") as rig:
+        r = _ask(message="what is selling most these days?")
+        assert r["reply"] == "UK20 is our best seller with shops. Which do you sell most?" and r["next"]
     with Rig(U("top", query="hdmi projector")) as rig:     # nothing selling for that: falls back to a search
         r = _ask(message="best selling hdmi projector")
         assert r["intent"] == "find" and r["miss"]
@@ -218,7 +221,7 @@ def _():
         assert "in stock instead: LT2" in _model_text(rig)
     with Rig(U("find", query="lightning cable", codes=["LT1"]), answer_fails=True) as _rig:
         r = _ask(message="LT1")
-        assert r["reply"] == "LT1 is sold out. These are in stock instead."
+        assert r["reply"] == "LT1 is sold out right now, but these are in stock and close to it. Want one of them instead?"
     from app.market_assist import alternatives_for
     by = _shelf_cat()["by_code"]
     assert "CC1" not in alternatives_for(_shelf_cat(), by["LT1"])        # never a USB-C cable for a Lightning one
@@ -237,10 +240,10 @@ def _():
         assert ("PB10", "deal") in whys and ("HD1", "minimum") == whys[-1], whys
         assert not SOLD_OUT & {c for c, _ in whys} and r["plan"]["minimum"] and r["plan"]["usual"] == 1
         assert r["add"] == [{"item_code": ln["item_code"], "qty": ln["qty"]} for ln in r["lines"]]
-        assert r["reply"].startswith("Here is a plan in three steps") and rig.sent == []
+        assert r["reply"].startswith("I've put your order together") and rig.sent == []
     with Rig() as _rig:                                     # a new shop: the shelf's best sellers and deals
         r = _ask(message="Plan my order", action="plan")
-        assert r["reply"].startswith("Here is a starter plan") and {ln["why"] for ln in r["lines"]} <= {"selling", "deal"}
+        assert r["reply"].startswith("A starter order for you") and {ln["why"] for ln in r["lines"]} <= {"selling", "deal"}
     with Rig(U("plan", budget=10)) as _rig:                 # a budget trims from the end
         r = _ask(message="I have 10 BD, plan my order")
         assert sum(ln["qty"] * next(i["price_bhd"] for i in SHELF if i["item_code"] == ln["item_code"])
@@ -1102,15 +1105,23 @@ def _():
     from app import market_assist as ma
     cases = yaml.safe_load((ROOT / "tests" / "assist_cases.yaml").read_text(encoding="utf-8"))["cases"]
     assert len(cases) >= 60
-    keys = {"id", "message", "lang", "intent", "sold_out", "escalate", "official", "leak"}
+    # 2.1: `before` (earlier messages of the same chat), `clarify` (one question, never a miss), `cards_like` (a
+    # regular expression the first cards match)
+    keys = {"id", "message", "lang", "intent", "sold_out", "escalate", "official", "leak", "before", "clarify",
+            "cards_like"}
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids)), "a case id is used twice"
     for c in cases:
         assert set(c) <= keys, (c["id"], set(c) - keys)
         assert isinstance(c["message"], str) and c["message"].strip(), c["id"]
-        assert set(c) - {"id", "message", "lang"}, f"{c['id']} checks nothing"
+        assert set(c) - {"id", "message", "lang", "before"}, f"{c['id']} checks nothing"
         assert c.get("lang") in (None, "en", "ar"), c["id"]
-        assert all(i in ma.INTENTS for i in c.get("intent") or []), c["id"]
+        assert all(i in ma.INTENTS + ("clarify",) for i in c.get("intent") or []), c["id"]
+        assert all(isinstance(m, str) and m.strip() for m in c.get("before") or []), c["id"]
+        if c.get("cards_like"):
+            re.compile(c["cards_like"])
+        if c.get("clarify"):
+            assert c["intent"] == ["clarify"], c["id"]
         if c.get("sold_out"):
             assert set(c["intent"]) & {"top", "deals", "plan"}, f"{c['id']}: sold_out is checked on what the chat recommends"
         if "official" in c:
