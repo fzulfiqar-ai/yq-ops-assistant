@@ -888,6 +888,10 @@ def _():
                       ma.known_codes({"by_code": {"UK20-C": {}}})) == \
         "For the iPhone 15, we've got the UK20-C 20W charger with a Type-C cable. Want it?"
     assert ma._polish("You've been stocking cables, so try chargers. Want some?", known) == "Want some?"
+    # the final replay's flourishes: an audience nobody gave, a promise it will sell
+    assert ma._polish("Earphones are always a safe bet. The UK20 is still flying with shops. The C18 is flying with "
+                      "drivers. It'll move fast in your shop. Want them?", known) == \
+        "The UK20 is still selling well with shops. Want them?"
     with Rig(U("chat"), reply="We've got the XP-1000 stand. Anything you need today?") as _rig:
         assert _ask(message="ok thanks")["reply"] == "Anything you need today?"
     # guesses said as facts go; "shops like yours" becomes shops; a long reply keeps its answer and its question

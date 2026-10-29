@@ -1337,10 +1337,12 @@ _GUESSED = re.compile(r"(?i)\b(?:you mentioned|as you said|like you said|you tol
 _YOURS = re.compile(r"(?i)\b(?:shops|stores) like yours\b")          # it knows nothing about their shop
 # a stock level or a reason nobody gave (the lab: "only half the stock left", "shops love it for outdoor setups")
 _UNSAID = re.compile(r"(?i)\b(?:stock|pieces|units)\b[^.?!]*\b(?:left|half|last few|running out|limited|sirf|bacha|"
-                     r"shesh)\b|\b(?:shops|customers|people|drivers) (?:love|adore)\b|\bstill available\b")
+                     r"shesh)\b|\b(?:shops|customers|people|drivers) (?:love|adore)\b|\bstill available\b"
+                     r"|\b(?:a )?safe bet\b|\bcan'?t go wrong\b|\b(?:it'?ll|it will|they'?ll|they will) (?:move|sell) fast\b"
+                     r"|\bflying with drivers\b")
 # hype, said plainly
 _HYPE = ((re.compile(r"(?i)\bflying off (?:the )?shelves\b"), "selling well"),
-         (re.compile(r"(?i)\b(is|are) (?:really )?flying\b"), r"\1 selling well"),
+         (re.compile(r"(?i)\b(is|are)( also| still)? (?:really )?flying\b"), r"\1\2 selling well"),
          (re.compile(r"(?i)\b(?:a )?no-?brainer\b"), "an easy choice"),
          (re.compile(r"(?i)\bbig movers\b"), "good sellers"),
          (re.compile(r"(?i)\bsolid (pick|choice|seller|bestseller|best seller)\b"), r"good \1"),
