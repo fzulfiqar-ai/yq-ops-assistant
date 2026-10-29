@@ -1485,7 +1485,8 @@ def campaign_checks(run: Run, page: Page, title: str) -> None:
 
 QA_CAMPAIGN = {
     "id": 9901,
-    "title": "QA Last-chance week",
+    # not "Last-chance": that is banned copy since R7d, and the harness flagged its own campaign
+    "title": "QA Clearing week",
     "line": "Real lines we are clearing",
     "cta_label": "See lines",
     "cta_to": "/shop?f=clearance",
