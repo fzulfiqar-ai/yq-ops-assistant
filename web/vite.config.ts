@@ -52,12 +52,15 @@ const MARKET = {
 const BOOT_CSS = [
   "#yq-boot{position:fixed;inset:0;z-index:89;background-color:#140F24;background-image:linear-gradient(135deg,#2A1259,#140F24);animation:yq-boot-out 320ms linear 8s both}",
   "#yq-boot span{position:absolute;inset:0 0 40%;display:flex;align-items:flex-end;justify-content:center;padding-bottom:91px}",
-  "#yq-boot i{position:relative;display:block;overflow:hidden;width:84px;height:84px;border-radius:22px;box-shadow:0 0 0 1px rgba(255,255,255,.16),0 0 56px 12px rgba(165,88,251,.28),0 22px 48px -18px rgba(165,88,251,.85),0 8px 20px -8px rgba(8,4,20,.6)}",
+  "#yq-boot span>i{position:relative;display:block;overflow:hidden;width:84px;height:84px;border-radius:22px;box-shadow:0 0 0 1px rgba(255,255,255,.16),0 0 56px 12px rgba(165,88,251,.28),0 22px 48px -18px rgba(165,88,251,.85),0 8px 20px -8px rgba(8,4,20,.6)}",
   "#yq-boot img{display:block;width:100%;height:100%}",
   "@media(min-width:640px){#yq-boot span{padding-bottom:97px}}",
-  "@media(min-width:1024px){#yq-boot span{padding-bottom:112px}#yq-boot i{width:96px;height:96px}}",
-  "@media(max-height:520px){#yq-boot i{display:none}}",
+  "@media(min-width:1024px){#yq-boot span{padding-bottom:112px}#yq-boot span>i{width:96px;height:96px}}",
+  "@media(max-height:520px){#yq-boot span>i{display:none}}",
   "@keyframes yq-boot-out{to{opacity:0;visibility:hidden}}",
+  // The opening adopts this frame (components/Splash.tsx): it stays under the overlay as its night, dawn
+  // and veils, its tile hidden under the overlay's own, its safety fade stopped, and leaves with it.
+  "#yq-boot[data-adopted]{animation:none}#yq-boot[data-adopted] span{visibility:hidden}",
   // the light frame's parts (see LIGHT below) are hidden in the night frame
   "#yq-boot b{display:none}",
   // A load that will not play the opening (public/catalog-prefetch.js, lib/splashGate.ts) never
@@ -70,6 +73,7 @@ const BOOT_CSS = [
   // final review) — 30 s only covers an app that never boots.
   "html[data-boot=off] #yq-boot{background:#F9F7F3;pointer-events:none;animation-delay:30s}",
   "html[data-boot=off] #yq-boot span{display:none}",
+  "html[data-boot=off] #yq-boot .horizon,html[data-boot=off] #yq-boot .open-veils{display:none}",
   "html[data-boot=off] #yq-boot b{display:block;position:absolute}",
   // phone: the plum band with the logo, two lines and the search pill; then a promo card and four discs
   "#yq-boot .h{top:0;left:0;right:0;height:calc(env(safe-area-inset-top,0px) + 136px);background:linear-gradient(135deg,#6D4091,#824FAB);border-radius:0 0 24px 24px}",
@@ -113,8 +117,11 @@ const BOOT_LOGO = (() => {
     return '/yq-logo-160.webp'
   }
 })()
-// the night frame (span) and, hidden unless html[data-boot=off], the light frame (the b parts)
-const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span><b class="h"><i><img src="${BOOT_LOGO}" alt="" width="44" height="44" decoding="sync" /></i><u></u><q></q><s></s></b><b class="c"></b><b class="r"><em></em><em></em><em></em><em></em></b></div>`
+// the night frame (the opening's dawn and veils from market.css, then the tile in the span) and, hidden
+// unless html[data-boot=off], the light frame (the b parts). The dawn rises from the first paint: the
+// market stylesheet is render-blocking, its arcs are gradients (no file to wait for) and their rise
+// runs on the compositor while the app's code is still being parsed.
+const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><div class="horizon is-opening is-rising"><i></i><div class="open-glow"><i></i><i></i><i></i></div></div><div class="open-veils"></div><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span><b class="h"><i><img src="${BOOT_LOGO}" alt="" width="44" height="44" decoding="sync" /></i><u></u><q></q><s></s></b><b class="c"></b><b class="r"><em></em><em></em><em></em><em></em></b></div>`
 
 /**
  * The market build rewrites the shared index.html: its own entry (src/main.market.tsx — one

@@ -55,6 +55,8 @@ except ImportError:  # imported as scripts.qa.market_qa
 # changes instead of silently checking nothing.
 STR = {
     "search.band": "Search products or codes",
+    "searchLabel": "Search the marketplace",
+    "slides.pause": "Pause slideshow",
     "nav.home": "Home",
     "nav.browse": "Browse",
     "nav.restock": "Restock",
@@ -87,8 +89,10 @@ STR = {
     "upcoming.send": "Notify me",
     "card.quickView": "Quick view",
     "states.close": "Close",
+    "qty.apply": "Apply",
     "card.zoom": "Zoom photo",
     "states.back": "Back",
+    "orders.steps.title": "How an order moves",
 }
 
 # --lang ar: the same keys in Arabic, mirrored from web/src/market/i18n/ar.ts (verify_strings checks
@@ -96,6 +100,8 @@ STR = {
 # The WEKOME copy lives in en.ts `upcoming.ar` (one bilingual block).
 STR_AR = {
     "search.band": "ابحث عن منتج أو كود",
+    "searchLabel": "ابحث في السوق",
+    "slides.pause": "أوقف العرض",
     "nav.home": "الرئيسية",
     "nav.browse": "تصفّح",
     "nav.restock": "الطلبية",
@@ -126,8 +132,10 @@ STR_AR = {
     "upcoming.send": "أخبروني",
     "card.quickView": "عرض سريع",
     "states.close": "إغلاق",
+    "qty.apply": "تطبيق",
     "card.zoom": "كبّر الصورة",
     "states.back": "رجوع",
+    "orders.steps.title": "رحلة طلبك",
     # not UI copy keys: what the harness types or clicks in Arabic
     "slides.dotPrefix": "الشريحة ",
     "area.manama": "المنامة",
@@ -211,6 +219,7 @@ class State:
     classes: tuple[str, ...] = ALL_CLASSES
     reduced: bool = False
     lead_only: bool = False  # only the lead phone + lead desktop
+    assist: str | None = None  # YQ Assistant: 'launcher' (button only) | 'panel' (opened, one question asked) | 'list' (a pasted order list, reviewed) | 'hello' (opened: it speaks first, 2.1)
 
 
 def states(slug: str | None) -> list[State]:
@@ -256,7 +265,7 @@ def states(slug: str | None) -> list[State]:
             needles=(STR["checkout.place"],),
             ready="#yq-phone",
         ),
-        State("orders", "/orders", "My orders", ready="main"),
+        State("orders", "/orders", "My orders", ready="main", needles=(STR["orders.steps.title"],)),
         State("me", "/me", "My YQ", ready="main"),
         State("about", "/about", "About & help", ready="main"),
         State("about_trade", "/about#trade", "About · trade prices", ready="main"),
@@ -275,6 +284,10 @@ def states(slug: str | None) -> list[State]:
             lead_only=True,
         ),
         State("opening", "/", "The opening moment", kind="opening", lead_only=True),
+        State("assist_launcher", "/", "YQ Assistant · the Ask YQ button (settings.ai_enabled mocked on)", ready="main", assist="launcher"),
+        State("assist_panel", "/", "YQ Assistant · panel open, one question answered with cards", ready="main", assist="panel"),
+        State("assist_list", "/", "YQ Assistant · a pasted order list: matched / pick / missing review", ready="main", assist="list"),
+        State("assist_hello", "/", "YQ Assistant 2.1 · opened: it speaks first, an opening line with quick replies", ready="main", assist="hello"),
     ]
     if slug:
         out.insert(1, State("storefront", "/" + slug, "Rep storefront /" + slug, ready="main"))
@@ -729,6 +742,152 @@ def install_campaign(page: Page, campaign: dict) -> None:
 
     page.route("**/public/market*", on_catalog)
     page.route("**/api/market*", on_catalog)
+
+
+def install_assist(page: Page, variant: str = 'panel') -> None:
+    """YQ Assistant: the catalog says ai_enabled, and /ask answers from the catalog's own first in-stock codes.
+
+    Nothing reaches production: the ask and feedback POSTs are answered here. The catalog is fetched
+    for real (read-only) and one settings flag is flipped, the same way install_campaign adds a campaign."""
+    codes: list[str] = []
+
+    def on_catalog(route: Route) -> None:
+        req = route.request
+        path = req.url.split("?")[0]
+        if req.method != "GET" or not (path.endswith("/public/market") or path.endswith("/api/market")):
+            route.fallback()
+            return
+        try:
+            res = route.fetch()
+            if "application/json" not in (res.headers.get("content-type") or ""):
+                route.fulfill(response=res)
+                return
+            body = res.json()
+        except Exception as exc:  # noqa: BLE001
+            route.abort()
+            raise RuntimeError("catalog fetch failed: " + str(exc)) from exc
+        body.setdefault("settings", {}).update({"ai_enabled": True, "ai_voice": True, "ai_photo": True})
+        if not codes:
+            for it in body.get("items") or []:
+                if len(codes) < 6 and it.get("item_code") and (it.get("stock_status") or "in_stock") not in ("out", "sold_out"):
+                    codes.append(it["item_code"])
+        json_route(route, body)
+
+    def list_answer() -> dict:
+        c = codes + [None] * 6
+        lines = [
+            {"text": "20 " + str(c[0]), "qty": 20, "item_code": c[0], "alternatives": [], "status": "matched"},
+            {"text": "10 type c cables", "qty": 10, "item_code": c[1], "alternatives": [x for x in c[2:4] if x], "status": "pick"},
+            {"text": "3 hdmi cable", "qty": 3, "item_code": None, "alternatives": [x for x in c[4:5] if x], "status": "missing"},
+        ]
+        return {
+            "intent": "list",
+            "reply": "I matched 2 of 3 lines. Check each one and its quantity, then add them all.",
+            "items": [],
+            "add": [{"item_code": c[0], "qty": 20}, {"item_code": c[1], "qty": 10}] if c[0] and c[1] else [],
+            "lines": lines,
+            "orders": [],
+            "handoff": None,
+            "fallback": False,
+            "miss": False,
+            "turn_id": 2,
+        }
+
+    def on_voice(route: Route) -> None:
+        if route.request.method == "OPTIONS":
+            route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        json_route(route, {"text": "20 C18 and 10 type c cables", "busy": False})
+
+    def on_photo(route: Route) -> None:
+        if route.request.method == "OPTIONS":
+            route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        json_route(route, dict(list_answer(), intent="photo"))
+
+    def on_ask(route: Route) -> None:
+        if route.request.method == "OPTIONS":
+            route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        try:
+            asked = route.request.post_data_json or {}
+        except Exception:  # noqa: BLE001
+            asked = {}
+        ar = LANG == "ar"
+        if asked.get("action") == "hello":
+            # 2.1: the chat speaks first (from data on the server, never a turn), with quick replies
+            first = " و".join(codes[:2]) if ar else " and ".join(codes[:2])
+            json_route(route, {
+                "intent": "hello", "turn_id": None, "items": [], "add": [], "orders": [], "handoff": None,
+                "fallback": False, "miss": False,
+                "reply": (f"المحلات تطلب {first} أكثر من غيرها هذا الأسبوع، وهي متوفرة الآن. ما الذي تبيعه أكثر في محلك؟" if ar
+                          else f"Shops are ordering {first} the most this week, in stock now. What do you sell most?"),
+                "next": [{"label": "الكيابل" if ar else "Cables", "action": "top", "q": "cat:CABLE"},
+                         {"label": "الشواحن" if ar else "Chargers", "action": "top", "q": "cat:CHARGER"},
+                         {"label": "شواحن السيارة" if ar else "Car chargers", "action": "top", "q": "cat:CAR CHARGER"}],
+                "hook": "best",
+            })
+            return
+        if asked.get("action") == "nudge":
+            # 2.2: the bubble's line (from data on the server, never a turn): one line and the one thing a tap opens
+            json_route(route, {
+                "intent": "nudge", "turn_id": None, "items": [], "add": [], "orders": [], "handoff": None,
+                "fallback": False, "miss": False, "hook": "clearance",
+                "reply": ("نصفّي 24 صنفًا بسعر الجملة المعتاد. تريد نظرة؟" if ar
+                          else "We're clearing 24 lines at the normal trade price. Take a look?"),
+                "next": [{"label": "أصناف التصفية" if ar else "Clearing lines", "action": "deals", "q": "badge:clearance"}],
+            })
+            return
+        if variant == "list":
+            json_route(route, list_answer())
+            return
+        reply = (
+            "وجدت لك ثلاثة خيارات تناسب طلبك. أضفتها هنا لتختار منها."
+            if ar
+            else "I found three options that match what you asked for. Pick one, or add them all."
+        )
+        json_route(
+            route,
+            {
+                "intent": "find",
+                "reply": reply,
+                "items": codes[:3],
+                "add": [{"item_code": codes[0], "qty": 12}] if codes else [],
+                "orders": [],
+                "handoff": None,
+                "fallback": False,
+                "miss": False,
+                "turn_id": 1,
+                # 2.1: the quick replies under the newest answer
+                "next": ([{"label": (f"اعرض {codes[3]}" if ar else f"Show {codes[3]}"), "action": "show", "q": codes[3]}]
+                         if len(codes) > 3 else [])
+                + [{"label": "الأكثر مبيعًا" if ar else "What's selling", "action": "top"}],
+            },
+        )
+
+    page.route("**/public/market*", on_catalog)
+    page.route("**/api/market*", on_catalog)
+    page.route("**/public/market/ask", on_ask)
+    page.route("**/public/market/voice", on_voice)
+    page.route("**/public/market/photo", on_photo)
+
+
+def assist_open_and_ask(page: Page, variant: str = 'panel') -> None:
+    """Open the panel from the launcher and ask one question; wait for the cards."""
+    page.click("[data-assist-launcher]", timeout=8000)
+    page.wait_for_selector("[data-assist-panel] textarea", timeout=8000)
+    listing = variant == "list"
+    if listing:
+        text = "20 C18\n10 type c cables\n3 hdmi cable"
+    else:
+        text = "ابحث لي عن شاحن لآيفون" if LANG == "ar" else "Find a charger for my iPhone"
+    page.fill("[data-assist-panel] textarea", text)
+    page.keyboard.press("Enter")
+    try:
+        page.wait_for_selector("[data-assist-panel] " + ("section li" if listing else "article"), timeout=8000)
+    except PWError:
+        pass
+    page.wait_for_timeout(600)
 
 
 class Net:
@@ -1645,15 +1804,101 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("reveal", lambda pg: smooth.reveal_phone(pg)))
             jobs.append(("page-wait", lambda pg: smooth.page_wait(pg, "/shop")))
             jobs.append(("drag+jank", lambda pg: smooth.sheet_drag(pg, STR["card.quickView"], STR["states.close"]) + smooth.scroll_jank(pg)))
+            jobs.append(("no-glide", lambda pg: smooth.no_glide_on_touch(pg)))
+            jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
+            jobs.append(("slides-alive", lambda pg: smooth.slides_alive(pg)))
+            jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
+            jobs.append(("add-keypad", lambda pg: smooth.add_flight_keypad(pg, CART_KEY, STR["qty.apply"])))
         else:  # Ctrl K is a keyboard shortcut
             jobs.append(("palette", lambda pg: smooth.palette_focus(pg)))
             jobs.append(("palette-layers", lambda pg: smooth.palette_layers(pg, "cable", STR["card.quickView"])))
+            jobs.append(("glide", lambda pg: smooth.glide_scroll(pg)))
+            jobs.append(("glide-layers", lambda pg: smooth.glide_layers(pg)))
+            jobs.append(("card-hover", lambda pg: smooth.card_hover(pg) + smooth.press_spring(pg)))
+            jobs.append(("first-screen", lambda pg: smooth.first_screen(pg, base)))
+            jobs.append(("first-screen-slow", lambda pg: smooth.first_screen_slow(pg, base)))
+            jobs.append(("calm", lambda pg: smooth.calm(pg, base)))
+            jobs.append(("calm-alive", lambda pg: smooth.calm_alive(pg, base, STR["card.quickView"], STR["searchLabel"])))
+            jobs.append(("opening-logo", lambda pg: smooth.opening_logo(pg, base)))
+            jobs.append(("opening-motion", lambda pg: smooth.opening_motion(pg, base)))
+            jobs.append(("slides-alive", lambda pg: smooth.slides_alive(pg)))
+            jobs.append(("panel-still", lambda pg: smooth.panel_still(pg, STR["card.quickView"])))
+            jobs.append(("no-blur", lambda pg: smooth.no_blur(pg, STR["card.quickView"])))
+            jobs.append(("banner-reel", lambda pg: smooth.banner_reel(pg, pause_label=STR["slides.pause"])))
+            jobs.append(("layer-overlays", lambda pg: smooth.layer_overlays(pg, base, STR["card.quickView"])))
+            jobs.append(("strip-held", lambda pg: smooth.strip_held(pg, base)))
+            jobs.append(("count-on-load", lambda pg: smooth.count_on_load(pg, base)))
+            jobs.append(("dim-fades", lambda pg: smooth.dim_fades(pg, STR["card.quickView"])))
+            jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
+            jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
+            jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
+            jobs.append(("hover-pill", lambda pg: smooth.hover_pill(pg)))
+            jobs.append(("add-keypad", lambda pg: smooth.add_flight_keypad(pg, CART_KEY, STR["qty.apply"])))
+            jobs.append(("add-palette", lambda pg: smooth.add_flight_palette(pg, CART_KEY, "cable", STR["qty.apply"])))
+            jobs.append(("page-glide", lambda pg: smooth.page_glide(pg)))
+            jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:
-        pg = fresh(load=name not in ("lazy", "back-entry"), init=smooth.LOW_MEMORY if name == "lite" else "")
+        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm", "calm-alive", "layer-overlays", "strip-held", "count-on-load", "opening-logo", "opening-motion", "discs-photos"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
             record(job(pg))
         except PWError as exc:
             finding(run, "fail", "smooth-error", name + ": Playwright error: " + str(exc)[:240])
+        finally:
+            pg.close()
+
+
+def menu_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
+    """The desktop Browse menu (smooth.browse_menu, 29-Oct-2026): a mouse on 1366/1920, a tap on the
+    1024x768 touch row; on fresh pages, so the page it opens reaches nothing else. With a mouse, the
+    rest before it opens and the menu aim (K1) run first, on a page of their own."""
+    jobs = [smooth.browse_menu_touch] if vp.touch else [lambda pg: smooth.menu_intent(pg) + smooth.menu_aim(pg), smooth.browse_menu]
+    if LANG == "ar" and not vp.touch:
+        jobs.append(smooth.bidi_menu_chips)
+    for job in jobs:
+        pg = ctx.new_page()
+        install_mocks(pg, st.order_kind)
+        try:
+            pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
+            settle(pg, st)
+            for level, check, detail, values in job(pg):
+                if level == "note":
+                    run.notes.append(check + ": " + detail)
+                else:
+                    finding(run, level, check, detail, values)
+        except PWError as exc:
+            finding(run, "fail", "smooth-error", "browse-menu: Playwright error: " + str(exc)[:240])
+        finally:
+            pg.close()
+
+
+def polish_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
+    """The design review's polish (29-Oct-2026): one label style (no tracked caps in dark text), and in
+    Arabic a facet chip's count after its label and the search badge reading ⌘K; fresh pages, as
+    menu_run."""
+    jobs = [smooth.caps_labels]
+    if st.key == "category":
+        jobs.append(smooth.slides_alive)
+    if st.key == "category" and vp.klass == "desktop" and not vp.touch:
+        jobs.append(smooth.banner_reel)
+    if LANG == "ar" and st.key == "category":
+        jobs.append(smooth.bidi_chips)
+    if LANG == "ar" and st.key == "home" and vp.width >= 1280:
+        jobs.append(smooth.kbd_badge)
+    if st.key == "home" and vp.klass == "desktop" and not vp.touch:
+        jobs.append(lambda pg: smooth.search_typing(pg, STR["searchLabel"]))
+    for job in jobs:
+        pg = ctx.new_page()
+        install_mocks(pg, st.order_kind)
+        try:
+            pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
+            settle(pg, st)
+            for level, check, detail, values in job(pg):
+                if level == "note":
+                    run.notes.append(check + ": " + detail)
+                else:
+                    finding(run, level, check, detail, values)
+        except PWError as exc:
+            finding(run, "fail", "smooth-error", "polish: Playwright error: " + str(exc)[:240])
         finally:
             pg.close()
 
@@ -1667,9 +1912,25 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
     install_mocks(page, st.order_kind)
     if st.kind == "campaign":
         install_campaign(page, QA_CAMPAIGN)
+    if st.assist:
+        install_assist(page, 'list' if st.assist == 'list' else 'panel')
     try:
         page.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
         settle(page, st)
+        if st.assist == "launcher":
+            try:
+                page.wait_for_selector("[data-assist-launcher]", timeout=8000)
+            except PWError:
+                finding(run, "fail", "assist-launcher-missing", "settings.ai_enabled is mocked true but the Ask YQ button did not render")
+        if st.assist in ("panel", "list"):
+            assist_open_and_ask(page, st.assist)
+        if st.assist == "hello":
+            page.click("[data-assist-launcher]", timeout=8000)
+            try:
+                page.wait_for_selector("[data-assist-panel] [role=group] button", timeout=8000)
+            except PWError:
+                finding(run, "fail", "assist-hello-missing", "the chat opened without its opening line's quick replies")
+            page.wait_for_timeout(600)
 
         p = probe_scan(page, vp, st.needles)
         common_checks(run, page, vp, st, net, p)
@@ -1731,6 +1992,12 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
         # smoothness (S1–S6): lead viewports, English, motion on — each on its own fresh page
         if lead and LANG == "en" and not (st.reduced or REDUCE_ALL) and st.key in ("home", "shop"):
             smooth_run(run, ctx, vp, st, base)
+        # the Browse menu: every desktop width, both languages, motion on
+        if vp.klass == "desktop" and st.key == "home" and not (st.reduced or REDUCE_ALL):
+            menu_run(run, ctx, vp, st, base)
+        # the design review's polish: lead viewports, both languages, motion on
+        if lead and not (st.reduced or REDUCE_ALL) and st.key in ("home", "category"):
+            polish_run(run, ctx, vp, st, base)
 
         # last of all, on a FRESH page of the same context (same init script, same no-prod-writes
         # net): the sold-out order check presses "Show more" until the whole listing is rendered
@@ -1772,16 +2039,24 @@ def run_opening(browser, vp: Viewport, base: str, out: Path, report: Report) -> 
             t0 = time.time()
             page.goto(base + "/", wait_until="commit", timeout=40000)
             seen = []
-            for ms in (150, 400, 700, 1300):
-                left = ms / 1000 - (time.time() - t0)
-                if left > 0:
-                    page.wait_for_timeout(int(left * 1000))
+            # Sampled from the moment it appears, not at fixed times from the navigation: on a busy
+            # machine the opening mounts 1.4 s in (the app's code first), and a reduced one is up for
+            # under a second, so fixed samples up to 1.3 s missed it (round 2, 29-Oct-2026)
+            try:
+                page.wait_for_selector("[data-splash]", state="attached", timeout=8000)
+                seen.append({"ms": round((time.time() - t0) * 1000), "splash": "appeared"})
+            except PWError:
+                pass
+            for after in (0, 300, 600):
+                if after:
+                    page.wait_for_timeout(300)
                 state = page.evaluate("() => { const s = document.querySelector('[data-splash]'); return s ? s.getAttribute('data-splash') : null; }")
-                seen.append({"ms": ms, "splash": state})
-                if ms in (150, 700, 1300):
-                    shot(run, page, out, str(ms) + "ms")
+                seen.append({"ms": round((time.time() - t0) * 1000), "splash": state})
+                if after in (0, 600):
+                    shot(run, page, out, ("appeared" if not after else f"appeared+{after}ms"))
+            seen = [x for x in seen if x["splash"] != "appeared"] + [x for x in seen if x["splash"] == "appeared"]
             run.notes.append("splash samples: " + json.dumps(seen))
-            values = [s["splash"] for s in seen]
+            values = [s["splash"] for s in seen if s["splash"] != "appeared"]
             if not any(values):
                 finding(run, "fail", "opening-plays", "the opening never appeared on a fresh session", seen)
             if mode == "reduced":

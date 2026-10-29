@@ -60,6 +60,21 @@ For free-form SQL exploration. **Use a read-only key/role.**
 - This bypasses the curated views — handy for ad-hoc analysis, but the YQ Ops server is safer for
   day-to-day (it's redacted + view-scoped).
 
+## 3. Chrome DevTools MCP (Claude Code, a QA tool on the owner's PC)
+Added 29-Oct-2026 on the owner's choice, into the project's `.mcp.json` (the reviewed list of the
+only MCP servers this project may use). It lets Claude drive a real Chrome on this PC to measure the
+marketplace: performance traces (saved raw, read by our own Python), CPU and network slow-down,
+reduced-motion emulation, screenshots and MP4 screencasts, and Lighthouse.
+
+- Google's official server, `ChromeDevTools/chrome-devtools-mcp` (Apache-2.0), **pinned to 1.12.0**:
+  a newer version is a reviewed change to `.mcp.json`, never an automatic update.
+- `--isolated`: a throwaway Chrome profile, deleted on close, so the owner's own logins stay out.
+- `--no-usage-statistics` and `--no-performance-crux`: by default it sends usage statistics, and page
+  URLs to Google's real-user speed database; both are off.
+- `cmd /c npx`: the Windows wrapper its troubleshooting page asks for. Needs Node 20.19+ and Chrome.
+- Claude Code asks once to approve a project server, and loads it at the next session start.
+- A build and QA tool only: nothing in the deployed product uses it.
+
 ## Why this is the "more powerful brain" — for free
 `docs/CLAUDE.md` allows the Claude CLI/Desktop **as a build/owner tool** (never embedded in prod).
 So the owner gets a top-tier model over the live business data via MCP, while the shipped product

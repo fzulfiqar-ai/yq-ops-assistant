@@ -189,6 +189,22 @@ EXPECTED_GATES = {
     # X1 (release 2b): the team message names the salesmen with their figures; the role check (admin and management,
     # app.command_api._require_command) sits in the route, like the Command Centre's own routes
     ("GET", "/command/team-message"): ["user"],
+    # YQ Assist (28-Oct-2026): what merchants asked the chat and suggested; the public /ask and
+    # /feedback routes are rate-limited and switched off by shop_market_ai_enabled
+    ("GET", "/shop/assist/turns"): ["feature:Shop Admin"],
+    ("GET", "/shop/feedback"): ["feature:Shop Admin"],
+    ("PATCH", "/shop/feedback/{feedback_id}"): ["feature:Shop Admin"],
+    # YQ Assist v2 tickets (29-Oct-2026): the office's queue; a rep's own tickets on his Today screen
+    ("GET", "/shop/tickets"): ["feature:Shop Admin"],
+    ("GET", "/shop/tickets/{ticket_id}"): ["feature:Shop Admin"],
+    ("PATCH", "/shop/tickets/{ticket_id}"): ["feature:Shop Admin"],
+    ("PATCH", "/shop/me/tickets/{ticket_id}"): ["feature:Shop Orders"],
+    ("GET", "/shop/assist/overview"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/sessions"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/sessions/{session_id}"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/insights"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/policies"): ["feature:Shop Admin"],
+    ("PUT", "/shop/assist/policies"): ["feature:Shop Admin"],
 }
 
 
@@ -940,6 +956,25 @@ def _():
     # the localhost dev origins stay, production origins come from ALLOWED_ORIGINS untouched
     from app.config import settings
     assert set(settings.allowed_origins) <= set(k["allow_origins"]) and "http://localhost:5173" in k["allow_origins"]
+
+
+@test("cors: every custom header the web sends passes the browser's preflight (live bug 29-Oct: the chat's microphone)")
+def _():
+    import re as _re
+    from fastapi.testclient import TestClient
+    import app.main as m
+    web = ROOT / "web" / "src"
+    sent = set()
+    for f in list(web.rglob("*.ts")) + list(web.rglob("*.tsx")):
+        for h in _re.findall(r"""['"](x-[a-z0-9-]+)['"]\s*:""", f.read_text(encoding="utf-8", errors="replace"), _re.I):
+            sent.add(h.lower())
+    assert "x-device-id" in sent, sent                      # the microphone upload (assistApi.ts postVoice)
+    c = TestClient(m.app)
+    for h in sorted(sent):
+        r = c.options("/public/market/voice", headers={"Origin": "http://localhost:5173",
+                                                       "Access-Control-Request-Method": "POST",
+                                                       "Access-Control-Request-Headers": f"content-type,{h}"})
+        assert r.status_code == 200, f"preflight refused for {h}: {r.status_code} {r.text[:80]}"
 
 
 @test("auth: POST /auth/password — must_reset-exempt, clears the flag; the current password is required otherwise")

@@ -10,7 +10,7 @@ import { track } from '../lib/events'
 import { bhd, fmtDateShort, isOut, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
 import { bestSellers, orderLines, regularStock } from '../lib/home'
 import { parseList, resolveQuick } from '../lib/quickParse'
-import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
+import { PageBar, usePageTitle, useShellViewport } from '../shell/ShellContext'
 import { MarketCard } from '../components/MarketCard'
 import { TellBackButton } from '../components/RestockAsk'
 import { Spotlight } from '../components/Spotlight'
@@ -90,7 +90,7 @@ function writeLists(lists: SavedList[]) {
 export default function QuickOrderPage() {
   const m = useMarket()
   const { index, ensureIndex } = useMarketSearch()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const navigate = useNavigate()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
@@ -392,7 +392,7 @@ export default function QuickOrderPage() {
                       )}
                       {row.suggestions.length > 0 && (
                         <>
-                          {exactOut && <p className="mb-1 mt-2.5 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.quick.alternatives}</p>}
+                          {exactOut && <p className="mb-1 mt-2.5 text-xs font-semibold text-ink-2">{S.quick.alternatives}</p>}
                           <ul className={cn('divide-y divide-line-2 overflow-hidden rounded-sm border border-line', !exactOut && 'mt-2')} role="listbox">
                             {row.suggestions.map((s) => {
                               const out = isOut(s)

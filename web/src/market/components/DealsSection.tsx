@@ -56,7 +56,7 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
 
   return (
     <section aria-labelledby="home-deals" className="bleed bg-deal-soft/60 pb-6 pt-5 lg:mx-0 lg:rounded-xl lg:px-7 lg:pb-7 lg:pt-6 2xl:px-8">
-      <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-deal px-2.5 text-2xs font-bold uppercase tracking-[0.08em] text-deal-ink">
+      <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-deal px-2.5 text-xs font-bold text-deal-ink">
         <Tag size={12} strokeWidth={2.2} aria-hidden="true" />
         <span className="tnum">{S.deals.count(sets.all.length)}</span>
       </span>
@@ -93,9 +93,9 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
         // price — the honesty this section is named for — and the fifth column at 1440 left ~175 px
         // of content, which cut "2.000" to "2.0…", the sixth at 1920 to "2…". Columns stop where
         // the card stops being able to say the thing the section promises.
-        <div key={active} ref={gridRef} className="anim-fade-in mt-5 grid grid-cols-4 gap-3 xl:gap-4 3xl:grid-cols-5">
+        <div key={active} ref={gridRef} className="wave-cols anim-fade-in mt-5 grid grid-cols-4 gap-3 xl:gap-4 3xl:grid-cols-5">
           {list.slice(0, DESKTOP_MAX).map((it, i) => (
-            <div key={it.item_code} className={cn('reveal', i >= 8 && 'hidden 3xl:block')} style={{ ['--i' as string]: i }}>
+            <div key={it.item_code} className={cn('reveal', i >= 8 && 'hidden 3xl:block')} style={{ ['--i4' as string]: i % 4, ['--i5' as string]: i % 5 }}>
               <MarketCard item={it} from="deals" className="h-full" />
             </div>
           ))}

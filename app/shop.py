@@ -180,6 +180,26 @@ SETTING_DEFAULTS: dict[str, str] = {
         {"key": "rep", "en": "Every order confirmed by your rep", "ar": "كل طلب يؤكده مندوبك", "icon": "shield", "to": "/about#how"},
     ], ensure_ascii=False),
     "shop_market_ai_enabled": "0",       # phase C: the concierge; off until the office switches it on
+    # YQ Assist (28-Oct-2026): model-backed chat turns per UTC day before the chat falls back to plain
+    # search, so public traffic never spends the free AI quota the owner's own reports run on. 0 = no cap.
+    "shop_ai_daily_cap": "800",
+    # the chat's microphone (speech to text) and camera (a product, a box or a written list); each
+    # needs shop_market_ai_enabled as well
+    "shop_ai_voice_enabled": "1",
+    "shop_ai_photo_enabled": "1",
+    # YQ Assist 2.1 (29-Oct-2026, owner: "proactive", the bubble on from release): a small line beside the chat
+    # button once per visit ("Want today's best sellers?"); needs shop_market_ai_enabled as well
+    "shop_ai_nudge_enabled": "1",
+    # YQ Assist v2 (29-Oct-2026, market_assist_v2_migration.sql). Tickets: a merchant reports a damaged,
+    # wrong or missing item or asks for a call-back in the chat; off until the office switches them on.
+    # Retention (Bahrain PDPL, owner 29-Oct): chat turns 180 days; tickets and their photos 730 days after
+    # closing. The working hours a ticket may wait before its rep, then the owner, is reminded. The answers
+    # the office approved for policy questions: the only words the chat may use on them (validate_policies).
+    "shop_ai_support_enabled": "0",
+    "shop_ai_retention_days": "180",
+    "shop_ticket_keep_days": "730",
+    "shop_ticket_sla_hours": "24",
+    "shop_ai_policies": "[]",
     # wholesale order engine (16-Sep-2026): the minimum is a sales engine, not a wall
     "shop_small_order_mode": "request",  # request = accept + flag for the rep · allow = accept silently · block = refuse
     "shop_small_order_fee_bhd": "0",     # optional handling fee the rep may apply when confirming a small order
@@ -357,6 +377,70 @@ def validate_promises(raw) -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
+# The policy questions YQ Assist recognises (app/market_assist.py reads the topic; it never writes the answer).
+POLICY_TOPICS = ("returns", "warranty", "payment", "credit", "delivery", "hours", "account", "invoice")
+POLICY_TEXT_MAX = 600
+
+
+def policies(vals: dict) -> dict[str, dict]:
+    """shop_ai_policies as {topic: {en, ar?}}. A bad stored value reads as empty: every policy question is
+    then handed to the rep, exactly as when no answer was approved."""
+    raw = vals.get("shop_ai_policies") if isinstance(vals, dict) else None
+    try:
+        rows = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or [])
+    except ValueError:
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, dict) and r.get("topic") in POLICY_TOPICS and isinstance(r.get("en"), str) and r["en"].strip():
+            out[r["topic"]] = {"en": r["en"].strip()[:POLICY_TEXT_MAX],
+                               **({"ar": r["ar"].strip()[:POLICY_TEXT_MAX]} if isinstance(r.get("ar"), str)
+                                  and r["ar"].strip() else {})}
+    return out
+
+
+def validate_policies(raw) -> str:
+    """The approved policy answers as they may be stored: a JSON list of {topic, en, ar?}, each topic one of
+    POLICY_TOPICS and at most once, each text at most POLICY_TEXT_MAX characters. An empty value clears them.
+    Returns the normalised JSON; raises ShopError with a message the office can act on."""
+    rows = raw
+    if raw is None or isinstance(raw, (str, bytes)):
+        text = (raw or "").strip() if isinstance(raw, str) else (raw or b"").decode("utf-8", "replace").strip()
+        if not text:
+            return "[]"
+        try:
+            rows = json.loads(text)
+        except ValueError as e:
+            raise ShopError("Approved answers must be JSON: a list of {topic, en, ar} objects.") from e
+    if not isinstance(rows, list):
+        raise ShopError("Approved answers must be a JSON list of {topic, en, ar} objects.")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for n, r in enumerate(rows, 1):
+        if not isinstance(r, dict):
+            raise ShopError(f"Answer {n} must be an object with a topic and English text (en).")
+        topic = str(r.get("topic") or "").strip().lower()
+        if topic not in POLICY_TOPICS:
+            raise ShopError(f"Answer {n}: the topic must be one of {', '.join(POLICY_TOPICS)}.")
+        if topic in seen:
+            raise ShopError(f"'{topic}' has two answers — keep one.")
+        seen.add(topic)
+        row = {"topic": topic}
+        for f in ("en", "ar"):
+            v = r.get(f)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                if f == "en":
+                    raise ShopError(f"Answer {n} ({topic}) needs English text (en).")
+                continue
+            if not isinstance(v, str):
+                raise ShopError(f"Answer {n} ({topic}): {f} must be text.")
+            if len(v.strip()) > POLICY_TEXT_MAX:
+                raise ShopError(f"Answer {n} ({topic}): keep {f} under {POLICY_TEXT_MAX} characters.")
+            row[f] = v.strip()
+        out.append(row)
+    return json.dumps(out, ensure_ascii=False)
+
+
 def small_order_mode(vals: dict) -> str:
     """shop_small_order_mode normalised: request (accept + flag for the rep) · allow · block."""
     mode = str(vals.get("shop_small_order_mode") or "request").strip().lower()
@@ -435,6 +519,8 @@ def update_shop_settings(changes: dict[str, str], by: str = "") -> dict[str, str
         # the roster check is skipped (ids still must be positive) when the roster cannot be read
         changes["shop_area_reps"] = validate_area_reps(changes["shop_area_reps"],
                                                        _load_salesmen(active_only=False) or None)
+    if "shop_ai_policies" in changes:
+        changes["shop_ai_policies"] = validate_policies(changes["shop_ai_policies"])
     client = get_client()
     for k, v in changes.items():
         if k not in SETTING_DEFAULTS:
@@ -1347,6 +1433,11 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "allow_backorder": allow_backorder(vals, staff),
             "show_retail_compare": show_compare,
             "public_tiers": public_tiers,
+            # YQ Assist: the chat bubble shows only while the office has switched it on
+            "ai_enabled": _flag(vals, "shop_market_ai_enabled"),
+            "ai_voice": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_voice_enabled"),
+            "ai_photo": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_photo_enabled"),
+            "ai_nudge": _flag(vals, "shop_market_ai_enabled") and _flag(vals, "shop_ai_nudge_enabled"),
             "areas": [a.strip() for a in str(vals.get("shop_areas") or "").split(",") if a.strip()],
             # R7d: {area (lower-cased): the rep's first name} — the checkout's "Your area representative"
             "area_reps": area_rep_names(ctx),

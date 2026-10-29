@@ -1,10 +1,10 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight, Clock, ClipboardList, Megaphone, Package, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { track } from '../lib/events'
 import { useCountdown } from '../lib/format'
-import { endsSoon, firstSlideImage, type Slide, type SlideSize } from '../lib/slides'
+import { endsSoon, firstSlideImage, onSlideActive, whenWatched, type Slide, type SlideSize } from '../lib/slides'
 import { S } from '../strings'
 import { ComposedCreative } from './ComposedCreative'
 
@@ -19,6 +19,11 @@ import { ComposedCreative } from './ComposedCreative'
  *
  * Honest by construction: the sticker is a word the data backs (Clearing line, New, Price drops),
  * the ends chip only appears for a real end within 7 days, a sponsored campaign always says so.
+ *
+ * A `live` card (round 2, 29-Oct-2026: the desktop stage, the Spotlight and a category banner) moves
+ * like a short film on a desktop: its discs turn through the slide's products (ComposedCreative's
+ * reel), the number its title or line carries counts up as the slide comes on stage, and a soft light
+ * crosses it every 6 s (market.css, "The banner's motion"). The words and the numbers stay the data's.
  */
 
 export interface SlideCardProps {
@@ -29,6 +34,8 @@ export interface SlideCardProps {
   className?: string
   /** analytics surface for rail_click (default: slider · tile · spotlight by size) */
   where?: string
+  /** the desktop banner's motion: the reel, the count, the light (phones and tablets show the card as it is) */
+  live?: boolean
 }
 
 const FRAME: Record<SlideSize, string> = {
@@ -108,11 +115,58 @@ function EndsChip({ endsAt, dark, className }: { endsAt: string; dark: boolean; 
   )
 }
 
-export function SlideCard({ slide, size, priority, className, where }: SlideCardProps) {
+/**
+ * A live card's number, drawn by a CSS counter that counts up to it as its slide comes on stage. Never on a
+ * slide's first view (release review, 29-Oct-2026: a number already on screen reset to 0 and counted back),
+ * never under the opening, and only where the browser animates a registered integer (elsewhere the number
+ * would flip to 0 and back).
+ */
+function Count({ n }: { n: string }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof CSS === 'undefined' || !('registerProperty' in CSS)) return
+    let watched = false
+    const stopWatch = whenWatched(() => {
+      watched = true
+    })
+    const stopActive = onSlideActive(el, () => {
+      if (watched) el.setAttribute('data-go', '')
+    })
+    return () => {
+      stopWatch()
+      stopActive()
+    }
+  }, [])
+  return (
+    <span ref={ref} className="slide-count" style={{ '--n': n } as CSSProperties}>
+      {n}
+    </span>
+  )
+}
+
+/** the first number in a text, counted (a live card counts one number: its title's, else its line's) */
+function counted(text: string): ReactNode {
+  const m = /\d+/.exec(text)
+  if (!m) return text
+  return (
+    <>
+      {text.slice(0, m.index)}
+      <Count n={m[0]} />
+      {text.slice(m.index + m[0].length)}
+    </>
+  )
+}
+
+export function SlideCard({ slide, size, priority, className, where, live }: SlideCardProps) {
   const dark = slide.canvas === 'plum' || slide.canvas === 'night'
   const cover = slide.image?.fit === 'cover'
   const img = slide.image ? firstSlideImage(slide, size) : null
   const kicker = slide.kicker || slide.sponsored || null
+  // only the data's own numbers count up: a campaign's words ("iPhone 17 cases", "65W") are the merchant's
+  const counts = Boolean(live) && slide.kind === 'data'
+  const countTitle = counts && /\d/.test(slide.title)
+  const countLine = counts && !countTitle && Boolean(slide.line && /\d/.test(slide.line))
 
   const imgTag = img && (
     <img
@@ -151,7 +205,7 @@ export function SlideCard({ slide, size, priority, className, where }: SlideCard
           {imgTag ? (
             <div className={cn('h-full w-full', size === 'hero' ? 'p-2' : 'p-2.5')}>{imgTag}</div>
           ) : slide.products.length ? (
-            <ComposedCreative products={slide.products} canvas={slide.canvas} size={size} priority={priority} backdrop={false} />
+            <ComposedCreative products={slide.products} reel={live ? slide.reel : undefined} canvas={slide.canvas} size={size} priority={priority} backdrop={false} />
           ) : (
             <div className="creative" data-count="1" data-canvas={slide.canvas}>
               <div className="creative-disc grid place-items-center text-plum" data-pos="c">
@@ -162,6 +216,8 @@ export function SlideCard({ slide, size, priority, className, where }: SlideCard
         </div>
       )}
 
+      {live && <i className="slide-beam" aria-hidden="true" />}
+
       {slide.sticker && !cover && STICKER_AT[size] && (
         <span className={cn('slide-sticker absolute', STICKER_AT[size], STICKER_TONE[slide.sticker.tone])} aria-hidden="true">
           {slide.sticker.label}
@@ -171,8 +227,8 @@ export function SlideCard({ slide, size, priority, className, where }: SlideCard
 
       <span className={cn('slide-copy absolute flex flex-col', COPY[size])}>
         {kicker && <span className={cn('slide-kicker mb-1.5 truncate', dark ? 'text-white/80' : 'text-plum')}>{kicker}</span>}
-        <span className={cn('slide-title line-clamp-2 font-display font-extrabold', dark ? 'text-white' : 'text-ink')}>{slide.title}</span>
-        {slide.line && <span className={cn('slide-line mt-1 line-clamp-2 text-[12.5px] leading-4', size === 'hero' && 'mt-3 max-w-[34ch] leading-snug', dark ? 'text-white/80' : 'text-ink-2')}>{slide.line}</span>}
+        <span className={cn('slide-title line-clamp-2 font-display font-extrabold', dark ? 'text-white' : 'text-ink')}>{countTitle ? counted(slide.title) : slide.title}</span>
+        {slide.line && <span className={cn('slide-line mt-1 line-clamp-2 text-[12.5px] leading-4', size === 'hero' && 'mt-3 max-w-[34ch] leading-snug', dark ? 'text-white/80' : 'text-ink-2')}>{countLine ? counted(slide.line) : slide.line}</span>}
         {slide.to && (
           <span
             className={cn(

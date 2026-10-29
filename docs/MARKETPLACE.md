@@ -375,11 +375,24 @@ out of the strip automatically.
 
 The marketplace opens the way the ops portal signs in: deep night, the glow horizon rising from
 below, and YQ said once. The portal's `glow-horizon.tsx` is ported to CSS (the "v3: horizon" block —
-four absolutely positioned, blurred ellipses; `motion` is banned in this bundle). Sequence: arcs rise
-(0–900 ms) → the logo tile takes one light sweep (560 ms) → "Where Bahrain restocks." (420 ms) →
-"Restock faster. Sell more." (640 ms) → under the horizon, the first three promises or "Welcome back,
-{shop}" with the "Refill my shelf" shortcut (820 ms) → the composition **rests** ~400 ms and leaves
-at 1.9 s (2.8 s with the shortcut) in a 320 ms fade with a 2 % scale.
+four absolutely positioned ellipses; `motion` is banned in this bundle). Sequence: the dawn rises from
+the very first paint (0–900 ms, in the served frame, see below) → the logo tile takes one light sweep
+(560 ms after the overlay mounts) → "Where Bahrain restocks." (420 ms) → "Restock faster. Sell more."
+(640 ms) → under the horizon, the first three promises or "Welcome back, {shop}" with the "Refill my
+shelf" shortcut (820 ms) → the composition **drifts**: a slow 2.5 % camera push while the dawn breathes
+→ at 1.9 s (2.8 s with the shortcut) the night lifts off the app in a 560 ms fade while the push
+gathers pace to 7 %.
+
+Smooth by construction (29-Oct-2026, after the owner's video of it stepping, freezing ~2 s, then cutting):
+
+| What | How |
+|---|---|
+| No live blur | The opening's glow arcs draw their blur as radial gradients that follow the blur's own edge profile (`scripts/make_opening_glow.py` writes the block in market.css). A `filter: blur()` is re-applied by the compositor on every frame its layer moves. |
+| Motion from the first pixel | The served `#yq-boot` frame carries the horizon and its veils (`.open-veils`), so the dawn rises while the app's code is parsed (a gradient paints in the first frame; an image would not). The overlay adopts that frame as its background (`data-adopted`) and lets it go with the exit. |
+| Cheap on integrated graphics (round 2) | The three glow arcs rise as one layer (`.open-glow`), the two veils are two backgrounds of one element, and once risen the night frame stands still: the camera push moves only the logo and the lines, and the logo's halo breathes. A screen-sized layer scaled or looped on every frame was what the owner's laptop (Intel UHD) could not carry. |
+| An exit that cannot be late | The hold's push and the exit are booked at mount as Web Animations on the compositor's clock (a timer used to start the exit, and the app loading underneath delayed it and starved its fade). A skip hands the current state to a 320 ms exit. |
+| Never frozen | Through the hold the foreground drifts in (the push) and the logo's halo breathes, so a slow load never shows a still frame. |
+| Guard | `opening-motion` in `scripts/qa/smooth.py`. Frame rates are judged in real Chrome on a GPU (a trace of the frames the compositor drew): headless rendering is software and steps by nature, which is what the owner's video showed. |
 
 - **At most once per device every 7 days, and never twice in a tab** (`lib/splashGate.ts`:
   `localStorage yq-splash-at` + `sessionStorage yq-splash-session`, in try/catch — blocked storage
@@ -388,10 +401,11 @@ at 1.9 s (2.8 s with the shortcut) in a 320 ms fade with a 2 % scale.
   the rule and switches the served night frame off (`html[data-boot=off]`) on every other load. The
   30-day `yq-splash-seen` stamp only decides when a returning merchant gets the longer welcome with
   the shortcut.
-- **Instant first frame:** the served HTML carries a static `#yq-boot` node with the same night field
-  and the same logo tile in the same place (`marketHtml()`), `Shell.tsx` paints the same night as the
-  chunk's Suspense fallback, and `Splash` removes the static node as it mounts (and then does not
-  replay the tile's spring). An 8s CSS safety net hides the boot node if the chunk never arrives.
+- **Instant first frame:** the served HTML carries a `#yq-boot` node with the same night field, the
+  same logo tile in the same place and the dawn already rising (`marketHtml()`). `Splash` adopts it
+  (its tile hidden under the overlay's own, its 8 s safety fade stopped) and removes it at the end of
+  the exit; `Shell.tsx` paints a night field as the chunk's Suspense fallback only if the node is gone.
+  The 8 s CSS safety net still hides the node if the chunk never arrives.
 - Tap, click, wheel or Esc skips; the skip control takes focus and focus returns afterwards.
 - **Reduced motion:** the same finished frame, static, 600 ms, then a plain fade.
 - It is an overlay only — the catalog loads and the page renders underneath the whole time.
@@ -609,21 +623,272 @@ truthful "Deal" badge · `moq` / `pack_size` on SKUs that ship in packs · photo
 (a photo-less product cannot appear in a slider, a brand tile or a composed creative) ·
 `public_whatsapp` + `photo_url` on salesman profiles · a company WhatsApp for "Ask YQ".
 
+## YQ Assist: the marketplace chat (28-Oct-2026, P1 of the AI plan)
+
+A "Chat now" bubble that answers from the public catalogue and the device's own orders, in the
+merchant's language, and hands over to the shop's salesman on WhatsApp. **Off until the office
+switches `shop_market_ai_enabled` to 1** (Settings); the payload carries it as `settings.ai_enabled`
+and the page shows nothing while it is off.
+
+| Piece | Where |
+|---|---|
+| The turn: understand → handle → answer | `app/market_assist.py` |
+| Server search (a port of `lib/search.ts`, synonyms held equal by a test) | `app/market_search.py` |
+| JSON answers, the `assist` routing task, usage per provider per day (`GET /llm/health`) | `app/llm_router.py` |
+| `POST /public/market/ask`, `/voice` (speech to text), `/photo` (a product, a box or a written list), `/feedback` | `app/shop_api.py` |
+| Speech to text (Whisper on Groq, Voxtral on Mistral), image-reading models (`vision`) | `app/llm_router.py` |
+| Portal reads: `GET /shop/assist/turns`, `GET /shop/feedback`, `PATCH /shop/feedback/{id}` (Shop Admin) | `app/shop_api.py` |
+| Portal page **Merchant voice**: ideas and problems, what merchants asked (misses = sourcing leads), free AI today | `web/src/pages/MerchantVoice.tsx` |
+| Tables `shop_ask_turns`, `shop_feedback`; settings `shop_ai_daily_cap`, `shop_ai_voice_enabled`, `shop_ai_photo_enabled` | `scripts/market_assist_migration.sql` |
+| The bubble, the panel, `/ask`, the microphone, the camera, the list review | `web/src/market/assist/` |
+| Tests | `tests/test_market_assist.py` |
+
+**One message, at most two model calls.** (1) `chat_json` reads the intent (find, fit, add, list,
+order_status, usual, handoff, feedback, chat) and the product in the catalogue's English words, in
+any language. (2) Python handles it on public data only. (3) For find, fit, add and chat a second
+call writes one to three sentences in the merchant's language; lists, order status, "my usual", the
+hand-off and feedback answer from templates (en/ar) with no second call.
+
+**Lists** (pasted, typed in one line, spoken, or photographed) come back as `lines`: each line
+`matched` (a product code was written), `pick` (every word matched: the best item plus up to two
+alternatives for the merchant to confirm) or `missing` (only part matched: the hits are suggestions,
+nothing is added). Quantities are raised to the item's minimum. A pasted list still works when no
+model answers (`parse_list`: codes and English words). **Voice** returns text to check before
+sending; Whisper's "Thank you." on silence counts as no speech; the recording is never stored.
+**Photos** are read by one vision call (Groq's qwen3.8-27b, then Mistral, then Gemini; measured
+0.4–2.4 s) and never stored; a box from another brand is said plainly ("That looks like a … product.
+These are the closest items YQ stocks.").
+
+**Guardrails.** The model reads the PUBLIC payload bytes only (`public_catalog()`), so it can see
+nothing the marketplace does not already show; it is never given a price, and `_scrub_prices()`
+drops any sentence that still names one (policy amounts like the minimum excepted). `add` lines
+wait for the merchant's tap; nothing is ordered or sent. Merchant text is masked (`mask()`: runs of
+7+ digits and e-mails out, `YQ-…` order numbers kept) before a provider or a table sees it, and
+fenced as data. Rate limits: 30/min per address, 6/min and 60/day per device. `shop_ai_daily_cap`
+(default 800 turns per UTC day): past it, and whenever no model answers, the reply says
+`fallback: true` and the page runs its own search. A product ask that finds nothing is logged as a
+`search_zero` event with `meta.where = 'ask'`, the demand signal Market Intel already reads.
+
+**Hand-off order:** the rep on this device's latest order → the storefront rep (if they opted in
+to WhatsApp) → `WA_HUMAN_NUMBER` → none (the rep confirms every order and calls).
+
+## YQ Assist v2: sell, support, escalate (built 29-Oct-2026, release assist2)
+
+The owner's brief: a chat that solves problems, not a fancy one. Each turn ends in a cart, an answer, a ticket
+or the rep. His decisions (29-Oct-2026): the order's rep owns a ticket and the owner watches every one; after a
+report the shop is promised **the next step only**; chats are kept 180 days; alerts go to Telegram and the
+Command Centre. Release steps: docs/RELEASE.md § Release assist2.
+
+| Piece | Where |
+|---|---|
+| Intents `top`, `deals`, `plan`, `ticket`, `ticket_status`, `policy`, `account`; tiles (`action`, no model call); in-stock picks with their reason; sold-out → alternatives; the plan; approved policy answers; escalation | `app/market_assist.py` |
+| The streamed turn (`Accept: text/event-stream`: `stage`, `cards`, `result`; plain JSON otherwise) | `app/market_assist.py` `ask_events`, `app/shop_api.py` |
+| A chat timeout benches a provider for 30 s, not `_CB_COOLDOWN` (`timeout_bench`) | `app/llm_router.py` |
+| Tickets: checks on the order and its lines, photos (re-encoded, private bucket `assist-tickets`, 1 h signed links), alerts, SLA reminders, retention | `app/market_support.py`, `app/shop_jobs.py` |
+| `POST /public/market/ticket`; staff `GET/PATCH /shop/tickets[/{id}]`, `PATCH /shop/me/tickets/{id}`, `GET /shop/assist/overview|sessions[/{sid}]|insights`, `GET/PUT /shop/assist/policies` | `app/shop_api.py` |
+| The back office's sums (sessions, outcomes, chat → order, insights, approved answers) | `app/assist_admin.py` |
+| The rep's "From the chat" card | `app/followups.py`, `web/src/pages/sales/ChatTickets.tsx` |
+| Command Centre item `chat_tickets` (feature Shop Admin), `/yq-brief`, `/yq-watch` | `app/metrics.py`, `app/command_api.py`, `scripts/ops/` |
+| Tables `shop_tickets`, `shop_ticket_events` (append-only); 12 columns on `shop_ask_turns`; view `v_assist_open_tickets`; settings `shop_ai_support_enabled`, `shop_ai_policies`, `shop_ticket_sla_hours`, `shop_ai_retention_days`, `shop_ticket_keep_days` | `scripts/market_assist_v2_migration.sql` |
+| The orb, the opening, the sheet, tiles, cards (plan, ticket, hand-off, policy), stage words, the disclosure | `web/src/market/assist/`, `market.css` (`v3: assist` block) |
+| Portal **YQ Assist** (was Merchant voice): Today, Conversations, Tickets, Insights + Teach, Ideas, Free AI | `web/src/pages/MerchantVoice.tsx`, `web/src/pages/assist/` |
+| Tests; the scorecard | `tests/test_assist_v2.py`; `tests/assist_cases.yaml` + `scripts/eval_assist.py` |
+
+**What each job answers from (Python, public data; the model only reads the intent and writes 1–3 sentences):**
+
+| Asked | Answer | Never |
+|---|---|---|
+| What sells, what is new | best seller → trending → selling fast → new, one category at a time, narrowed to what was named | a sold-out line; a category the shelf does not have ("best selling hdmi projector" says so) |
+| Deals | real price drops, live offers, clearance | a "was" price that never was |
+| Plan my order | the usual (in stock), what sells in those categories, two deals, the line that closes the minimum (`price_cart` gap suggestions); a budget trims from the end | a sold-out line; the usual trimmed before the extras |
+| A product / fit / add | the match; a sold-out match keeps its card marked Sold out and brings in-stock alternatives (same category, two or more shared words such as the connector or the watts) | a USB-C cable for a Lightning one |
+| A policy (returns, warranty, payment, credit, delivery, hours, account, invoice) | the office's approved text, marked "Official YQ answer" | a policy in the model's words; an empty topic goes to the rep |
+| A problem with goods or an order | the ticket card (issue → order → items → photos and a note → send), then the T-number and the rep's name | a refund, replacement, credit or date promised |
+| A person, a price, credit, an account, or an upset shop | the rep on WhatsApp, and "Ask for a call back" when tickets are on | — |
+
+**Guardrails added in v2.**
+- *Names.* The chat history comes from `shop_ask_turns` (the turns of this session AND device), not from the
+  browser. Shop and customer names (Focus customers and marketplace shops) are replaced by `[shop]` before any
+  model call; the list is rebuilt hourly off the request path.
+- *What the model may write.* Model text loses its markdown, and every sentence with a price the facts did not
+  give, a link, a masked number or e-mail, or the market's banned copy; "out of stock" becomes "sold out".
+- *Ticket checks.* A ticket's order must belong to this device or its shop. Its quantities stay within what was
+  delivered, less what was returned or is already reported. Rate limits: 10/min per address; 3/min and 10/day per
+  device.
+- *Logging.* Every turn is logged with `ms_understand`, `ms_handle` and `ms_answer`, an error turn included. Until
+  the migration runs, the API logs as assist1 did.
+
+**Speed.** Tiles answer from data with no model call. The model's sentence is written only if the turn is under
+5 s (`_ANSWER_BY`); otherwise a template line goes. Cards are streamed before the sentence. A dropped connection
+still logs the turn.
+
+**When no model can answer** (none answered, or past `shop_ai_daily_cap`), the commonest asks still get their
+tile's answer from data. `rule_action` reads the words in English, Arabic and romanised Urdu (what sells also in
+Hindi and Malayalam), in this order:
+1. a ticket reference;
+2. a problem with goods;
+3. an order;
+4. the rep;
+5. a plan;
+6. offers;
+7. what sells.
+
+The turn is logged with `providers = 'rules'`. Anything else gets `fallback: true` (the page searches) as before.
+The rules never run before the model: words alone misread too much.
+
+**The look** follows the market's motion law (transform and opacity only, no motion library, a still frame under
+reduced motion and lite mode):
+- *The orb* (the header's plum and its lighter sash) breathes when idle, follows the voice level while listening,
+  and swirls faster while thinking.
+- *The opening.* Rings drop out of the launcher; on a desktop the panel fills from its corner; on a phone the sheet
+  lands on a flattening wave.
+- *After closing.* The answer still arrives, and the orb shows a dot when it is ready.
+
+**How smart, in numbers:** `python -m scripts.eval_assist` (read-only; the public catalogue from the QA stand-in or
+a saved payload; no database). It runs the 81 cases of `tests/assist_cases.yaml` on the live free models and
+scores six checks against their gates:
+
+| Check | Gate |
+|---|---|
+| intent | ≥ 92% |
+| sold_out | 100% |
+| escalate | ≥ 95% |
+| official | 100% |
+| lang | ≥ 95% |
+| leak | 100% |
+
+It also prints p50/p95. Run it before every assist release and put the table in the release note. CI checks the
+case file only (`tests/test_assist_v2.py`).
+
+## YQ Assist 2.1: the salesman voice (built 29-Oct-2026, release assist2.1)
+
+The owner's phone test of assist2 (29-Oct-2026) hit two dead ends:
+- "Does it fit my phone?" (the welcome chip's own words) answered "not in our catalogue" and logged a demand signal for
+  nothing.
+- "What is the process of damage stock" went straight to the rep.
+
+His brief: proactive, talks like a person, asks questions, pushes the sale like a salesman. His decisions:
+- The bubble beside the button is on from release, with a Settings switch.
+- The one extra suggestion is what shops buy with the item first, then a real deal in its category.
+
+Release steps: docs/RELEASE.md § Release assist2.1.
+
+**The rule that keeps it safe.** Python picks every product, reason, next step and quick reply; the model only puts
+them into words. `_ANSWER` is now a salesman persona with one grounded example, and every v2 safety line is kept.
+
+| What | How (`app/market_assist.py` unless named) |
+|---|---|
+| Asks before guessing | An ask that names nothing to look up gets one question with quick replies (`_h_clarify`, intent `clarify`): "Which phone is it for?" (phone chips) or "What are you looking for today?" (category chips). It is never a miss and never a demand signal. A fit question about a product with no phone shows the card and asks the phone. A cable ask with no connector asks USB-C, Lightning or micro USB. |
+| Never the same question twice | The history's assistant lines carry their intent. Right after a `clarify`, the chat makes a best guess (what sells) instead of asking again. |
+| Reads the answer to its question | `understand` gains `phone` and a rule: an answer keeps the earlier intent and goes into the query. A phone named settles the connector (`with_phone_connector`): "does it fit iphone 11?" after a USB-C charger searches Lightning. An AUX audio cable goes after the charging lines unless audio was asked. |
+| One next step per answer | `next_step()` picks, in order: the phone when missing; the connector for a broad cable ask; what shops add with the first card (`pair_for`: in stock, not on screen, not offered earlier in the chat); a real deal in its category (`deal_for`); otherwise the quantity or the whole order. The model gets it as "Next step: …" and the page gets it as quick replies. |
+| Quick replies | `next: [{label, say} or {label, action, q}]`, at most 4, in English or Arabic. A `say` chip is sent as the merchant's own words. An action chip is answered from data: `top` (`q` = `cat:<CATEGORY>`), `show` (codes), `find` (catalogue words), `fit`, `plan`, `deals`, `usual`, `ticket`, `handoff`. Request field `q` is at most 60 characters. |
+| The salesman's sentence | Typed what sells, usual, find, fit, add and chat: the model writes 2–3 sentences from the facts (each card's `why`, how many shops order it, the next step, the chat so far) and ends on the next step. A plan and the offers keep their data lines, because on the live scorecard a model wording a plan invented a rule and one wording offers praised stock beyond its facts. Tiles and chips use data lines that end on a question, with no model. |
+| It speaks first | `action: hello` (no model, no budget, not a turn). It picks the product open and what shops add with it (or what is in stock instead when it is sold out), else this phone's usual items in stock, else what shops order most. The chips answer its question. |
+| The bubble | `web/src/market/assist/AssistLauncher.tsx`. It shows after 15 s on home, a category, a brand, search or a product page, once per visit, for 12 s. "Not now" rests it for 24 h. It never shows on cart, checkout, orders, `/o/` or `/ask`, or once the chat was opened. A tap opens the chat on the answer it offered: what sells, or the phone question for the product. Setting `shop_ai_nudge_enabled` (default 1, no migration) becomes payload `ai_nudge` and needs the chat switch too. |
+| The damage question | Returns or warranty with no approved text: how to report a problem. With tickets on it is in the chat, with a "Report a problem" chip; with tickets off, the order number and a photo go to the rep on WhatsApp. The rep confirms what happens next, and the chat never promises a refund, replacement, credit, warranty or time. Other topics go to the rep, with a call back when tickets are on. |
+| No model | `rule_action` also reads "does it fit my phone?" and answers with the phone question. |
+| Tests; the scorecard | `tests/test_assist_sales.py`; `tests/assist_cases.yaml` (`before`, `clarify`, `cards_like`) and `scripts/eval_assist.py` (gates `clarify` 100%, `next` ≥ 90%, `context` ≥ 90%; `asks` and fallbacks printed) |
+
+## YQ Assist 2.2: one conversation, a human voice; the mark and a smarter bubble (built 29-Oct-2026, release assist2.2)
+
+The owner, before showing it to others (29-Oct-2026):
+- The purple orb is empty: put the YQ logo in it, same colours, only where the orb is empty, on phone and desktop.
+- The bubble always says the same: make it smart (offers, clearing lines) and different after some time.
+- "Still it doesn't talk like human... one conversation, I asked different questions but same reply. I want the
+  best chat agent in my platform." Then: "Make sure you fix all and it should sound like human."
+- "When I click report a problem it takes directly to rep. The AI try to solve problem if it can not then move to
+  rep."
+
+His decisions: the messages rotate among clearing lines, best sellers and "your usual is in stock" (his campaigns
+lead; real price drops and new lines join when there are any); once per visit, a new message each visit; "Notify
+me" on sold-out cards in the chat. Release steps: docs/RELEASE.md § Release assist2.2.
+
+**Part A: the mark, the reach-out lines, notify.**
+
+| What | How (`app/market_assist.py` unless named) |
+|---|---|
+| The YQ mark | `web/public/yq-mark.svg`: the logo's white "yq?" traced to vector (1.8 KB). `Orb` (`mark`, on by default) masks it in white above the moving light, in every orb with no icon of its own: the chat header, the replies, the desktop button. The phone button keeps its chat icon. Never mirrored in Arabic. |
+| The reasons to speak first | `reach_hooks()`, strongest first, each only when the data holds it: his live campaign (audience "all", in his words, in-stock codes only), an item this phone asked "Tell me when back" for that is in stock now (`asked_back`, its own device id), the shop's usual in stock, a real price drop, new lines, clearing lines (3 or more, "at the normal trade price", never "sale" or a discount), what sells. |
+| A new message each visit | `pick_hook()` skips the hook ids this browser saw lately (`seen`, at most 6, localStorage `yq-assist-seen`). The chat's first line (`hello`) skips the one the bubble just showed. Evergreen lines have two wordings, alternated by day. |
+| The bubble's call | `action: nudge` (no model, no budget, not a turn): `{reply, next: [the tap], hook}`. The launcher asks it when the 15 s timer fires (2 s cap, else the static line). A tap opens the chat on that line's answer; the turn is logged with `topic = "nudge:<hook>"`, so which line sells can be counted (no migration). |
+| Names with the codes | `label_for()`: "the X01 UC Type-C cable", "the UK04 20W charger" (Arabic «شاحن UK04 20 واط»): the code, the one word that sets it apart (connector, watts, mAh; multi-connector, 2-in-1, 3-in-1, AUX to Type-C) and what it is, from the item's own name, spec and category. |
+| Clearing lines said honestly | Offers that are all clearing lines read "the lines we're clearing at the normal trade price"; the chip reads "Clearing lines" (`badge:clearance`). |
+| Tell me when it's back | A sold-out first card gets the page-only chip `{action: "notify", q: code}` (`PAGE_ACTIONS`), handled by `NotifyChip` with the market's own `useTellBack` (the rep's list, a phone asked for first). |
+
+**Part B: a conversation, not a string of first answers.** Measured on 13 shop-owner conversations (English, Arabic,
+Roman Urdu; 34 turns) on the lab with the real free models, every line read: 40 flagged before (repeats, the same
+cards, figure readouts, dead ends, empty replies), 2 after (one empty reply when no model answered, one expected
+"same cards" on "which one is better?").
+
+| What | How |
+|---|---|
+| Routing | `_UNDERSTAND` gains `advice` (how to sell more, push sales, profit, how can you help), `price` ("how much is it?") and `more` ("what else?"). "What should I order / I'm opening a shop" is a plan; a complaint about the products or the service is a `ticket`, never small talk or a product idea. |
+| Memory | The previous assistant turn's intent, cards and topic (`server_history` reads `topic`). The same ask again, or "more", shows only what the chat has not shown, in its own line (`top_more`, `top_more_b`), and never the same question twice. A template line the chat just sent is never sent again word for word (`_follow_up`: `account_again`, `orders_again`, …). A budget after a plan rebuilds it ("Done, I've rebuilt it…"). |
+| The voice | `_ANSWER`: react to what they wrote and answer it first; a complaint gets one real apology; names from the facts' `say`; at most one number (only the first card carries its shop count); never repeat a sentence of the chat; no hype, no guesses (who buys it, why, the season, the weather, their shop); temperature 0.4; the next step given last, outside the data. No example product to copy (2.1's "AB12 … 13 shops" came back as a stats readout and once as a real product). |
+| After the model writes | `_polish()`: a sentence naming a product code that is neither in the catalogue nor in the chat goes (a model offered an "XP-1000" stand), so does one that guesses ("You mentioned…", "fresh arrivals", "for summer") or gives a stock level; hype is said plainly; no "Ah," opener; three sentences at most, the closing question kept. |
+| Languages | The model writes English replies only. Arabic (and Urdu or Hindi in their own script) get the office's own template lines, because the free models' Arabic came out garbled in the lab. Roman Urdu or Hindi typed in Latin letters get simple English. |
+| Sales help | `_h_advice` (also a chip action): from today's data, what is moving across Bahrain, what shops sell with it, the shop's usual when known; then the starter order. |
+| Price | `_h_price`: the price is on the card (the catalogue's trade price per piece, VAT included), never typed by a model; the cards are the ones asked about, or those on screen. |
+| Which is better | A comparison by the specs of the first two cards, then which matters more to their customers. |
+| Problems, AI first | `_support()`: what happened (damaged, not working, wrong or missing, late, or their own words). Not working: the quick checks for that kind of product (`fix_*`, read from the code, the words or a kind chip), then "Did that fix it?". Late: the order's real status. A replacement, a refund, a fault the checks did not fix, or a delivery still late: the rep (`support_replace`, `support_refund`, `support_still`, `support_late`), or the report card while tickets are on. The step is logged as `topic = "issue:<kind>"` (`:checked` once the checks were given). An angry merchant gets the rep as a chip during the triage. |
+| No model | Greetings and thanks get a person's line; "what should I order" and "help me sell more" get their answers; "how much is it?" gets the cards on screen. |
+| Tests; the scorecard | `tests/test_assist_sales.py` (§ 5 and 6); `tests/assist_cases.yaml` (the owner's cases) and `scripts/eval_assist.py` (gate `fresh` 100%: no sentence said earlier in the case's conversation). |
+
 ## Not done yet (in order)
 
-- **Arabic / RTL is prepared but not switched on.** Every string is centralised in `strings.ts`, the
-  CSS uses logical properties only (`ps-`/`pe-`/`start`/`end`), `locale` flips `lang`/`dir` on
-  `<html>`, campaigns carry `title_ar` / `line_ar` / `cta_label_ar` and every promise has `ar`. What
-  is missing is the translated string file and a language switch that persists.
-- **The AI concierge** (`shop_market_ai_enabled`, phase C) is not built.
+- **YQ Assist, after v2** (each on the owner's go): voice sent at once when the transcript is clear; "Add to quality
+  case" from a damage ticket (Market Intel cases); the same brain on WhatsApp (Cloud API keys); web push for
+  back-in-stock and ticket updates; a salesman co-pilot ("what to push to this shop today"); Urdu, Hindi and
+  Malayalam template lines; seeding the scorecard from real chat turns. After 2.2: the rep offered after two misses
+  or two thumbs-down in one chat; a shop's preferences remembered across visits beyond "my usual"; a speed pass
+  (p95 above 4 s on two-call turns); the cart-below-minimum message; Arabic worded by a model once one writes it
+  well.
 - **7 SKUs still have no photo.**
 - Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
   from Focus history (needs `focus_customer_id` links) · web push · a real `shop_clearance_pct`
   markdown applied by the pricing engine (the owner has declined one so far — D3 is the answer
   without it).
 
+## Motion (the feel pass, 29-Oct-2026, branch `market-feel`)
+
+Every effect is CSS or the Web Animations API on transform and opacity (Lenis is the one library, a
+5 KB dynamic import), off under reduced motion and in lite mode, mirrored in Arabic, and each has a
+guard in `scripts/qa/smooth.py` that failed on the build before it.
+
+| Where | What the merchant sees | Guard |
+|---|---|---|
+| Scrolling, PC with a mouse | The wheel glides (Lenis 1.3.27, paused under every scroll lock; phones keep native scrolling) | `glide-scroll`, `glide-layers` |
+| Browse menu | Opens after a short rest, drops with a dim, a highlight slides between categories, a diagonal toward the products keeps the panel (menu aim) | `menu-intent`, `menu-aim`, `browse-menu` |
+| Header and strip | One plum pill glides under the link or chip the mouse is on; a soft shadow once the page moves | `hover-pill`, `header-shadow` |
+| Cards | Lift 4 px with a deeper shadow, the photo zooms slowly, a soft light follows the cursor; presses spring back | `card-hover`, `press-spring` |
+| Add | A copy of the photo flies to the visible cart (the mini-cart, the Restock button, the phone's Restock tab); the count rolls, the stepper comes in, nothing on the page moves | `add-flight` |
+| First screen, PC | The category discs pop in one after another, with their photos | `first-screen` |
+| Scrolling down, PC | Cards rise in a wave by column; section titles rise with the scroll; the top slider drifts slower than the page | `reveal-wave`, `hero-drift` |
+| Page change, PC | A 16 px glide over 320 ms | `page-glide` |
+| Promo slides | Through each dwell the discs float, the art breathes, a light sweeps the hero product | `slides-alive` |
+| Banners, PC (round 2) | The stage, the Spotlight and a category banner turn through their own products: every 2.2 s the centre photo zooms in over the last, the side ones follow; the number the slide carries ("24 lines we're clearing") counts up as it comes on stage; a soft light crosses it every 6 s | `banner-reel` |
+| Search, PC (round 2) | The header's search types an example ("20W charger"), holds it, erases it and types the next, a blinking plum caret after it; under the mouse its edge turns plum with a soft glow, the glass nudges, a press gives | `search-typing` |
+| Opening a product, PC (round 2) | The page behind holds still and only dims (no blur): nothing on it moves or animates; the panel slides in and the card's photo flies into the panel's photo | `panel-still` |
+| Header, PC (round 2) | Solid surfaces instead of frosted glass (a blur was recomputed on every scroll frame on integrated graphics) | `no-blur` |
+| Reduced motion, PC (round 2: calm but alive) | A computer that asks for reduced motion still sees the page change, by fades only: the stage and the Spotlight keep turning by crossfade, a reel photo fades in over the last (no zoom), the search hint swaps whole every 3 s, a product panel fades in with its dim (no slide, no flight), the opening is its still frame and a 400 ms fade. Nothing rises, zooms, floats or flies; the count shows its number; a phone keeps it all still. The kill switch spares only elements marked `.calm-fade`, opacity only by construction | `calm`, `calm-alive` |
+| Pause (round 2) | The slideshow's pause button (and keyboard focus in it, or the stage scrolled away) also holds the reel and the light; the pause also stops the floats (WCAG 2.2.2) | `banner-reel` |
+| The opening | See "The opening" above | `opening-motion`, `opening-logo` |
+
 ## Release log
 
+- **The feel pass (29-Oct-2026, branch `market-feel`, released 30-Oct-2026 as `c559ac1`, web and API)** — the motion table above, the
+  Browse menu fix (released on its own on 29-Oct-2026 as `dbe8899`), a fresh design review's nine gaps
+  (Add never moves the page, a shelf's first frame draws sooner, one label style, an Orders page that
+  explains, Arabic chips and the ⌘K badge that read right, stronger hover), the opening made smooth
+  from the first pixel, and living slides. Guards are listed in `scripts/qa/README.md`. Round 2 (the
+  owner's laptop, desktop only): a product opens with the page still (`dcecaf4`), solid surfaces
+  (`cecb744`), the opening cheap on integrated graphics (`4930dd8`), the banner reel and the typed
+  search (`dd07157`), calm but alive and a pause that holds the banner (`d4580d9`); the Lenis glide
+  kept on measurement (native scrolling stalled 236-297 ms on his busy laptop, the glide 51-59 ms).
+  The release review (`4de3b07`): toasts and the opening keep moving under a layer (a toast froze
+  invisible over the panel's Add), no "0 lines" on load, the strip holds its row while the catalogue
+  arrives, the dim fades out, opaque bars.
 - **Polish, ship 1 (28-Oct-2026, branch `worktree-polish-market`, `6258a44` → `e15a774`, released on the
   owner's go)** — smoothness and honesty. The photo fade-in, Back that lands where you were, the page
   glide with page-shaped skeletons (`RouteOutlet`, `lib/lazyPage` with an idle warm-up of the main

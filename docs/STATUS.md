@@ -5,6 +5,25 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Live
 
+- The Browse menu fix (29-Oct-2026, `dbe8899`): the menu sits above the category strip, and a click keeps it open.
+- Live (30-Oct-2026, `c559ac1`, web and API; `docs/MARKETPLACE.md` § Motion and the release log): the
+  marketplace feel pass, the design review's fixes, the smooth opening and living slides; then round 2 for the
+  owner's laptop (desktop only, the phone unchanged): a product opens with the page still, solid surfaces instead of
+  frosted glass, the opening cheap on integrated graphics, the banner reel with the count and the light, the typed
+  search, and "calm but alive" for computers that ask for reduced motion (his Windows had animations off, so the
+  site stood still; switched on for him). The Lenis glide stays (measured against native scrolling on his laptop).
+  Released on the owner's go after an independent re-rate (live 5/10, new 7/10) and a code review, whose findings
+  were fixed first. Open: a panel's mount blocks ~120 ms headless (measure on his GPU), the calm panel photo pops
+  late, the opening's hold (his call), reel photos that look alike, no pause control for the search hint.
+- YQ Assist, the marketplace chat (release assist1, 29-Oct-2026; `docs/MARKETPLACE.md` § YQ Assist): the free-AI
+  repair, the chat with voice, photos and lists, and the portal page. The chat is shown only once the owner switches
+  it on in Settings (on since 29-Oct-2026). The fix for voice uploads (`5e0279c`) went live with assist2.
+- YQ Assist v2 (release assist2, live 29-Oct-2026 at `627d1f4`; `docs/MARKETPLACE.md` § YQ Assist v2): selling in
+  stock only, problem reports with tickets, escalation, the new look and the portal's YQ Assist tabs. Tickets are
+  still off and no policy answer is written yet, so every policy question goes to the rep.
+- YQ Assist 2.1, the salesman voice (release assist2.1, live 29-Oct-2026 ~20:35 at `3de9168`;
+  `docs/MARKETPLACE.md` § YQ Assist 2.1): it asks before guessing, one next step with quick replies, what shops buy
+  with an item, it speaks first, the bubble beside the button.
 - The marketplace polish, ship 1 (released 28-Oct-2026 on the owner's go; `docs/MARKETPLACE.md`, release log):
   smoother photos, pages, sheets and Back, honest prices when the price check is slow or down, and the QA
   harness's smoothness guards (`scripts/qa/smooth.py`). Open: ship 2, the same polish for the ops portal and the
@@ -110,6 +129,14 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 ## In progress
 
 - The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
+- YQ Assist 2.2 (release assist2.2), built 29-Oct-2026 on branch `worktree-assist-sales`, not released: the YQ mark
+  in the orb, a bubble that names something real and changes each visit, product names with the codes, one
+  conversation with a human voice (never the same reply twice, an order for "what should I order", help for "how can
+  you help me sell", an apology for a complaint), problems talked through before the rep, Arabic in the office's own
+  lines, "Tell me when it's back" in the chat (`docs/MARKETPLACE.md` § YQ Assist 2.2).
+  - Waiting for: the owner's review of the transcripts and the screenshots, then his go.
+  - Release steps: `docs/RELEASE.md` § Release assist2.2 (no migration).
+  - Scorecard: `python -m scripts.eval_assist`, with the new gate `fresh`.
 
 ## Not built (the engine prints "not built yet")
 

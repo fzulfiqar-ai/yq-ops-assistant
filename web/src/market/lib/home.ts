@@ -248,9 +248,9 @@ export function heroSplit(slides: readonly Slide[]): { hero: Slide[]; tiles: Sli
   return { hero: slides.filter((s) => !picked.has(s.id)).slice(0, 3), tiles: slides.filter((s) => picked.has(s.id)) }
 }
 
-export function pickedUpAgain(items: ShopItem[], inCart: Set<string>): ShopItem[] {
+export function pickedUpAgain(items: ShopItem[], inCart: Set<string>, viewed: string[] = recentlyViewed()): ShopItem[] {
   const byCode = new Map(items.map((i) => [i.item_code, i]))
-  return recentlyViewed()
+  return viewed
     .map((c) => byCode.get(c))
     .filter((i): i is ShopItem => Boolean(i) && !inCart.has(i!.item_code) && i!.stock_status !== 'out_of_stock')
     .slice(0, 8)

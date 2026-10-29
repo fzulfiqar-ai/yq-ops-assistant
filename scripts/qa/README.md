@@ -136,6 +136,61 @@ within its target is kept as a run note. Not run under `--reduced-motion` or `--
 A Playwright error inside one of them is the hard failure `smooth-error`. A check that finds nothing
 to measure (no quick-view card, no zoom button) is a warning, never a pass.
 
+**The Browse menu (`browse-menu`, 29-Oct-2026)** runs on every desktop width (1024×768 touch, 1366,
+1920, or the `--widths` given), in English and Arabic, on Home, on a fresh page. With a mouse:
+hovering Browse opens the menu with its first row on top (the category strip once painted over the
+menu's first 45 px, so a click there opened the strip's chip), a click on Browse while hovering keeps
+it open (it used to toggle shut what hover had opened), and a click on the first row opens that row's
+page. On the touch row: a tap opens the menu and a second tap closes it.
+
+**The feel pass (29-Oct-2026)** adds these, each written to fail on the build before it. The menu
+checks run with the Browse menu (every desktop width, both languages); the rest are on the lead
+viewports in English with the S-checks, except where the table says otherwise.
+
+| Check | Where | What passes |
+|---|---|---|
+| `menu-intent` / `menu-aim` | home, desktop | Browse opens after a short rest, so a passing mouse never flashes it; a diagonal move from the first category into its panel keeps that panel, and resting on a row switches to it |
+| `glide-scroll` | home | with a mouse, one wheel notch glides (it is still moving 250 ms in, rests within 1.5 s; its worst frame is a measured number, since headless Chrome paints on the CPU); a touch screen keeps native scrolling (no `html.lenis`) |
+| `glide-layers` | home, desktop | with the search palette open the wheel moves nothing behind it, and the page never shifts sideways |
+| `card-hover` / `press-spring` | home, desktop | a card under the mouse lifts ~4 px above its neighbours and its photo zooms to ~1.06; a pressed button gives and springs back past its size before it settles |
+| `first-screen` | home, desktop | a fresh visit: the category discs come in one after another and with their photos (held 500 ms, none is an empty circle), the hero photo is whole from the first frame, and the entrance lets go within 3 s; with the catalogue held 2.5 s it waits for the discs |
+| `calm` | home, desktop | under reduced motion: no glide, no entrance, no drift or title rise, every reveal shown, and (round 2) no running animation that moves anything: fades may run |
+| `opening-logo` | home, desktop | while the opening's code is held 1.2 s, the first frame's logo tile stays on screen |
+| `opening-motion` | home, desktop + phone | with the opening's code held 0.9 s: the served first frame already moves (the dawn rises from the first paint), the opening carries that dawn on instead of restarting it, nothing large is drawn through a live `filter`, the exit is booked when the opening mounts (a timer started it, so a busy page delayed it or cut it), and something keeps moving through the hold. Its frame rate is measured in real Chrome, not here |
+| `reveal-wave` | home, desktop | a grid row's cards rise in reading order (right to left in Arabic) from ~24 px, never blurred, and a section title below the fold rises with the scroll |
+| `hero-drift` / `header-shadow` | home, desktop | leaving the top slider it scrolls slower and dims; the header gains a soft shadow once the page moves (both where the browser has scroll timelines) |
+| `hover-pill` | home, desktop | one pill element slides between the header strip's chips under the mouse |
+| `add-flight` | home, desktop + phone | Add sends one copy of the photo to the visible cart (the mini-cart column, the Restock button, or the phone's Restock tab, whose bar comes back for it); it is gone within a second, the card moves ≤ 8 px, the count rolls and the stepper comes in. From the keypad it flies only once the keypad has gone; from the palette it does not fly at all (the cart is under its dim) |
+| `page-glide` | home, desktop | an in-app page change rises 16 px over ~320 ms |
+
+**The design review's polish (29-Oct-2026)** runs on Home and Cable, on the lead viewports, in both
+languages, each check on a fresh page:
+
+| Check | Where | What passes |
+|---|---|---|
+| `caps-labels` | home, category | no tracked ALL-CAPS label, light or night, the whole page scrolled through (the opening's Skip is not on these pages) |
+| `bidi-chips` | category + the Browse menu, Arabic | each chip's count sits after its label, and each label reads right to left (a `dir="auto"` island turned "USB إلى C" round) |
+| `kbd-badge` | home, Arabic, ≥ 1280 px | the search box's shortcut badge reads ⌘K left to right |
+| `slides-alive` | home (English, desktop + phone), category (both languages) | a product slide is never a still picture: through its dwell the discs keep floating and the art breathes in (≥ 0.5 px each in 0.9 s, once the spring into the fan has settled) |
+
+The empty Orders page must show its "How an order moves" steps (a needle of the `orders` state).
+
+**Round 2 (29-Oct-2026, evening: smooth on the owner's laptop, motion he can see)** adds these on the
+desktop lead viewport in English, each written to fail on the build before it:
+
+| Check | Where | What passes |
+|---|---|---|
+| `panel-still` | home, desktop | opening a product (a real click) moves nothing on the page: the header, a neighbouring card and every fixed element hold still (≤ 1 px), the drawer never steps sideways, no layout shift, the dim is not blurred, the photo lands on the panel's photo (± 4 px), and once open nothing behind keeps animating. Run it headed too: a headless browser has no scrollbar to step by |
+| `no-blur` | home, desktop | nothing is drawn through a `backdrop-filter` at rest, under a product panel or under the palette (the chat panel aside), and no lasting `will-change` or `clip-path` animation; the header bars are fully opaque |
+| `opening-motion` | home, desktop + phone | as above, and once risen the night frame stands still: nothing larger than half the screen is scaled or looped through the hold |
+| `banner-reel` | home + category, desktop | the banner's centre disc turns through ≥ 2 products within 5.6 s of the page settling, and no disc is ever left white (the old photo gone before the new one arrived); on Home, the slideshow's pause button holds the reel and the light |
+| `calm-alive` | home, desktop | under reduced motion the page is calm but alive: within 6.5 s the banner changes (a slide or a reel photo) and the search hint changes, a product panel fades in (≥ 120 ms from first sight to whole), and nothing moves (no transform animation runs, the panel never slides) |
+| `search-typing` | home, desktop, both languages | the header's search hint is typed: an example appears a character at a time (≥ 3 characters within 1.2 s, in steps of one or two), is erased and the next one typed, never showing a lone opening quote; with the trigger focused it stands on a whole example |
+| `layer-overlays` | home, desktop | with a layer open the page holds still, but not what lives above it: a toast fired under an open product panel shows (it froze invisible yet caught the clicks meant for the panel's Add), and the opening, the toasts and the chat's button keep their motion |
+| `strip-held` | home, desktop | with the catalogue 2 s late, the category strip and the deals link hold their place from the first paint: the page never drops when the categories arrive (it fell 45 px) |
+| `count-on-load` | home, desktop | the banner's number stays whole on a slide's first view: it counts up only as a slide comes on stage (on load it read 24, then 0, then counted back) |
+| `dim-fades` | home, desktop | closing a panel, the dim fades out with it over several frames (it cut out in one) |
+
 ## How it measures
 
 - **Sweep, not one screen.** Geometry and text checks run at the top of the page and then one screen

@@ -368,7 +368,8 @@ def reveal_flick(page: Page, speed: int = 4000, px: int = 6000) -> list[Finding]
     page.evaluate("() => window.scrollTo(0, 0)")
     page.wait_for_timeout(300)
     page.evaluate(SCROLL_FRAMES, {"speed": speed, "px": px})
-    page.wait_for_timeout(450)
+    # long enough for the PC reveal (560 ms + up to 6 x 60 ms of wave, F4): a node still rising is not stuck
+    page.wait_for_timeout(1000)
     r = page.evaluate(REVEAL_STATE)
     page.evaluate("() => window.scrollTo(0, 0)")
     out: list[Finding] = []
@@ -466,9 +467,15 @@ def photo_flight(page: Page, quick_view: str) -> list[Finding]:
     except PWError:
         return [("warn", "photo-flight", "M4: the card's photo did not load, not measured", None)]
     btn.evaluate("(el) => el.click()")
-    page.wait_for_timeout(80)
+    # sampled once the sheet is there: a script click sends no pointerdown, so the panel's code may
+    # still be loading (it warms at idle or on a press) and the sheet, and its flight, come later
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=3000)
+    except PWError:
+        pass
+    page.wait_for_timeout(60)
     during = page.evaluate(FLYING)
-    page.wait_for_timeout(900)
+    page.wait_for_timeout(1400)
     after = page.evaluate(FLYING)
     vals = {"during": during, "after": after}
     x = page.locator('[role="dialog"] button[aria-label="Close"]')
@@ -664,3 +671,1658 @@ def sheet_drag(page: Page, quick_view: str, close: str) -> list[Finding]:
         x_btn.first.evaluate("(el) => el.click()")
         page.wait_for_timeout(500)
     return out
+
+
+# ── Browse menu (29-Oct-2026) ──────────────────────────────────────────────────────────────────
+# The owner's report: with a mouse, the category strip painted over the menu's first 45 px (each
+# frosted layer was its own stacking context), so a click on the menu's first row opened the strip
+# chip under it; and a click on Browse closed the menu that hovering had just opened.
+MENU_STATE = r"""
+() => {
+  const btn = document.querySelector('header button[aria-haspopup]');
+  const menu = document.querySelector('header [role="menu"]');
+  const out = { expanded: btn ? btn.getAttribute('aria-expanded') === 'true' : null, menu: !!menu };
+  const first = menu && menu.querySelector('[role="menuitem"]');
+  if (!first) return out;
+  const r = first.getBoundingClientRect();
+  const x = r.left + Math.min(24, r.width / 2);
+  const y = r.top + r.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  return { ...out, first: (first.textContent || '').trim(), href: first.getAttribute('href'), x, y,
+           onTop: !!(hit && menu.contains(hit)), hit: hit ? (hit.textContent || '').trim().slice(0, 40) : null };
+}
+"""
+
+
+def _menu_open(state: dict) -> bool:
+    return bool(state.get("expanded") and state.get("menu"))
+
+
+def browse_menu(page: Page) -> list[Finding]:
+    """With a mouse: (a) hovering Browse opens the menu with its first row on top, (b) a click on Browse
+    while hovering keeps it open, (c) a click on the menu's first row opens that row's page."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "browse-menu", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    page.wait_for_timeout(200)
+    btn.hover()
+    page.wait_for_timeout(700)
+    a = page.evaluate(MENU_STATE)
+    if not _menu_open(a):
+        return [("fail", "browse-menu", "hovering Browse did not open the menu", a)]
+    out: list[Finding] = []
+    if not a.get("onTop"):
+        out.append(("fail", "browse-menu", f"the menu's first row \"{a.get('first')}\" is covered: a click there lands on \"{a.get('hit')}\"", a))
+    page.mouse.down()
+    page.mouse.up()
+    page.wait_for_timeout(600)
+    b = page.evaluate(MENU_STATE)
+    if not _menu_open(b):
+        out.append(("fail", "browse-menu", "a click on Browse while hovering it closed the menu", b))
+        page.mouse.move(4, page.viewport_size["height"] - 4)
+        page.wait_for_timeout(500)
+        btn.hover()
+        page.wait_for_timeout(700)
+        b = page.evaluate(MENU_STATE)
+        if not _menu_open(b):
+            return out + [("fail", "browse-menu", "the menu did not open again on hover", b)]
+    # a real click at the first row's spot, reached the way a slow hand does: straight down from
+    # Browse, resting 250 ms over the space between the button and the menu (a gap there let the
+    # menu's 160 ms close timer win, and the click landed on the strip under it)
+    # (from Browse's centre, so the path is the same in Arabic, where the menu hangs from its right)
+    box = btn.bounding_box()
+    x = box["x"] + box["width"] / 2 if box else b["x"]
+    gap_y = box["y"] + box["height"] + 2 if box else b["y"]
+    page.mouse.move(x, gap_y, steps=4)
+    page.wait_for_timeout(250)
+    page.mouse.move(x, b["y"], steps=4)
+    page.wait_for_timeout(150)
+    page.mouse.click(x, b["y"])
+    try:
+        page.wait_for_url(lambda u: urlparse(u).path != "/", timeout=4000)
+    except PWError:
+        pass
+    page.wait_for_timeout(300)
+    landed = urlparse(page.url).path
+    vals = {"row": b.get("first"), "href": b.get("href"), "landed": landed}
+    if landed != b.get("href"):
+        out.append(("fail", "browse-menu", f"a click on the menu's first row \"{b.get('first')}\" opened {landed}, not {b.get('href')}", vals))
+    if not out:
+        out.append(("note", "browse-menu", f"hover opens the menu on top, a click keeps it open, its first row opens {landed}", vals))
+    return out
+
+
+MENU_ROWS = r"""
+() => {
+  const menu = document.querySelector('header [role="menu"]');
+  if (!menu) return null;
+  const rows = [...menu.querySelectorAll('[role="menuitem"]')].slice(0, 4).map((r) => {
+    const b = r.getBoundingClientRect();
+    return { x: b.left + b.width / 2, y: b.top + b.height / 2, left: b.left, right: b.right };
+  });
+  const title = menu.querySelector('h3');
+  const panel = title ? title.parentElement.parentElement.getBoundingClientRect() : null;
+  return { rows, title: title ? title.textContent.trim() : null, rtl: document.documentElement.dir === 'rtl',
+           panel: panel ? { left: panel.left, right: panel.right, top: panel.top, bottom: panel.bottom } : null };
+}
+"""
+
+
+INTENT_PROBE = r"""
+() => {
+  const btn = document.querySelector('header button[aria-haspopup]');
+  window.__qaIntent = { enter: null, open: null };
+  btn.parentElement.addEventListener('pointerenter', () => { if (window.__qaIntent.enter == null) window.__qaIntent.enter = performance.now(); });
+  new MutationObserver(() => {
+    if (btn.getAttribute('aria-expanded') === 'true' && window.__qaIntent.open == null) window.__qaIntent.open = performance.now();
+  }).observe(btn, { attributes: true, attributeFilter: ['aria-expanded'] });
+}
+"""
+
+
+def menu_intent(page: Page) -> list[Finding]:
+    """K1: the menu opens after a short rest on Browse, so a mouse passing over it on its way
+    elsewhere never flashes it open; resting on it still opens it. Timed inside the page, from the
+    pointer's arrival to the menu opening, so a slow machine cannot skew it."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "menu-intent", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    page.wait_for_timeout(300)
+    page.evaluate(INTENT_PROBE)
+    btn.hover()
+    page.wait_for_timeout(700)
+    r = page.evaluate("() => window.__qaIntent")
+    if r["open"] is None or r["enter"] is None:
+        return [("fail", "menu-intent", "resting on Browse did not open the menu", r)]
+    delay = round(r["open"] - r["enter"])
+    vals = {"open_after_ms": delay}
+    if delay < 60:
+        return [("fail", "menu-intent", f"the menu opened {delay} ms after the mouse arrived: a pass over Browse flashes it open", vals)]
+    return [("note", "menu-intent", f"the menu opens {delay} ms after the mouse rests on Browse", vals)]
+
+
+def menu_aim(page: Page) -> list[Finding]:
+    """K1: a hand moving diagonally from the first category into its panel crosses the next rows
+    without switching the panel to them; resting on a row still switches to it."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "menu-aim", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    btn.hover()
+    page.wait_for_timeout(700)
+    m = page.evaluate(MENU_ROWS)
+    if not m or len(m["rows"]) < 4 or not m["panel"]:
+        return [("warn", "menu-aim", "the menu has fewer than four rows or no panel, not measured", m)]
+    r0, r3 = m["rows"][0], m["rows"][3]
+    page.mouse.move(r0["x"], r0["y"], steps=6)
+    page.wait_for_timeout(400)
+    at_first = page.evaluate(MENU_ROWS)
+    if not at_first:
+        return [("fail", "menu-aim", "the menu closed while the hand moved onto its first row", None)]
+    first = at_first["title"]
+    # diagonally into the panel, ending level with the fourth row: the second and third rows are crossed
+    edge = m["panel"]["right"] - 40 if m["rtl"] else m["panel"]["left"] + 40
+    page.mouse.move(edge, r3["y"], steps=8)
+    page.wait_for_timeout(350)
+    after = (page.evaluate(MENU_ROWS) or {}).get("title")
+    out: list[Finding] = []
+    vals = {"first": first, "after_diagonal": after}
+    if after != first:
+        out.append(("fail", "menu-aim", f"heading from \"{first}\" into its panel switched it to \"{after}\" on the way", vals))
+    # back on the list, resting on the fourth row: it takes over
+    page.mouse.move(r3["x"], r3["y"], steps=6)
+    page.wait_for_timeout(450)
+    rested = (page.evaluate(MENU_ROWS) or {}).get("title")
+    vals["rested_on_fourth"] = rested
+    if rested == first:
+        out.append(("fail", "menu-aim", "resting on the fourth row did not switch the panel to it", vals))
+    return out or [("note", "menu-aim", f"the diagonal keeps \"{first}\"; resting on a row switches to \"{rested}\"", vals)]
+
+
+# ── K3 cards that respond, K5 press feel (29-Oct-2026) ────────────────────────────────────────────
+CARD_STATE = r"""
+(code) => {
+  const art = document.querySelector('[data-qa-card="' + code + '"]');
+  if (!art) return null;
+  const ty = new DOMMatrixReadOnly(getComputedStyle(art).transform === 'none' ? undefined : getComputedStyle(art).transform).m42;
+  const img = art.querySelector('.m-photo-img');
+  const t = img && getComputedStyle(img).transform;
+  const scale = t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1;
+  return { lift: Math.round(ty * 10) / 10, scale: Math.round(scale * 1000) / 1000, z: getComputedStyle(art).zIndex };
+}
+"""
+
+
+def _first_grid_card(page: Page):
+    """the first visible grid card with a photo, marked for the probes (data-qa-card)"""
+    return page.evaluate(r"""() => {
+      const cards = [...document.querySelectorAll('main article[data-stock]')].filter((a) => {
+        const r = a.getBoundingClientRect(); return r.width > 150 && r.top > 90 && r.bottom < innerHeight - 20 && a.querySelector('.m-photo-img');
+      });
+      const a = cards[0]; if (!a) return null;
+      a.dataset.qaCard = 'probe';
+      const r = a.getBoundingClientRect();
+      return { code: 'probe', x: r.left + r.width / 2, y: r.top + r.height * 0.35 };
+    }""")
+
+
+def card_hover(page: Page) -> list[Finding]:
+    """K3, a mouse: a card under the pointer lifts (~4 px) and its photo zooms slowly (~1.06)."""
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    c = _first_grid_card(page)
+    if not c:
+        return [("warn", "card-hover", "K3: no grid card on screen, not measured", None)]
+    page.mouse.move(c["x"], c["y"], steps=4)
+    page.wait_for_timeout(900)
+    s = page.evaluate(CARD_STATE, c["code"])
+    page.mouse.move(4, 4)
+    if not s:
+        return [("warn", "card-hover", "K3: the probed card went away, not measured", None)]
+    out: list[Finding] = []
+    if s["lift"] > -3.5:
+        out.append(("fail", "card-hover", f"K3: a hovered card lifts {abs(s['lift'])}px (it should rise about 4 px)", s))
+    if s["scale"] < 1.05:
+        out.append(("fail", "card-hover", f"K3: a hovered card's photo zooms to {s['scale']} (it should settle near 1.06)", s))
+    if s.get("z") in (None, "auto", "0"):
+        out.append(("fail", "card-hover", "K3: a hovered card stays level with its neighbours, so the row below cuts its shadow", s))
+    return out or [("note", "card-hover", f"K3: a hovered card lifts {abs(s['lift'])}px and its photo zooms to {s['scale']}", s)]
+
+
+PRESS_TRACK = r"""
+(ms) => {
+  const b = document.querySelector('[data-qa-press]');
+  window.__qaPress = [];
+  const t0 = performance.now();
+  const loop = () => {
+    const t = getComputedStyle(b).transform;
+    window.__qaPress.push(t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1);
+    if (performance.now() - t0 < ms) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+
+def press_spring(page: Page) -> list[Finding]:
+    """K5: a pressed button gives (scales down), and on release springs back past its size for a
+    moment before it settles, the way a physical key does."""
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    box = page.evaluate(r"""() => {
+      const btns = [...document.querySelectorAll('main article[data-stock] button[aria-label]')].filter((b) => {
+        const r = b.getBoundingClientRect(); const s = getComputedStyle(b);
+        return r.width >= 36 && r.top > 90 && r.bottom < innerHeight - 20 && /^(Add|\+)/.test((b.getAttribute('aria-label') || '') + '') && s.visibility !== 'hidden';
+      });
+      const b = btns[0]; if (!b) return null;
+      b.dataset.qaPress = '1';
+      const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }""")
+    if not box:
+        return [("warn", "press-spring", "K5: no Add button on screen, not measured", None)]
+    page.mouse.move(box["x"], box["y"])
+    page.wait_for_timeout(300)
+    page.mouse.down()
+    page.wait_for_timeout(220)
+    pressed = page.evaluate("() => { const t = getComputedStyle(document.querySelector('[data-qa-press]')).transform; return t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1 }")
+    page.evaluate(PRESS_TRACK, 700)
+    # release without a click landing on the card: move off first, then let go
+    page.mouse.move(4, 4)
+    page.mouse.up()
+    page.wait_for_timeout(800)
+    trace = page.evaluate("() => window.__qaPress || []")
+    peak = max(trace) if trace else 1
+    vals = {"pressed_scale": round(pressed, 3), "release_peak": round(peak, 4), "frames": len(trace)}
+    page.keyboard.press("Escape")
+    out: list[Finding] = []
+    if pressed > 0.985:
+        out.append(("fail", "press-spring", f"K5: a pressed Add button barely gives (scale {pressed:.3f})", vals))
+    if peak <= 1.0005:
+        out.append(("fail", "press-spring", "K5: on release the button eases back without a spring (it never passes its own size)", vals))
+    return out or [("note", "press-spring", f"K5: a press gives to {pressed:.3f} and springs back past 1 (peak {peak:.4f})", vals)]
+
+
+# ── F5 first screen, F4 PC reveal (29-Oct-2026) ────────────────────────────────────────────────
+def first_screen(page: Page, base: str) -> list[Finding]:
+    """F5, a mouse PC, a fresh visit: the category discs come in one after another, the hero's photo
+    is fully there from the first frame (the page is never later to show), and the entrance lets go
+    of the page (html[data-intro] is gone) within 3 s."""
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    try:
+        page.wait_for_selector("main ul li a[href^='/t/']", timeout=15000)
+    except PWError:
+        return [("warn", "first-screen", "F5: no category discs on Home, not measured", None)]
+    r = page.evaluate(r"""() => {
+      const discs = [...document.querySelectorAll('main ul li a[href^="/t/"]')].slice(0, 8).map((a) => a.closest('li'));
+      const anim = discs.map((li) => { const a = li.getAnimations().find((x) => x.animationName === 'm-intro'); return a ? Math.round(a.effect.getTiming().delay) : null; });
+      // the slider itself (its photos have their own load fade): never part of the entrance
+      const hero = document.querySelector('main [aria-roledescription="carousel"]');
+      const heroAnimated = hero ? hero.getAnimations({ subtree: false }).some((x) => x.animationName === 'm-intro') : false;
+      return { delays: anim, intro: document.documentElement.hasAttribute('data-intro'), heroOpacity: hero ? getComputedStyle(hero).opacity : null, heroAnimated };
+    }""")
+    page.wait_for_timeout(3200)
+    left = page.evaluate("() => document.documentElement.hasAttribute('data-intro')")
+    vals = {**r, "intro_after_3s": left}
+    out: list[Finding] = []
+    d = [x for x in r["delays"] if x is not None]
+    if len(d) < 3 or d != sorted(d) or d[-1] == d[0]:
+        out.append(("fail", "first-screen", f"F5: the category discs do not come in one after another (delays {r['delays']})", vals))
+    if r["heroOpacity"] not in (None, "1") or r["heroAnimated"]:
+        out.append(("fail", "first-screen", f"F5: the hero photo starts hidden (opacity {r['heroOpacity']}): the page would show late", vals))
+    if left:
+        out.append(("fail", "first-screen", "F5: the entrance still holds the page after 3 s (html[data-intro])", vals))
+    return out or [("note", "first-screen", f"F5: the discs come in one after another ({d[0]}-{d[-1]} ms), the hero is there at once", vals)]
+
+
+def first_screen_slow(page: Page, base: str, delay_ms: int = 2500) -> list[Finding]:
+    """F5 on a slow first visit (final review, 29-Oct-2026): the catalogue arrives late, so the discs
+    mount late; the entrance waits for them instead of being switched off on a wall clock."""
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/(api|public)/market(\?.*)?$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    try:
+        page.wait_for_selector("main ul li.intro-disc", timeout=20000)
+    except PWError:
+        return [("warn", "first-screen", "F5: no category discs on Home, not measured", None)]
+    r = page.evaluate(r"""() => {
+      const discs = [...document.querySelectorAll('main ul li.intro-disc')].slice(0, 8);
+      return { intro: document.documentElement.hasAttribute('data-intro'), running: discs.filter((li) => li.getAnimations().some((a) => a.animationName === 'm-intro')).length, discs: discs.length };
+    }""")
+    page.wait_for_timeout(3000)
+    page.unroute_all(behavior="ignoreErrors")
+    r["intro_after_3s"] = page.evaluate("() => document.documentElement.hasAttribute('data-intro')")
+    if not r["intro"] or r["running"] < 3:
+        return [("fail", "first-screen", f"F5: with the catalogue {delay_ms} ms late the discs got no entrance ({r['running']} of {r['discs']} animating)", r)]
+    if r["intro_after_3s"]:
+        return [("fail", "first-screen", "F5: the entrance still held the page 3 s after the late discs came", r)]
+    return [("note", "first-screen", f"F5: with the catalogue {delay_ms} ms late the discs still come in one after another", r)]
+
+
+def calm(page: Page, base: str) -> list[Finding]:
+    """Under reduced motion nothing of the feel pass runs: no wheel glide, no entrance, no drift or title
+    rise, and every reveal is shown (the plan's `calm` guard). Round 2 (calm but alive): fades may run,
+    but nothing that moves - no running animation carries a transform, translate, scale or rotate."""
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.wait_for_timeout(2500)
+    r = page.evaluate(r"""() => {
+      const names = new Set(document.getAnimations().map((a) => a.animationName).filter(Boolean));
+      return { lenis: document.documentElement.classList.contains('lenis'), intro: document.documentElement.hasAttribute('data-intro'),
+        moving: ['m-intro', 'm-hero-drift', 'm-title-rise', 'm-header-lift'].filter((n) => names.has(n)),
+        // a transform animation that runs (one the kill switch collapsed to 0.01 ms only lands: not motion)
+        movers: document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.getComputedTiming().duration > 1 && a.effect.getKeyframes().some((k) => ['transform', 'translate', 'scale', 'rotate'].some((p) => k[p] && k[p] !== 'none'))).map((a) => a.animationName || a.transitionProperty || 'waapi'),
+        hidden: [...document.querySelectorAll('.reveal')].filter((n) => parseFloat(getComputedStyle(n).opacity) < 0.99).length };
+    }""")
+    out: list[Finding] = []
+    if r["lenis"]:
+        out.append(("fail", "calm", "reduced motion still glides the wheel (html.lenis)", r))
+    if r["intro"] or r["moving"]:
+        out.append(("fail", "calm", f"reduced motion still plays: {', '.join(r['moving']) or 'the entrance'}", r))
+    if r["hidden"]:
+        out.append(("fail", "calm", f"reduced motion hides {r['hidden']} reveal nodes", r))
+    if r["movers"]:
+        out.append(("fail", "calm", "reduced motion still moves something: " + ", ".join(r["movers"][:5]), r))
+    return out or [("note", "calm", "reduced motion: no glide, no entrance, no drift, nothing hidden", r)]
+
+
+def opening_logo(page: Page, base: str, delay_ms: int = 1200) -> list[Finding]:
+    """F5 / the opening (design review, 29-Oct-2026): while the opening's code is still arriving, the
+    logo tile of the first frame stays on screen - a plain night field used to cover it for ~1 s."""
+    page.add_init_script("try { sessionStorage.removeItem('yq-splash-session'); localStorage.removeItem('yq-splash-at') } catch (e) {}")
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/assets/Splash-[^/]+\.js$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    page.wait_for_timeout(250)
+    seen = page.evaluate(r"""(ms) => new Promise((done) => {
+      const out = []; const t0 = performance.now();
+      const look = () => {
+        const tile = document.querySelector('#yq-boot img');
+        let state = 'no boot frame';
+        if (document.querySelector('[data-splash]')) state = 'opening';
+        else if (tile) { const r = tile.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); state = hit && (hit === tile || tile.contains(hit) || hit.closest('#yq-boot')) ? 'logo' : 'covered'; }
+        out.push(state);
+        if (performance.now() - t0 < ms) requestAnimationFrame(look); else done(out);
+      };
+      look();
+    })""", delay_ms)
+    page.unroute_all(behavior="ignoreErrors")
+    covered = seen.count("covered")
+    vals = {"frames": len(seen), "covered": covered, "states": sorted(set(seen))}
+    if covered:
+        return [("fail", "opening-logo", f"the logo of the first frame was covered for {covered} frames while the opening loaded", vals)]
+    return [("note", "opening-logo", "the logo stays on screen until the opening takes over", vals)]
+
+
+def discs_with_photos(page: Page, base: str, photo_delay_ms: int = 500) -> list[Finding]:
+    """F5 (design review): the category discs come in with their photos, not as empty circles that
+    fill in later - their entrance waits for the photos (a little, never long)."""
+    def slow(route):
+        page.wait_for_timeout(photo_delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/thumbs/.*\.(webp|png|jpg)(\?.*)?$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    try:
+        page.wait_for_selector("main ul li.intro-disc", timeout=20000)
+    except PWError:
+        return [("warn", "first-screen", "F5: no category discs on Home, not measured", None)]
+    r = page.evaluate(r"""() => new Promise((done) => {
+      const t0 = performance.now();
+      const look = () => {
+        const discs = [...document.querySelectorAll('main ul li.intro-disc')].slice(0, 8);
+        const started = discs.filter((li) => { const a = li.getAnimations().find((x) => x.animationName === 'm-intro'); return a && a.playState === 'running' && a.currentTime > 0 && parseFloat(getComputedStyle(li).opacity) > 0.05; });
+        if (started.length || performance.now() - t0 > 3000) {
+          const empty = started.filter((li) => { const i = li.querySelector('img'); return !i || !i.complete || !i.naturalWidth; }).length;
+          return done({ started: started.length, empty });
+        }
+        requestAnimationFrame(look);
+      };
+      look();
+    })""")
+    page.unroute_all(behavior="ignoreErrors")
+    if r["started"] and r["empty"]:
+        return [("fail", "first-screen", f"F5: {r['empty']} of {r['started']} discs came in before their photos (empty circles)", r)]
+    return [("note", "first-screen", "F5: the discs come in with their photos", r)]
+
+
+def reveal_wave(page: Page) -> list[Finding]:
+    """F4, a PC: the cards of a grid row rise left to right (right to left in Arabic), from further
+    down (about 24 px), and a section title below the fold rises with the scroll."""
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(800)
+    r = page.evaluate(r"""() => {
+      const rows = [...document.querySelectorAll('main .reveal:not(.is-in)')].filter((n) => n.getBoundingClientRect().top > innerHeight + 40);
+      const first = rows[0]; if (!first) return null;
+      const top = Math.round(first.getBoundingClientRect().top);
+      const row = rows.filter((n) => Math.abs(Math.round(n.getBoundingClientRect().top) - top) < 4).slice(0, 6);
+      const xs = row.map((n) => n.getBoundingClientRect().left);
+      const delays = row.map((n) => parseFloat(getComputedStyle(n).transitionDelay) * 1000);
+      const ty = new DOMMatrixReadOnly(getComputedStyle(first).transform === 'none' ? undefined : getComputedStyle(first).transform).m42;
+      const tile = first.querySelector('.m-photo'); const img = first.querySelector('.m-photo-img');
+      const tileBlur = tile ? /blur/.test(getComputedStyle(tile).filter) : null;
+      const imgBlur = img ? /blur/.test(getComputedStyle(img).filter) : null;
+      const head = [...document.querySelectorAll('[data-section-head] > :first-child')].find((h) => h.getBoundingClientRect().top > innerHeight + 40);
+      const titleAnim = head ? (head.getAnimations().find((a) => a.animationName === 'm-title-rise') ? 'm-title-rise' : null) : 'no title below the fold';
+      return { xs, delays, ty, rtl: document.documentElement.dir === 'rtl', titleAnim, tileBlur, imgBlur };
+    }""")
+    if not r or len(r["delays"]) < 3:
+        return [("warn", "reveal-wave", "F4: no grid row below the fold, not measured", r)]
+    order = sorted(range(len(r["xs"])), key=lambda i: r["xs"][i], reverse=r["rtl"])
+    by_reading = [r["delays"][i] for i in order]
+    out: list[Finding] = []
+    if by_reading != sorted(by_reading) or by_reading[-1] - by_reading[0] < 100:
+        out.append(("fail", "reveal-wave", f"F4: a row's cards do not rise in reading order (delays {by_reading} ms)", r))
+    if r["ty"] < 20:
+        out.append(("fail", "reveal-wave", f"F4: a card waits only {r['ty']:.0f}px below its place (a PC rise is about 24 px)", r))
+    if r["titleAnim"] is None:
+        out.append(("fail", "reveal-wave", "F4: a section title below the fold does not rise with the scroll", r))
+    if r.get("imgBlur") or r.get("tileBlur"):
+        out.append(("fail", "reveal-wave", "F4: an arriving photo is blurred (the focus effect was dropped: it cost 8-12 long frames per flick)", r))
+    return out or [("note", "reveal-wave", f"F4: a row rises in reading order ({by_reading} ms) from {r['ty']:.0f}px; titles rise with the scroll", r)]
+
+
+# ── K2 hover glide (29-Oct-2026) ───────────────────────────────────────────────────────────────
+PILL = r"""
+(sel) => {
+  const items = [...document.querySelectorAll(sel)].filter((a) => a.getBoundingClientRect().width > 0);
+  if (items.length < 2) return null;
+  return items.slice(0, 2).map((a) => { const r = a.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, w: r.width }; });
+}
+"""
+PILL_STATE = r"""
+(sel) => {
+  const a = document.querySelector(sel);
+  const box = a && a.parentElement;
+  const pills = box ? [...box.querySelectorAll(':scope > [data-hover-pill]')] : [];
+  if (!pills.length) return { pills: 0 };
+  const p = pills[0]; const r = p.getBoundingClientRect();
+  return { pills: pills.length, on: p.dataset.on || null, left: r.left, w: r.width, el: p.dataset.qaSeen || (p.dataset.qaSeen = 'x' + Math.random().toString(36).slice(2)) };
+}
+"""
+
+
+def hover_pill(page: Page) -> list[Finding]:
+    """K2, a mouse: one soft pill slides under whichever category chip in the header strip the mouse
+    is on — the same element moving from chip to chip, not each chip lighting up on its own."""
+    sel = "header a[href^='/t/']"
+    pos = page.evaluate(PILL, sel)
+    if not pos:
+        return [("warn", "hover-pill", "K2: fewer than two chips in the header strip, not measured", None)]
+    page.mouse.move(pos[0]["x"], pos[0]["y"], steps=3)
+    page.wait_for_timeout(400)
+    a = page.evaluate(PILL_STATE, sel)
+    page.mouse.move(pos[1]["x"], pos[1]["y"], steps=3)
+    page.wait_for_timeout(400)
+    b = page.evaluate(PILL_STATE, sel)
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    vals = {"first": a, "second": b, "chips": pos}
+    if not a.get("pills"):
+        return [("fail", "hover-pill", "K2: no hover pill in the header strip (each chip lights up on its own)", vals)]
+    out: list[Finding] = []
+    if a.get("el") != b.get("el") or b.get("pills") != 1:
+        out.append(("fail", "hover-pill", "K2: the hover pill is not one element moving between chips", vals))
+    if abs(b["left"] - pos[1]["left"]) > 3 or abs(b["w"] - pos[1]["w"]) > 3 or b.get("on") != "1":
+        out.append(("fail", "hover-pill", "K2: the pill did not settle under the second chip", vals))
+    return out or [("note", "hover-pill", "K2: one pill slides from chip to chip under the mouse", vals)]
+
+
+# ── K7 page glide, F2 hero drift, F3 header shadow (29-Oct-2026) ──────────────────────────────────
+def page_glide(page: Page) -> list[Finding]:
+    """K7, a PC: an in-app page change glides in with presence (a 16 px rise over about 320 ms)."""
+    link = page.locator("header a[href^='/t/']").first
+    if link.count() == 0:
+        return [("warn", "page-glide", "K7: no category link in the header strip, not measured", None)]
+    link.click()
+    # the glide starts when the new page commits (its code may still be arriving): watch for it
+    r = page.evaluate(r"""() => new Promise((done) => {
+      const t0 = performance.now();
+      const look = () => {
+        const a = document.getAnimations().find((x) => (x.animationName || '').startsWith('m-page-in') && x.playState === 'running');
+        if (a || performance.now() - t0 > 2500) return done(a || null);
+        requestAnimationFrame(look);
+      };
+      look();
+    }).then((a) => {
+      if (!a) return null;
+      const k = a.effect.getKeyframes()[0];
+      const m = k && k.transform ? k.transform.match(/translateY\((\d+(?:\.\d+)?)px\)/) || k.transform.match(/translate3d\(0(?:px)?, (\d+(?:\.\d+)?)px/) : null;
+      return { ms: Math.round(a.effect.getTiming().duration), rise: m ? parseFloat(m[1]) : null };
+    })""")
+    if not r:
+        return [("warn", "page-glide", "K7: the new page played no glide (a warm page with the same key?), not measured", None)]
+    out: list[Finding] = []
+    if r["ms"] < 300 or (r["rise"] or 0) < 14:
+        out.append(("fail", "page-glide", f"K7: the page glides {r['rise']}px over {r['ms']} ms (a PC page change rises about 16 px over 320 ms)", r))
+    return out or [("note", "page-glide", f"K7: the page glides {r['rise']}px over {r['ms']} ms", r)]
+
+
+def hero_drift(page: Page) -> list[Finding]:
+    """F2, a PC: scrolling away from the top slider, it drifts (moves down against the page, so it
+    scrolls slower) and dims a little — where the browser has scroll timelines."""
+    if not page.evaluate("() => CSS.supports('animation-timeline: view()')"):
+        return [("note", "hero-drift", "F2: no scroll timelines in this browser: the slider stands still (by design)", None)]
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(500)
+    page.evaluate("() => window.scrollTo(0, 320)")
+    page.wait_for_timeout(500)
+    r = page.evaluate(r"""() => {
+      const h = document.querySelector('.hero-drift');
+      if (!h) return null;
+      const t = getComputedStyle(h).transform;
+      return { ty: t && t !== 'none' ? Math.round(new DOMMatrixReadOnly(t).m42) : 0, opacity: parseFloat(getComputedStyle(h).opacity) };
+    }""")
+    page.evaluate("() => window.scrollTo(0, 0)")
+    if not r:
+        return [("fail", "hero-drift", "F2: the top slider has no drift (no .hero-drift)", None)]
+    if r["ty"] < 8 or r["opacity"] > 0.97:
+        return [("fail", "hero-drift", f"F2: 320 px down the slider drifted {r['ty']}px and dimmed to {r['opacity']:.2f}", r)]
+    return [("note", "hero-drift", f"F2: 320 px down the slider drifts {r['ty']}px and dims to {r['opacity']:.2f}", r)]
+
+
+def header_shadow(page: Page) -> list[Finding]:
+    """F3, a PC: the sticky header is flat at the top of the page and gains a soft shadow once the page
+    moves under it (a scroll-driven animation; without scroll timelines it stays flat)."""
+    if not page.evaluate("() => CSS.supports('animation-timeline: scroll()')"):
+        return [("note", "header-shadow", "F3: no scroll timelines in this browser: the header stays flat (by design)", None)]
+    read = "() => { const s = getComputedStyle(document.querySelector('header'), '::after'); return { content: s.content, opacity: parseFloat(s.opacity) } }"
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(400)
+    top = page.evaluate(read)
+    page.evaluate("() => window.scrollTo(0, 400)")
+    page.wait_for_timeout(400)
+    down = page.evaluate(read)
+    page.evaluate("() => window.scrollTo(0, 0)")
+    vals = {"at_top": top, "scrolled": down}
+    if top["content"] in ("none", "normal") or top["opacity"] > 0.1 or down["opacity"] < 0.9:
+        return [("fail", "header-shadow", "F3: the header does not gain its shadow as the page moves under it", vals)]
+    return [("note", "header-shadow", "F3: the header is flat at the top and gains its shadow as the page moves", vals)]
+
+
+# ── K4 add-to-restock flight (29-Oct-2026) ─────────────────────────────────────────────────────
+ADD_TRACK = r"""
+(ms) => {
+  window.__qaAdd = { max: 0, seen: 0, last: null, goneAt: null };
+  const t0 = performance.now();
+  const loop = () => {
+    const clones = [...document.querySelectorAll('body > [data-cart-flight]')];
+    const s = window.__qaAdd;
+    s.max = Math.max(s.max, clones.length);
+    if (document.querySelector('[data-sheet-panel][data-leaving]')) s.leavingSeen = true;
+    const cnt = document.querySelector('[data-cart-count]');
+    if (cnt) { s.hasCount = true; if (cnt.getAnimations().some((a) => a.animationName === 'm-tick-up')) s.countRolled = true; }
+    const stp = document.querySelector('article[data-qa-add] [role="group"]');
+    if (stp && stp.getAnimations().some((a) => a.animationName === 'm-pop')) s.stepperIn = true;
+    if (stp) s.stepperSeen = true;
+    if (clones.length) { s.seen += 1; if ([...document.querySelectorAll('[role="dialog"]')].some((d) => d.getBoundingClientRect().height > 0)) s.overSheet = (s.overSheet || 0) + 1; const r = clones[0].getBoundingClientRect(); s.last = { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width }; s.goneAt = null; }
+    else if (s.seen && s.goneAt == null) s.goneAt = Math.round(performance.now() - t0);
+    if (performance.now() - t0 < ms) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+CART_TARGET = r"""
+() => {
+  const vis = [...document.querySelectorAll('[data-cart-target]')].filter((el) => {
+    const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight;
+  }).sort((a, b) => +a.dataset.cartTarget - +b.dataset.cartTarget);
+  const el = vis[0]; if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { kind: el.dataset.cartTarget, x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
+}
+"""
+
+
+def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Finding]:
+    """K4: "Add" sends one copy of the card's photo to where the cart lives (the mini-cart column on a
+    wide PC, the header's Restock button, the bottom bar's Restock tab on a phone); it lands there and
+    is gone within a second. The test line is taken out of the cart again afterwards."""
+    # a fresh device remembers no quantity, so its Add opens the keypad: remember 12 of the cards on
+    # the page (the yq-qty store, as an earlier order would) and reload, so Add adds at once
+    codes = page.evaluate(r"""() => [...document.querySelectorAll('main article[data-stock] img')]
+      .map((i) => (i.currentSrc || i.src).match(/thumbs\/([^/]+?)-product-/)).filter(Boolean).map((m) => decodeURIComponent(m[1])).slice(0, 60)""")
+    page.evaluate("(codes) => { const m = {}; for (const c of codes) m[c] = { last: 12, at: Date.now() }; try { localStorage.setItem('yq-qty', JSON.stringify(m)) } catch (e) {} }", codes)
+    page.reload(wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.wait_for_timeout(1200)
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    box = page.evaluate(r"""() => {
+      const b = [...document.querySelectorAll('main article[data-stock] button[aria-label]')].find((el) => {
+        const r = el.getBoundingClientRect(); const img = el.closest('article').querySelector('.m-photo-img');
+        return /^Add · /.test(el.getAttribute('aria-label') || '') && r.top > 90 && r.bottom < innerHeight - 90 && r.left >= 0 && r.right <= innerWidth && img && img.complete && img.naturalWidth > 0;
+      });
+      if (!b) return null; b.closest('article').dataset.qaAdd = '1'; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, top: Math.round(b.closest('article').getBoundingClientRect().top) };
+    }""")
+    if not box:
+        return [("warn", "add-flight", "K4: no direct Add button (Add · N) with its photo on screen, not measured", None)]
+    target = page.evaluate(CART_TARGET)
+    page.evaluate(ADD_TRACK, 1300)
+    page.mouse.click(box["x"], box["y"])
+    page.wait_for_timeout(350)
+    moved = page.evaluate("(t) => { const a = document.querySelector('article[data-qa-add]'); return a ? Math.round(a.getBoundingClientRect().top) - t : null }", box["top"])
+    # K8: on a wide PC the new line slides into the mini-cart column (the cart was empty: it is the only line)
+    slid = page.evaluate("() => { const li = document.querySelector('aside section li'); return li ? li.getAnimations().some((a) => a.animationName === 'm-rise') : null }")
+    page.wait_for_timeout(1050)
+    s = page.evaluate("() => window.__qaAdd")
+    page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
+    after = page.evaluate(CART_TARGET)
+    vals = {"target": target, "target_after": after, "flight": s}
+    if not s["seen"]:
+        return [("fail", "add-flight", "K4: Add sent nothing to the cart (no flying photo)", vals)]
+    if not target and not after:
+        return [("fail", "add-flight", "K4: the photo flew to nowhere: no Restock target was on screen, and none came into view", vals)]
+    target = target or after
+    out: list[Finding] = []
+    if s["max"] > 1:
+        out.append(("fail", "add-flight", f"K4: one Add made {s['max']} flying photos", vals))
+    if s["goneAt"] is None or s["goneAt"] > 1100:
+        out.append(("fail", "add-flight", "K4: the flying photo was still there after a second", vals))
+    if target and s["last"] and (abs(s["last"]["x"] - target["x"]) > 48 or abs(s["last"]["y"] - target["y"]) > 48):
+        out.append(("fail", "add-flight", f"K4: the photo landed {round(s['last']['x'] - target['x'])}/{round(s['last']['y'] - target['y'])} px from the cart ({target['kind']})", vals))
+    vals["line_slid_in"] = slid
+    page.wait_for_timeout(10)
+    vals["card_moved_px"] = moved
+    if moved is not None and abs(moved) > 8:
+        out.append(("fail", "add-flight", f"K4: Add moved the page under the hand: the card jumped {moved}px (something was inserted above it)", vals))
+    if s.get("hasCount") and not s.get("countRolled"):
+        out.append(("fail", "add-flight", "K8: the Restock count changed without rolling to its new number", vals))
+    if s.get("stepperSeen") and not s.get("stepperIn"):
+        out.append(("fail", "add-flight", "K4: after Added the stepper swapped in instead of coming in", vals))
+    if target and target["kind"] == "1" and slid is False:
+        out.append(("fail", "add-flight", "K8: the new line appeared in the mini-cart without sliding in", vals))
+    return out or [("note", "add-flight", f"K4: Add flew one photo onto the cart (target {target and target['kind']}), gone after {s['goneAt']} ms", vals)]
+
+
+def add_flight_keypad(page: Page, cart_key: str = "yq-shop-cart:market", apply_label: str = "Apply") -> list[Finding]:
+    """K4 on the most common first add (final review, 29-Oct-2026): with no remembered quantity, Add
+    opens the keypad and its Apply adds. The photo flies only once the keypad has gone - never over its
+    dim towards a cart the dim hides - and lands on the cart."""
+    page.evaluate("() => { try { localStorage.removeItem('yq-qty') } catch (e) {} }")
+    page.reload(wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.wait_for_timeout(1200)
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    box = page.evaluate(r"""() => {
+      const b = [...document.querySelectorAll('main article[data-stock] button[aria-label]')].find((el) => {
+        const r = el.getBoundingClientRect(); const img = el.closest('article').querySelector('.m-photo-img');
+        return /^Add — /.test(el.getAttribute('aria-label') || '') && r.top > 90 && r.bottom < innerHeight - 90 && r.left >= 0 && r.right <= innerWidth && img && img.complete && img.naturalWidth > 0;
+      });
+      if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }""")
+    if not box:
+        return [("warn", "add-flight", "K4: no keypad Add (Add — name) on screen, not measured", None)]
+    target = page.evaluate(CART_TARGET)
+    page.mouse.click(box["x"], box["y"])
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=4000)
+    except PWError:
+        return [("warn", "add-flight", "K4: Add opened no keypad, not measured", None)]
+    page.wait_for_timeout(350)
+    page.evaluate(ADD_TRACK, 2200)
+    page.locator('[role="dialog"] button', has_text=apply_label).last.click()
+    page.wait_for_timeout(2300)
+    s = page.evaluate("() => window.__qaAdd")
+    # sampled every frame from before the tap: on a phone the tap returns after the 200 ms exit is over
+    leaving = bool(s.get("leavingSeen"))
+    page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
+    vals = {"target": target, "flight": s, "keypad_slid_away": leaving}
+    out: list[Finding] = []
+    if not leaving:
+        out.append(("fail", "add-flight", "K4: the keypad vanished on Apply instead of sliding away", vals))
+    if not s["seen"]:
+        out.append(("fail", "add-flight", "K4: Apply in the keypad added the line but sent no photo to the cart", vals))
+    if s.get("overSheet"):
+        out.append(("fail", "add-flight", f"K4: the photo flew while the keypad was still open ({s['overSheet']} frames over its dim)", vals))
+    if target and s["last"] and (abs(s["last"]["x"] - target["x"]) > 48 or abs(s["last"]["y"] - target["y"]) > 48):
+        out.append(("fail", "add-flight", f"K4: after the keypad the photo landed {round(s['last']['x'] - target['x'])}/{round(s['last']['y'] - target['y'])} px from the cart", vals))
+    return out or [("note", "add-flight", "K4: after the keypad's Apply the photo flew to the cart once the keypad had gone", vals)]
+
+
+def add_flight_palette(page: Page, cart_key: str = "yq-shop-cart:market", query: str = "cable", apply_label: str = "Apply") -> list[Finding]:
+    """K4 from the search palette (final review, 29-Oct-2026): the palette stays open after an add, and
+    the cart is under its dim, so no photo flies over it (it would land where nobody can see it)."""
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"] input', timeout=6000)
+    except PWError:
+        return [("warn", "add-flight", "K4: Ctrl+K opened no palette, not measured", None)]
+    page.keyboard.type(query, delay=40)
+    page.wait_for_timeout(900)
+    add = page.locator('[role="dialog"] button[aria-label^="Add"]').first
+    if add.count() == 0:
+        page.keyboard.press("Escape")
+        return [("warn", "add-flight", "K4: the palette showed no Add, not measured", None)]
+    page.evaluate(ADD_TRACK, 2600)
+    add.click()
+    page.wait_for_timeout(450)
+    keypad = page.locator('[role="dialog"] button', has_text=apply_label)
+    if keypad.count():
+        keypad.last.click()
+    page.wait_for_timeout(2000)
+    s = page.evaluate("() => window.__qaAdd")
+    page.keyboard.press("Escape")
+    page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
+    if s.get("overSheet"):
+        return [("fail", "add-flight", f"K4: an add in the open search palette flew a photo over it ({s['overSheet']} frames)", s)]
+    return [("note", "add-flight", "K4: an add in the open palette flies nothing over it", s)]
+
+
+# ── F1 glide scrolling (29-Oct-2026) ───────────────────────────────────────────────────────────
+GLIDE_TRACK = r"""
+(ms) => {
+  window.__qaGlide = [];
+  const t0 = performance.now();
+  let last = t0;
+  const loop = (t) => {
+    window.__qaGlide.push([Math.round(t - t0), Math.round(window.scrollY * 10) / 10, Math.round((t - last) * 10) / 10]);
+    last = t;
+    if (t - t0 < ms) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+
+def glide_scroll(page: Page, notch: int = 100) -> list[Finding]:
+    """F1, a mouse: one wheel notch moves the page in a glide, not a jump. It keeps moving for at least
+    250 ms before 95% of the notch is covered and comes to rest within 1.5 s; its worst frame is
+    reported as a measured number."""
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(1800)  # the glide starts after the first paint
+    vp = page.viewport_size
+    page.mouse.move(vp["width"] * 0.4, vp["height"] * 0.6)
+    page.evaluate(GLIDE_TRACK, 2000)
+    page.wait_for_timeout(60)
+    page.mouse.wheel(0, notch)
+    page.wait_for_timeout(2100)
+    s = page.evaluate("() => window.__qaGlide || []")
+    if len(s) < 10:
+        return [("warn", "glide-scroll", "F1: too few frames sampled, not measured", {"frames": len(s)})]
+    y0, y1 = s[0][1], s[-1][1]
+    dist = y1 - y0
+    if dist <= 0:
+        return [("fail", "glide-scroll", "F1: one wheel notch did not move the page", {"from": y0, "to": y1})]
+    t_first = next(t for t, y, _ in s if y != y0)
+    t95 = next(t for t, y, _ in s if y - y0 >= 0.95 * dist)
+    t_rest = next(t for t, y, _ in s if y == y1)
+    worst = max((d for t, y, d in s if t_first <= t <= t_rest), default=0)
+    vals = {"px": dist, "to_95pct_ms": t95 - t_first, "rest_ms": t_rest - t_first, "worst_frame_ms": worst}
+    out: list[Finding] = []
+    if t95 - t_first < 250:
+        out.append(("fail", "glide-scroll", f"F1: the wheel jumped: 95% of the notch in {t95 - t_first} ms (a glide takes 250 ms or more)", vals))
+    if t_rest - t_first > 1500:
+        out.append(("fail", "glide-scroll", f"F1: the page was still moving {t_rest - t_first} ms after the notch", vals))
+    # frame times are the machine's as much as the page's (headless frames of 33-100 ms come with a
+    # page standing still), so the worst frame is a measured number, as S1 is: a warning, never fatal
+    if worst > 50:
+        out.append(("warn", "glide-scroll", f"F1: a frame of the glide took {worst} ms (measured; compare builds on one machine)", vals))
+    if not out:
+        out.append(("note", "glide-scroll", f"F1: one notch glides {dist:.0f}px: 95% in {t95 - t_first} ms, at rest in {t_rest - t_first} ms, worst frame {worst} ms", vals))
+    return out
+
+
+def glide_layers(page: Page) -> list[Finding]:
+    """F1 under a layer: with the search palette open, the wheel moves nothing behind it, and the page
+    does not shift sideways (the scroll lock keeps the 10 px Windows scrollbar strip covered)."""
+    page.evaluate("() => window.scrollTo(0, 400)")
+    page.wait_for_timeout(1800)
+    before = page.evaluate("() => ({ y: Math.round(window.scrollY), left: Math.round(document.querySelector('header').getBoundingClientRect().left) })")
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"]', timeout=6000)
+    except PWError:
+        return [("warn", "glide-layers", "Ctrl+K opened no palette, not measured", None)]
+    page.wait_for_timeout(500)
+    page.mouse.move(12, page.viewport_size["height"] - 12)
+    page.mouse.wheel(0, 300)
+    page.wait_for_timeout(1200)
+    during = page.evaluate("() => ({ y: Math.round(window.scrollY), left: Math.round(document.querySelector('header').getBoundingClientRect().left) })")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    vals = {"before": before, "with_palette": during}
+    out: list[Finding] = []
+    if during["y"] != before["y"]:
+        out.append(("fail", "glide-layers", f"the wheel moved the page {during['y'] - before['y']}px behind the open palette", vals))
+    if during["left"] != before["left"]:
+        out.append(("fail", "glide-layers", f"the page shifted {during['left'] - before['left']}px sideways when the palette opened", vals))
+    return out or [("note", "glide-layers", "the wheel moves nothing behind the open palette, and nothing shifts", vals)]
+
+
+def no_glide_on_touch(page: Page) -> list[Finding]:
+    """F1 is for a mouse only: a touch screen keeps its native scrolling (no html.lenis)."""
+    page.wait_for_timeout(1800)
+    if page.evaluate("() => document.documentElement.classList.contains('lenis')"):
+        return [("fail", "glide-scroll", "a touch screen got the wheel glide (html.lenis): it must keep native scrolling", None)]
+    return [("note", "glide-scroll", "a touch screen keeps native scrolling", None)]
+
+
+def browse_menu_touch(page: Page) -> list[Finding]:
+    """A touch screen with the desktop header (1024x768): a tap on Browse opens the menu, a second tap
+    closes it (there is no hover to leave by)."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "browse-menu", "no Browse menu button in the header, not measured", None)]
+    btn.tap()
+    page.wait_for_timeout(600)
+    first = page.evaluate(MENU_STATE)
+    btn.tap()
+    page.wait_for_timeout(600)
+    second = page.evaluate(MENU_STATE)
+    vals = {"after_tap": _menu_open(first), "after_second_tap": _menu_open(second)}
+    if _menu_open(first) and not _menu_open(second):
+        return [("note", "browse-menu", "a tap opens the menu and a second tap closes it", vals)]
+    return [("fail", "browse-menu", "a tap on Browse should open the menu and a second tap close it", vals)]
+
+
+# ── the design review's polish (29-Oct-2026): one label style, Arabic bidi ─────────────────────────
+CAPS = r"""
+async () => {
+  for (let i = 0; i < 14; i++) { window.scrollBy(0, innerHeight); await new Promise((r) => setTimeout(r, 150)); }
+  window.scrollTo(0, 0);
+  await new Promise((r) => setTimeout(r, 300));
+  const out = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+    const cs = getComputedStyle(el);
+    if (cs.textTransform !== 'uppercase' || (parseFloat(cs.letterSpacing) || 0) < 0.5) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height || cs.visibility === 'hidden') continue;
+    const text = (el.textContent || '').trim();
+    if (/[A-Za-z]/.test(text)) out.push(text.slice(0, 40));
+  }
+  return out;
+}
+"""
+
+
+def caps_labels(page: Page) -> list[Finding]:
+    """Design review gap 6: one label style - sentence case, never a tracked ALL-CAPS eyebrow (the
+    commonest template tell, 7-10 per screen before), on light or night. The opening is not on these
+    pages (its Skip keeps its caps), and the slide sticker's 0.02em is not tracking."""
+    found = page.evaluate(CAPS)
+    if found:
+        return [("fail", "caps-labels", f"{len(found)} tracked ALL-CAPS label(s): " + ", ".join(found[:6]), found)]
+    return [("note", "caps-labels", "no tracked ALL-CAPS label", None)]
+
+
+BIDI_CHIPS = r"""
+(sel) => {
+  const AR = /[؀-ۿ]/;
+  const out = [];
+  for (const chip of document.querySelectorAll(sel)) {
+    if (!chip.getBoundingClientRect().width) continue;
+    const count = [...chip.querySelectorAll('span.tnum')].pop();
+    if (!count) continue;
+    const chars = [];
+    const walk = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if (count.contains(n)) continue;
+      const t = n.textContent;
+      for (let i = 0; i < t.length; i++) {
+        if (/\s/.test(t[i])) continue;
+        const rg = document.createRange();
+        rg.setStart(n, i);
+        rg.setEnd(n, i + 1);
+        const b = rg.getBoundingClientRect();
+        if (b.width) chars.push({ c: t[i], l: b.left });
+      }
+    }
+    const label = chars.map((x) => x.c).join('');
+    if (!chars.length || !AR.test(label)) continue;
+    const c = count.getBoundingClientRect();
+    out.push({ label, count: count.textContent.trim(),
+               after: c.right <= Math.min(...chars.map((x) => x.l)) + 1,
+               rtl: chars[0].l > chars[chars.length - 1].l });
+  }
+  return out;
+}
+"""
+
+
+def _bidi_chips(page: Page, sel: str, where: str) -> list[Finding]:
+    chips = page.evaluate(BIDI_CHIPS, sel)
+    if not chips:
+        return [("warn", "bidi-chips", f"no Arabic {where} chip with a count, not measured", None)]
+    out: list[Finding] = []
+    inside = [c for c in chips if not c["after"]]
+    if inside:
+        out.append(("fail", "bidi-chips", f"{len(inside)} {where} chip count(s) sit inside the label, not after it: " + ", ".join(f"{c['label']} {c['count']}" for c in inside[:4]), inside))
+    backwards = [c for c in chips if not c["rtl"]]
+    if backwards:
+        out.append(("fail", "bidi-chips", f"{len(backwards)} {where} chip label(s) read left to right in Arabic: " + ", ".join(c["label"] for c in backwards[:4]), backwards))
+    return out or [("note", "bidi-chips", f"{len(chips)} Arabic {where} chips: each count after its label, each label right to left", None)]
+
+
+def bidi_chips(page: Page) -> list[Finding]:
+    """Design review gap 8, Arabic: a facet chip's count stays after its label (it landed inside
+    "USB إلى C"), and the label keeps reading right to left (a dir="auto" island would turn it round)."""
+    return _bidi_chips(page, "main button[aria-pressed]", "facet")
+
+
+def bidi_menu_chips(page: Page) -> list[Finding]:
+    """Gap 8 in the Browse menu (Arabic, a mouse): the first category's chips, as bidi_chips."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "bidi-chips", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    page.wait_for_timeout(200)
+    btn.hover()
+    page.wait_for_timeout(900)
+    if not _menu_open(page.evaluate(MENU_STATE)):
+        return [("warn", "bidi-chips", "the Browse menu did not open on hover, its chips not measured", None)]
+    return _bidi_chips(page, "header a[href^='/t/'][href*='?']", "menu")
+
+
+KBD = r"""
+() => {
+  const k = [...document.querySelectorAll('header kbd')].find((x) => x.getBoundingClientRect().width);
+  if (!k) return null;
+  const n = k.firstChild;
+  if (!n || n.nodeType !== 3 || n.textContent.length < 2) return { text: k.textContent };
+  const at = (i) => { const rg = document.createRange(); rg.setStart(n, i); rg.setEnd(n, i + 1); return rg.getBoundingClientRect().left; };
+  return { text: n.textContent, inOrder: at(0) < at(n.textContent.length - 1) };
+}
+"""
+
+
+def kbd_badge(page: Page) -> list[Finding]:
+    """Gap 8, Arabic: the search box's shortcut badge reads ⌘K, left to right (it read K⌘)."""
+    r = page.evaluate(KBD)
+    if not r or "inOrder" not in r:
+        return [("warn", "kbd-badge", "no shortcut badge in the header at this width, not measured", r)]
+    if not r["inOrder"]:
+        return [("fail", "kbd-badge", f"the shortcut badge reads backwards in Arabic ({r['text']} shown as {r['text'][::-1]})", r)]
+    return [("note", "kbd-badge", f"the shortcut badge reads {r['text']} left to right", r)]
+
+
+# ── the opening, smooth from the first pixel (the owner's video, 29-Oct-2026) ───────────────────────
+OPENING_WATCH = r"""
+(holdMs) => new Promise((done) => {
+  const out = { bootMoving: null, carried: null, restarted: false, exitBooked: null, filters: [], hold: [], heavy: [] };
+  const t0 = performance.now();
+  // an animation in its active phase (a delay still running, or a finished one, does not count);
+  // the first frame's 8 s safety fade is not motion
+  const active = (a) => {
+    if (a.playState !== 'running' || a.animationName === 'yq-boot-out') return false;
+    const t = a.effect.getComputedTiming();
+    return t.localTime > t.delay && t.localTime < t.delay + t.activeDuration;
+  };
+  const moving = (root) => (root ? root.getAnimations({ subtree: true }).filter(active).length : 0);
+  // the first frame's animations start with its first painted frame (a phone paints later)
+  const started = (root) => root.getAnimations({ subtree: true }).some((a) => a.animationName !== 'yq-boot-out' && Number(a.currentTime) > 0);
+  const bigFilters = () => {
+    const area = innerWidth * innerHeight;
+    const found = [];
+    for (const root of [document.getElementById('yq-boot'), document.querySelector('[data-splash]')]) {
+      if (!root) continue;
+      for (const el of [root, ...root.querySelectorAll('*')]) {
+        const f = getComputedStyle(el).filter;
+        if (!f || f === 'none') continue;
+        const b = el.getBoundingClientRect();
+        if (b.width * b.height > 0.2 * area) found.push(el.tagName.toLowerCase() + ' ' + f);
+      }
+    }
+    return found;
+  };
+  let mountAt = null, carried = null, carriedT = null;
+  const look = () => {
+    const now = performance.now() - t0;
+    const boot = document.getElementById('yq-boot');
+    const s = document.querySelector('[data-splash]');
+    if (!s && boot && out.bootMoving === null && now > 300 && started(boot)) {
+      out.bootMoving = moving(boot) > 0;
+      const a = boot.getAnimations({ subtree: true }).find((x) => x.animationName !== 'yq-boot-out' && x.effect.target !== boot);
+      if (a) { carried = a.effect.target; carriedT = a.currentTime; }
+    }
+    if (s && mountAt === null) {
+      mountAt = now;
+      out.exitBooked = s.getAnimations().some((a) => { const k = a.effect.getKeyframes(); return k.length > 0 && String(k[k.length - 1].opacity) === '0'; });
+      out.filters = bigFilters();
+    }
+    if (s && mountAt !== null) {
+      const since = now - mountAt;
+      if (carried && out.carried === null && since > 200) {
+        out.carried = carried.isConnected;
+        const a = carried.getAnimations()[0];
+        if (!a || (carriedT != null && a.currentTime < carriedT)) out.restarted = true;
+      }
+      // the rest: after the last entrance settles (820 + 680 ms) and before the booked exit (holdMs)
+      if (since > 1500 && since < holdMs) {
+        out.hold.push(moving(s) + moving(document.getElementById('yq-boot')));
+        // the night frame itself (screen-sized layers) holds still: nothing in it scales or loops
+        const b = document.getElementById('yq-boot');
+        if (b) for (const a of b.getAnimations({ subtree: true }).filter(active)) {
+          const k = a.effect.getKeyframes();
+          const moves = k.some((f) => 'transform' in f || 'scale' in f || 'translate' in f);
+          if (moves || a.effect.getComputedTiming().iterations === Infinity) {
+            const tag = (a.animationName || 'waapi') + (moves ? ' (moves)' : ' (loops)');
+            if (!out.heavy.includes(tag)) out.heavy.push(tag);
+          }
+        }
+      }
+    }
+    if ((!s && mountAt !== null) || now > 10000) return done({ ...out, mountAt: mountAt == null ? null : Math.round(mountAt) });
+    requestAnimationFrame(look);
+  };
+  look();
+})
+"""
+
+
+def opening_motion(page: Page, base: str, delay_ms: int = 900, hold_ms: int = 1900) -> list[Finding]:
+    """The opening, smooth from the first pixel (the owner's video, 29-Oct-2026: it stepped, froze for
+    ~2 s, then cut to the shop). With the opening's code held back a little: the served first frame
+    already moves (the dawn rises from the first paint), and the opening carries that dawn on instead
+    of restarting it; nothing large is drawn through a live filter (four full-screen blurs re-applied
+    every frame stepped it at 4-9 fps headless); the exit is booked when the opening mounts, so a busy
+    page can neither delay it nor drop its fade into a cut; and something keeps moving through the
+    hold, so it never stands frozen before it leaves."""
+    page.add_init_script("try { sessionStorage.removeItem('yq-splash-session'); localStorage.removeItem('yq-splash-at') } catch (e) {}")
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/assets/Splash-[^/]+\.js$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    r = page.evaluate(OPENING_WATCH, hold_ms)
+    page.unroute_all(behavior="ignoreErrors")
+    if r["mountAt"] is None:
+        return [("warn", "opening-motion", "the opening did not play, not measured", r)]
+    out: list[Finding] = []
+    if not r["bootMoving"]:
+        out.append(("fail", "opening-motion", "the served first frame stands still until the opening's code arrives", r))
+    if not r["carried"] or r["restarted"]:
+        out.append(("fail", "opening-motion", "the opening does not carry the first frame's dawn on (it is removed or restarts)", r))
+    if r["filters"]:
+        out.append(("fail", "opening-motion", f"{len(r['filters'])} large layer(s) of the opening are drawn through a live filter: " + "; ".join(r["filters"][:4]), r))
+    if not r["exitBooked"]:
+        out.append(("fail", "opening-motion", "the opening's exit is not booked when it mounts (a timer starts it, so a busy page delays it or cuts it)", r))
+    if not r["hold"] or min(r["hold"]) == 0:
+        out.append(("fail", "opening-motion", "nothing moves in the hold before the exit (the frame stands frozen)", r))
+    if r.get("heavy"):
+        out.append(("fail", "opening-motion", "the night frame's screen-sized layers keep working through the hold: " + ", ".join(r["heavy"][:4]), r))
+    return out or [("note", "opening-motion", "the dawn moves from the first paint and carries on, no live filter, exit booked, the hold keeps moving", r)]
+
+
+# ── living slides (the owner, 29-Oct-2026: "shows like a video") ────────────────────────────────────
+SLIDE_PROBE = r"""
+() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 40 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth; };
+  const art = [...document.querySelectorAll('.creative')].find((c) => {
+    const s = c.closest('[data-slide-state]');
+    return vis(c) && (!s || s.getAttribute('data-slide-state') !== 'idle');
+  });
+  if (!art) return null;
+  const disc = art.querySelector('.creative-disc[data-pos="c"]') || art.querySelector('.creative-disc');
+  if (!disc) return null;
+  const d = disc.getBoundingClientRect();
+  const slide = art.closest('[data-slide-state]') || art.closest('.slide-card') || art;
+  return { key: (slide.textContent || '').trim().slice(0, 40), discX: d.left + d.width / 2, discY: d.top + d.height / 2, artW: art.getBoundingClientRect().width };
+}
+"""
+
+
+def slides_alive(page: Page, settle_ms: int = 1500, window_ms: int = 900) -> list[Finding]:
+    """A product slide is never a still picture (the owner, 29-Oct-2026: "shows like a video"): through
+    its dwell the slide's discs keep floating and its art pushes slowly in. Measured on the slide on
+    screen once its spring into the fan has settled; a slide that changes while measured is not
+    measured. Reduced motion and lite mode are the calm guard's."""
+    page.wait_for_timeout(settle_ms)
+    a = page.evaluate(SLIDE_PROBE)
+    if not a:
+        return [("warn", "slides-alive", "no product slide on screen, not measured", None)]
+    page.wait_for_timeout(window_ms)
+    b = page.evaluate(SLIDE_PROBE)
+    if not b or b["key"] != a["key"]:
+        return [("warn", "slides-alive", "the slide changed while it was measured, not measured", {"a": a, "b": b})]
+    moved = abs(b["discX"] - a["discX"]) + abs(b["discY"] - a["discY"])
+    grew = b["artW"] - a["artW"]
+    vals = {"slide": a["key"], "moved": round(moved, 2), "grew": round(grew, 2)}
+    out: list[Finding] = []
+    if moved < 0.5:
+        out.append(("fail", "slides-alive", f"the slide's product discs stand still through its dwell (moved {moved:.2f} px in {window_ms} ms)", vals))
+    if grew < 0.5:
+        out.append(("fail", "slides-alive", f"the slide's art does not push in through its dwell (grew {grew:.2f} px in {window_ms} ms)", vals))
+    return out or [("note", "slides-alive", f"the discs float ({moved:.1f} px) and the art pushes in ({grew:.1f} px) in {window_ms} ms", vals)]
+
+
+# ── round 2 (29-Oct-2026, the owner: "when I open a product the whole screen moves") ────────────────
+PANEL_ARM = r"""
+(clicked) => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight; };
+  const cards = [...document.querySelectorAll('main article[data-stock]')].filter(vis);
+  const ref = cards.find((a) => !a.contains(clicked)) || null;
+  const header = document.querySelector('header');
+  const fixed = [...document.querySelectorAll('#root *, body > *')].filter((el) => !el.matches('[role="presentation"], [role="presentation"] *') && getComputedStyle(el).position === 'fixed' && vis(el));
+  const st = { frames: 0, header: 0, card: 0, fixed: 0, fixedWho: '', step: 0, shift: 0, land: null, blur: null, behind: null };
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top]; };
+  const base = { header: header && box(header), card: ref && box(ref), fixed: fixed.map(box) };
+  try { new PerformanceObserver((l) => { for (const e of l.getEntries()) st.shift += e.value; }).observe({ type: 'layout-shift', buffered: false }); } catch (e) {}
+  let rightSeen = null;
+  const t0 = performance.now();
+  const step = () => {
+    st.frames++;
+    const d = (a, b) => (a && b ? Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1])) : 0);
+    if (header) st.header = Math.max(st.header, d(box(header), base.header));
+    if (ref) st.card = Math.max(st.card, d(box(ref), base.card));
+    fixed.forEach((el, i) => { const m = d(box(el), base.fixed[i]); if (m > st.fixed) { st.fixed = m; st.fixedWho = (el.getAttribute('aria-label') || el.className || el.tagName).toString().slice(0, 40); } });
+    const panel = document.querySelector('[data-sheet-panel]');
+    if (panel) {
+      const m = new DOMMatrixReadOnly(getComputedStyle(panel).transform === 'none' ? undefined : getComputedStyle(panel).transform);
+      const right = panel.getBoundingClientRect().right - m.m41;
+      if (rightSeen != null) st.step = Math.max(st.step, Math.abs(right - rightSeen));
+      rightSeen = right;
+      const dim = panel.parentElement && panel.parentElement.querySelector(':scope > button');
+      if (dim && st.blur == null) st.blur = getComputedStyle(dim).backdropFilter || getComputedStyle(dim).webkitBackdropFilter || 'none';
+      const clone = [...document.querySelectorAll('body > img[aria-hidden="true"]')].find((i) => getComputedStyle(i).position === 'fixed');
+      const hero = panel.querySelector('.m-photo-img');
+      if (clone && hero && parseFloat(getComputedStyle(clone).opacity) > 0.99) {
+        const c = clone.getBoundingClientRect(); const h = hero.getBoundingClientRect(); const cs = getComputedStyle(hero);
+        const hl = h.left + (parseFloat(cs.paddingLeft) || 0); const ht = h.top + (parseFloat(cs.paddingTop) || 0);
+        st.land = Math.round(Math.max(Math.abs(c.left - hl), Math.abs(c.top - ht)) * 10) / 10;
+      }
+    }
+    if (performance.now() - t0 < 1400) requestAnimationFrame(step);
+    else {
+      // once open: what still animates on the page behind (not the sheet, not a flight; a CSS animation
+      // whose computed play state is paused counts as paused - Chrome reports a just-paused one as
+      // running for a frame)
+      const root = document.getElementById('root');
+      st.behind = root ? root.getAnimations({ subtree: true }).filter((a) => a.playState === 'running' && a.timeline === document.timeline && !(typeof CSSTransition !== 'undefined' && a instanceof CSSTransition) && !(a.animationName && /paused/.test(getComputedStyle(a.effect.target, a.effect.pseudoElement || null).animationPlayState))).map((a) => a.animationName || a.transitionProperty || 'waapi').slice(0, 8) : [];
+      window.__ps = st;
+    }
+  };
+  requestAnimationFrame(step);
+}
+"""
+
+
+def panel_still(page: Page, quick_view: str) -> list[Finding]:
+    """Round 2, C (desktop): opening a product moves nothing on the page. Through the open the header, a
+    neighbouring card and every fixed element hold still (<= 1 px), the drawer never steps sideways
+    (its position less its own slide), no layout shift, the dim is not blurred, the photo lands on the
+    panel's photo (+- 4 px), and once open nothing on the page behind keeps animating. A real mouse
+    click; run headed too, since a headless browser has no scrollbar to step by."""
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "panel-still", "no quick-view card, not measured", None)]
+    # the first card, centred on screen (its row revealed, its photo decoded), as a merchant reaches it
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(900)
+    try:
+        page.wait_for_function("(el) => { const i = el.querySelector('img'); return i && i.complete && i.naturalWidth > 0 }", arg=btn.element_handle(), timeout=6000)
+    except PWError:
+        return [("warn", "panel-still", "the card's photo did not load, not measured", None)]
+    btn.hover()
+    page.wait_for_timeout(400)
+    btn.evaluate(PANEL_ARM)
+    btn.click()
+    try:
+        page.wait_for_function("() => window.__ps", timeout=6000)
+    except PWError:
+        return [("warn", "panel-still", "the panel did not open, not measured", None)]
+    r = page.evaluate("() => window.__ps")
+    x = page.locator('[role="dialog"] button[aria-label="Close"]')
+    if x.count():
+        x.first.evaluate("(el) => el.click()")
+        page.wait_for_timeout(400)
+    out: list[Finding] = []
+    moved = max(r["header"], r["card"])
+    if moved > 1:
+        out.append(("fail", "panel-still", f"the page behind moved while the product opened (header {r['header']:.1f} px, a card {r['card']:.1f} px)", r))
+    if r["fixed"] > 1:
+        out.append(("fail", "panel-still", f"a fixed element stepped {r['fixed']:.1f} px when the panel opened ({r['fixedWho']})", r))
+    if r["step"] > 1:
+        out.append(("fail", "panel-still", f"the drawer stepped sideways {r['step']:.1f} px during its slide (the scroll lock landed late)", r))
+    if r["shift"] > 0.001:
+        out.append(("fail", "panel-still", f"opening the product shifted the layout (score {r['shift']:.4f})", r))
+    if r["blur"] and r["blur"] != "none":
+        out.append(("fail", "panel-still", f"the dim behind the panel is blurred ({r['blur']}): a full-screen blur, every frame", r))
+    if r["land"] is not None and r["land"] > 4:
+        out.append(("fail", "panel-still", f"the photo landed {r['land']} px off the panel's photo", r))
+    if r["behind"]:
+        out.append(("fail", "panel-still", f"the page behind the open panel keeps animating: {', '.join(r['behind'][:4])}", r))
+    return out or [("note", "panel-still", f"the page held still, the photo landed {r['land']} px from its place, nothing animates behind", r)]
+
+
+NO_BLUR = r"""
+() => [...document.querySelectorAll('body *')].filter((el) => {
+  if (el.closest('[data-assist-panel]')) return false;
+  const cs = getComputedStyle(el);
+  const f = cs.backdropFilter || cs.webkitBackdropFilter;
+  return f && f !== 'none' && el.getBoundingClientRect().width > 0;
+}).map((el) => (el.getAttribute('aria-label') || el.className || el.tagName).toString().slice(0, 40) + ' ' + (getComputedStyle(el).backdropFilter || getComputedStyle(el).webkitBackdropFilter))
+"""
+
+
+PAINT_SCAN = r"""
+async () => {
+  const clip = new Set(), will = new Set();
+  const look = () => {
+    for (const a of document.getAnimations()) {
+      try { if (a.effect.getKeyframes().some((k) => 'clipPath' in k)) clip.add(a.animationName || 'waapi'); } catch (e) {}
+    }
+    const area = innerWidth * innerHeight;
+    for (const el of document.querySelectorAll('#root *')) {
+      const w = getComputedStyle(el).willChange;
+      if (!w || w === 'auto') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width * r.height > 0.25 * area && !el.getAnimations().some((a) => a.playState === 'running')) will.add((el.className || el.tagName).toString().slice(0, 30) + ' ' + w);
+    }
+  };
+  for (let i = 0; i < 16; i++) { window.scrollBy(0, innerHeight * 0.8); await new Promise((r) => setTimeout(r, 160)); look(); }
+  await new Promise((r) => setTimeout(r, 1200));
+  look();
+  window.scrollTo(0, 0);
+  return { clip: [...clip], will: [...will] };
+}
+"""
+
+
+def no_blur(page: Page, quick_view: str) -> list[Finding]:
+    """Round 2, D (desktop): no frosted glass. Nothing is drawn through a backdrop-filter with the page
+    at rest, with a product panel open or with the search palette open (the chat panel, another track,
+    aside): on a PC's integrated graphics each blur was recomputed on every scroll frame and under every
+    open layer, the reason phones never had it."""
+    found = {"rest": page.evaluate(NO_BLUR)}
+    btn = _quick_view(page, quick_view)
+    if btn is not None:
+        btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+        page.wait_for_timeout(700)
+        btn.click()
+        try:
+            page.wait_for_selector("[data-sheet-panel]", timeout=4000)
+        except PWError:
+            pass
+        page.wait_for_timeout(400)
+        found["panel"] = page.evaluate(NO_BLUR)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+    page.keyboard.press("Control+k")
+    try:
+        page.wait_for_selector('[role="dialog"] input', timeout=4000)
+    except PWError:
+        pass
+    page.wait_for_timeout(400)
+    found["palette"] = page.evaluate(NO_BLUR)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    # and down the whole page: no permanent will-change on a large layer (the night band's blurred arcs
+    # kept theirs, so their blur was re-applied on every scroll frame), no animation of clip-path (the
+    # section titles: off the compositor, a main-thread paint per scroll frame)
+    found.update(page.evaluate(PAINT_SCAN))
+    bad = {k: v for k, v in found.items() if v}
+    # review (29-Oct-2026): with the frost gone the bars are fully opaque, or the cards show through them
+    found["bars"] = page.evaluate("() => [...document.querySelectorAll('.bar-solid')].map((b) => getComputedStyle(b).backgroundColor)")
+    thin = [c for c in found["bars"] if c.startswith("rgba(") and not c.rstrip(")").endswith(", 1")]
+    if thin:
+        bad["see-through bars"] = thin
+    if bad:
+        return [("fail", "no-blur", "frosted or costly layers on a PC: " + "; ".join(f"{k}: {', '.join(v[:3])}" for k, v in bad.items()), found)]
+    return [("note", "no-blur", "no backdrop blur at rest, under a product panel or under the palette; no lasting will-change or clip-path animation", found)]
+
+
+# ── the banner reel (round 2, 29-Oct-2026, the owner's choice: "product reel") ──────────────────────
+REEL_PROBE = r"""
+() => {
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 40 && r.bottom > 0 && r.top < innerHeight; };
+  const art = [...document.querySelectorAll('.creative')].find((c) => { const s = c.closest('[data-slide-state]'); return vis(c) && (!s || s.getAttribute('data-slide-state') !== 'idle'); });
+  if (!art) return null;
+  const disc = art.querySelector('.creative-disc[data-pos="c"]');
+  if (!disc) return null;
+  const imgs = [...disc.querySelectorAll('img')].filter((i) => !i.closest('.reel-next') && parseFloat(getComputedStyle(i.closest('.reel') || i).opacity) > 0.5);
+  const top = imgs[imgs.length - 1];
+  const slide = art.closest('[data-slide-state]') || art.closest('.slide-card') || art;
+  // a disc with no photo on show: every layer still fading in (or loading) while the old one has gone
+  const white = [...art.querySelectorAll('.creative-disc')].some((d) => {
+    const on = [...d.querySelectorAll(':scope > .reel, :scope > .m-photo')].filter((l) => !l.classList.contains('reel-next') && parseFloat(getComputedStyle(l).opacity) > 0.3);
+    if (!d.querySelector('img')) return false;
+    return !on.some((l) => { const i = l.querySelector('img') || (l.tagName === 'IMG' ? l : null); return i && i.complete && i.naturalWidth > 0; });
+  });
+  return { key: (slide.textContent || '').trim().slice(0, 40), src: top ? (top.currentSrc || top.src).split('/').pop().split('?')[0] : null, white };
+}
+"""
+
+
+def banner_reel(page: Page, settle_ms: int = 800, watch_ms: int = 5600, pause_label: str | None = None) -> list[Finding]:
+    """Round 2, A (desktop): the banner is a product reel - within a few seconds of the page settling,
+    the slide's centre disc shows at least two different products (it starts once the page has loaded
+    and gone idle, then turns every 2.2 s), and no disc is ever left white (the old photo gone before
+    the new one arrived: a swap undone by a stale state, or a fixed timer on a busy laptop, 29-Oct-2026).
+    The mouse is kept off the banner: a hovered slide holds. With `pause_label` (the desktop stage), the
+    slideshow's pause button holds the reel too, and the light (WCAG 2.2.2: a pause stops what moves)."""
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    page.wait_for_timeout(settle_ms)
+    seen: list[str] = []
+    key = None
+    white = 0
+    for _ in range(watch_ms // 250):
+        r = page.evaluate(REEL_PROBE)
+        if r and r["src"]:
+            if key is None:
+                key = r["key"]
+            if r["key"] == key and r["src"] not in seen:
+                seen.append(r["src"])
+        if r and r.get("white"):
+            white += 1
+        page.wait_for_timeout(250)
+    vals = {"slide": key, "photos": seen, "white_samples": white}
+    if key is None:
+        return [("warn", "banner-reel", "no product slide on screen, not measured", vals)]
+    if white:
+        return [("fail", "banner-reel", f"a banner disc showed no photo in {white} of {watch_ms // 250} samples (the old photo left before the new one arrived)", vals)]
+    if len(seen) < 2:
+        return [("fail", "banner-reel", f"the banner's centre disc showed one product for {watch_ms / 1000:.1f} s (a still picture, not a reel)", vals)]
+    out: list[Finding] = [("note", "banner-reel", f"the centre disc turned through {len(seen)} products in {watch_ms / 1000:.1f} s", vals)]
+    pause = page.locator(f'button[aria-label="{pause_label}"]').first if pause_label else None
+    if pause is not None and pause.count() and pause.is_visible():
+        pause.click()
+        page.mouse.move(5, page.viewport_size["height"] - 5)
+        page.wait_for_timeout(900)  # a swap already under way lands
+        held: list[str] = []
+        beams = set()
+        for _ in range(4600 // 250):
+            r = page.evaluate(REEL_PROBE)
+            if r and r["src"] and r["src"] not in held:
+                held.append(r["src"])
+            beams.update(page.evaluate("() => document.getAnimations().filter((a) => a.animationName === 'm-slide-beam' && !a.effect.target.closest('[data-slide-state=idle]')).map((a) => a.playState)"))
+            page.wait_for_timeout(250)
+        vals["paused"] = {"photos": held, "beam": sorted(beams)}
+        if len(held) > 1:
+            out = [("fail", "banner-reel", f"with the slideshow paused the reel kept turning ({len(held)} products in 4.6 s)", vals)]
+        elif "running" in beams:
+            out = [("fail", "banner-reel", "with the slideshow paused the light still crosses the banner", vals)]
+        else:
+            out[0] = ("note", "banner-reel", out[0][2] + "; the pause button holds it", vals)
+    return out
+
+
+# ── the typing search hint (round 2, 29-Oct-2026, the owner's choice: "typing hint") ─────────────────
+TYPED_PROBE = r"""
+async ({ label, ms, focus }) => {
+  const btn = [...document.querySelectorAll('button[aria-label]')].find((b) => b.getAttribute('aria-label') === label && b.getBoundingClientRect().width > 120);
+  if (!btn) return null;
+  if (focus) btn.focus();
+  // the trigger's visible words (the shortcut badge aside): what the merchant reads at this moment
+  const shown = (el) => { for (let p = el; p && p !== btn; p = p.parentElement) if (parseFloat(getComputedStyle(p).opacity) < 0.5) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const read = () => { const out = []; const w = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT); for (let n = w.nextNode(); n; n = w.nextNode()) { const el = n.parentElement; if (el && !el.closest('kbd') && (n.textContent || '').trim() && shown(el)) out.push(n.textContent); } return out.join(''); };
+  const seen = []; const t0 = performance.now(); let last = null;
+  while (performance.now() - t0 < ms) {
+    const s = read();
+    if (s !== last) { seen.push([Math.round(performance.now() - t0), s]); last = s; }
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  return { seen, focused: document.activeElement === btn };
+}
+"""
+
+
+def _typed_run(seen: list) -> tuple[int, int]:
+    """The longest typing run in a text timeline: (characters gained, steps) within any 1.2 s, each step
+    a gain of 1-2 characters (a whole new hint swapped in is one big step, not typing)."""
+    best = (0, 0)
+    for i in range(len(seen)):
+        gain = steps = 0
+        for j in range(i + 1, len(seen)):
+            if seen[j][0] - seen[i][0] > 1200:
+                break
+            d = len(seen[j][1]) - len(seen[j - 1][1])
+            if d < 1 or d > 2:
+                break
+            gain += d
+            steps += 1
+            if (gain, steps) > best:
+                best = (gain, steps)
+    return best
+
+
+def search_typing(page: Page, label: str, watch_ms: int = 5600) -> list[Finding]:
+    """Round 2, B (desktop): the header's search hint is typed - an example search appears a character at a
+    time (>= 3 characters within 1.2 s, in steps of one or two), is erased, and the next is typed; once
+    the trigger has focus it stands still on a whole example (it ends on its closing quote)."""
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    r = page.evaluate(TYPED_PROBE, {"label": label, "ms": watch_ms, "focus": False})
+    if r is None:
+        return [("warn", "search-typing", "no desktop search trigger, not measured", None)]
+    gain, steps = _typed_run(r["seen"])
+    vals: dict[str, Any] = {"texts": [s for _, s in r["seen"]][:14], "gain": gain, "steps": steps}
+    # review (29-Oct-2026): the quotes come with the first and the last character - never a lone quote
+    lone = sorted({s for _, s in r["seen"] if s.rstrip().endswith(("“", "«"))})
+    if lone:
+        return [("fail", "search-typing", f"the search hint showed a lone opening quote between examples: {lone[0]!r}", vals)]
+    if gain < 3 or steps < 3:
+        return [("fail", "search-typing", f"the search hint is not typed: its longest run gained {gain} characters in {steps} steps within 1.2 s (whole hints swapped)", vals)]
+    f = page.evaluate(TYPED_PROBE, {"label": label, "ms": 300, "focus": True})
+    held = page.evaluate(TYPED_PROBE, {"label": label, "ms": 1500, "focus": False})
+    texts = sorted({s for _, s in held["seen"]})
+    vals["focused"] = texts
+    if not f or not f["focused"]:
+        return [("warn", "search-typing", "typed; the trigger could not take focus, the hold was not measured", vals)]
+    if len(texts) != 1:
+        return [("fail", "search-typing", f"with the trigger focused the hint kept changing ({len(texts)} texts in 1.5 s)", vals)]
+    if not texts[0].rstrip().endswith(("”", "»", '"')):
+        return [("fail", "search-typing", f"with the trigger focused the hint stopped mid-word: {texts[0][-24:]!r}", vals)]
+    return [("note", "search-typing", f"typed ({gain} characters in {steps} steps within 1.2 s); still on a whole example once focused", vals)]
+
+
+# ── calm but alive (round 2, 29-Oct-2026, the owner's choice for reduced motion) ──────────────────────
+CALM_WATCH = r"""
+async ({ label, ms }) => {
+  const btn = [...document.querySelectorAll('button[aria-label]')].find((b) => b.getAttribute('aria-label') === label && b.getBoundingClientRect().width > 120);
+  const hint = () => { if (!btn) return null; const out = []; const w = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT); for (let n = w.nextNode(); n; n = w.nextNode()) { const el = n.parentElement; if (el && !el.closest('kbd') && (n.textContent || '').trim()) out.push(n.textContent); } return out.join(''); };
+  const banner = () => {
+    const s = document.querySelector('.slider-stage [data-slide-state="active"]');
+    if (!s) return null;
+    const imgs = [...s.querySelectorAll('.creative-disc[data-pos="c"] img')].filter((i) => !i.closest('.reel-next'));
+    const top = imgs[imgs.length - 1];
+    return (s.textContent || '').trim().slice(0, 24) + ' | ' + (top ? (top.currentSrc || top.src).split('/').pop() : '');
+  };
+  // an animation that moves something: transform, translate, scale or rotate in its keyframes, still running
+  // (one the kill switch collapsed to 0.01 ms only lands: not motion)
+  const moving = () => document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.getComputedTiming().duration > 1 && a.effect.getKeyframes().some((k) => ['transform', 'translate', 'scale', 'rotate'].some((p) => k[p] && k[p] !== 'none'))).map((a) => a.animationName || a.id || 'waapi');
+  const hints = new Set(), banners = new Set(), movers = new Set();
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    const h = hint(); if (h) hints.add(h);
+    const b = banner(); if (b) banners.add(b);
+    for (const m of moving()) movers.add(m);
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return { hints: [...hints], banners: [...banners], movers: [...movers] };
+}
+"""
+
+PANEL_FADE = r"""
+async () => {
+  // from the panel's first appearance (its code can arrive late on a busy machine) to 900 ms after it
+  const seen = []; const t0 = performance.now(); let first = null;
+  while (performance.now() - t0 < 4000 && (first === null || performance.now() - first < 900)) {
+    const p = document.querySelector('[data-sheet-panel]');
+    if (p) {
+      if (first === null) first = performance.now();
+      seen.push([Math.round(performance.now() - t0), +(+getComputedStyle(p).opacity).toFixed(2), new DOMMatrix(getComputedStyle(p).transform === 'none' ? undefined : getComputedStyle(p).transform).m41]);
+    }
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  return seen;
+}
+"""
+
+
+def calm_alive(page: Page, base: str, quick_view: str, label: str, watch_ms: int = 6500) -> list[Finding]:
+    """Round 2, G (desktop, reduced motion asked for): calm but alive. Within 6.5 s the banner changes (a
+    slide or a reel photo) and the search hint changes; a product panel fades in (its opacity passes
+    between 0.05 and 0.95 over >= 120 ms, not one frame); and through all of it nothing moves: no running
+    animation carries a transform, translate, scale or rotate, and the panel never slides."""
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    w = page.evaluate(CALM_WATCH, {"label": label, "ms": watch_ms})
+    vals: dict[str, Any] = {"hints": w["hints"][:4], "banners": w["banners"][:4], "movers": w["movers"]}
+    out: list[Finding] = []
+    if len(w["banners"]) < 2:
+        out.append(("fail", "calm-alive", f"under reduced motion the banner stood still for {watch_ms / 1000:.1f} s (no slide or photo change)", vals))
+    if len(w["hints"]) < 2:
+        out.append(("fail", "calm-alive", f"under reduced motion the search hint stood still for {watch_ms / 1000:.1f} s", vals))
+    if w["movers"]:
+        out.append(("fail", "calm-alive", "under reduced motion something moves: " + ", ".join(w["movers"][:5]), vals))
+    btn = _quick_view(page, quick_view)
+    if btn is not None:
+        btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+        page.wait_for_timeout(500)
+        btn.evaluate("(el) => el.click()")
+        seen = page.evaluate(PANEL_FADE)
+        # the fade, from the panel's first visible frame to its first whole one
+        mid = [s for s in seen if 0.02 < s[1] < 0.98]
+        start = next((s[0] for s in seen if s[1] > 0.02), None)
+        whole = next((s[0] for s in seen if s[1] >= 0.98), None)
+        span = (whole - start) if start is not None and whole is not None else 0
+        slid = max((abs(s[2]) for s in seen), default=0)
+        vals["panel"] = {"frames": len(seen), "mid_frames": len(mid), "fade_ms": span, "slide_px": round(slid)}
+        if len(mid) < 2 or span < 120:
+            out.append(("fail", "calm-alive", f"under reduced motion a product panel appears at once ({len(mid)} frames mid-fade, {span} ms from first sight to whole)", vals))
+        if slid > 1:
+            out.append(("fail", "calm-alive", f"under reduced motion the product panel slides ({slid:.0f} px)", vals))
+    return out or [("note", "calm-alive", "reduced motion: the banner and the search hint change, a panel fades in; nothing moves", vals)]
+
+
+# ── release review (29-Oct-2026, night): the gaps an independent re-rate and code review found ─────────
+def layer_overlays(page: Page, base: str, quick_view: str, code: str = "X01") -> list[Finding]:
+    """Review: what lives in #root above the page keeps moving while a layer is open. A toast fired under an
+    open product panel shows (it was frozen at opacity 0 by the page pause, yet caught clicks over the
+    panel's Add); and an opening that plays over a shared product link shows its words."""
+    out: list[Finding] = []
+    vals: dict[str, Any] = {}
+    # 1. a toast under the panel: Share without the Web Share API copies the link and says so
+    page.add_init_script("try { delete Navigator.prototype.share; Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.resolve() } }) } catch (e) {}")
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "layer-overlays", "no quick-view card, not measured", None)]
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(400)
+    btn.evaluate("(el) => el.click()")
+    page.wait_for_timeout(900)
+    share = page.locator('[data-sheet-panel] button:has-text("Share this product")').first
+    if share.count():
+        share.evaluate("(el) => el.click()")
+        page.wait_for_timeout(700)
+        t = page.evaluate("() => { const s = [...document.querySelectorAll('[role=status]')].find((x) => x.textContent.trim()); if (!s) return null; const cs = getComputedStyle(s); return { text: s.textContent.trim().slice(0, 40), opacity: +(+cs.opacity).toFixed(2), state: cs.animationPlayState }; }")
+        vals["toast"] = t
+        if t is None:
+            out.append(("warn", "layer-overlays", "Share under the panel raised no toast, not measured", vals))
+        elif t["opacity"] < 0.5:
+            out.append(("fail", "layer-overlays", f"a toast fired under an open panel is invisible (opacity {t['opacity']}, {t['state']}) and still catches clicks", vals))
+    else:
+        out.append(("warn", "layer-overlays", "no Share button in the panel, the toast was not measured", vals))
+    # 2. the opening plays over a shared product link (a rep's /p/CODE?ref= when the weekly opening is due):
+    #    with a layer open, what sits in the opening, the toasts and the chat's button keeps its motion
+    s = page.evaluate("""() => {
+      const root = document.getElementById('root'); if (!root) return null;
+      const box = document.createElement('div');
+      box.innerHTML = '<div data-splash="motion"><p style="animation: m-fade-in 10s linear infinite">o</p></div><div data-toasts=""><p style="animation: m-fade-in 10s linear infinite">t</p></div><div data-assist-peek=""><p style="animation: m-fade-in 10s linear infinite">c</p></div><p data-qa-page="" style="animation: m-fade-in 10s linear infinite">p</p>';
+      root.appendChild(box);
+      const had = 'layer' in document.documentElement.dataset;
+      document.documentElement.dataset.layer = '';
+      const st = (sel) => getComputedStyle(box.querySelector(sel)).animationPlayState;
+      const out = { opening: st('[data-splash] p'), toast: st('[data-toasts] p'), chat: st('[data-assist-peek] p'), page: st('[data-qa-page]') };
+      if (!had) delete document.documentElement.dataset.layer;
+      box.remove();
+      return out;
+    }""")
+    vals["paused"] = s
+    if s:
+        frozen = [k for k in ("opening", "toast", "chat") if s[k] == "paused"]
+        if frozen:
+            out.append(("fail", "layer-overlays", "with a layer open the page pause also freezes " + ", ".join(frozen) + " (an opening over a product link plays without its words)", vals))
+        if s["page"] != "paused":
+            out.append(("fail", "layer-overlays", "with a layer open the page behind no longer holds still", vals))
+    return out or [("note", "layer-overlays", "a toast under a panel shows, and the opening over a product link keeps its words", vals)]
+
+
+def strip_held(page: Page, base: str, delay_ms: int = 2000) -> list[Finding]:
+    """Review (desktop): with the catalogue late, the category strip holds its row from the first paint, so
+    the page never drops when the categories arrive (it fell 45 px about 1.5-3 s after load)."""
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/(api|public)/market(\?.*)?$"), slow)
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    r = page.evaluate("""() => new Promise((done) => {
+      const out = []; const t0 = performance.now();
+      const look = () => { const m = document.querySelector('main'); if (m) out.push(Math.round(m.getBoundingClientRect().top + scrollY)); if (performance.now() - t0 < 4500) requestAnimationFrame(look); else done(out); };
+      look();
+    })""")
+    page.unroute_all(behavior="ignoreErrors")
+    tops = sorted(set(r))
+    vals = {"tops": tops[:6], "frames": len(r)}
+    if len(tops) > 1 and tops[-1] - tops[0] > 1:
+        return [("fail", "strip-held", f"the page dropped {tops[-1] - tops[0]} px after load when the categories arrived", vals)]
+    return [("note", "strip-held", "the page held its place from the first paint while the catalogue arrived", vals)]
+
+
+def count_on_load(page: Page, base: str) -> list[Finding]:
+    """Review (desktop): a number already on screen never resets - the banner's count runs only as a slide
+    comes on stage, never on the first view (on load it read '24', then '0', then counted back)."""
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    r = page.evaluate("""() => new Promise((done) => {
+      const low = new Set(); const t0 = performance.now(); let first = null;
+      const look = () => {
+        const s = document.querySelector('.slider-stage [data-slide-state="active"]');
+        if (s && first === null) first = s;
+        const c = first && first.getAttribute('data-slide-state') === 'active' ? first.querySelector('.slide-count') : null;
+        if (c && c.hasAttribute('data-go')) { const v = parseInt(getComputedStyle(c).getPropertyValue('--count'), 10); const n = parseInt(c.textContent, 10); if (v < n) low.add(v + ' of ' + n); }
+        if (performance.now() - t0 < 4200) requestAnimationFrame(look); else done([...low]);
+      };
+      look();
+    })""")
+    if r:
+        return [("fail", "count-on-load", "the banner's number reset on its first view: " + ", ".join(r[:4]), {"seen": r[:8]})]
+    return [("note", "count-on-load", "the first slide's number stayed whole on its first view", None)]
+
+
+def dim_fades(page: Page, quick_view: str) -> list[Finding]:
+    """Review: closing a panel, the dim fades out with it (it cut to nothing in one frame, a flash)."""
+    btn = _quick_view(page, quick_view)
+    if btn is None:
+        return [("warn", "dim-fades", "no quick-view card, not measured", None)]
+    btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+    page.wait_for_timeout(400)
+    btn.evaluate("(el) => el.click()")
+    page.wait_for_timeout(900)
+    page.keyboard.press("Escape")
+    seen = page.evaluate("""() => new Promise((done) => {
+      const out = []; const t0 = performance.now();
+      const look = () => { const d = document.querySelector('[role=presentation] > button[tabindex="-1"]'); out.push(d ? +(+getComputedStyle(d).opacity).toFixed(2) : -1); if (performance.now() - t0 < 450) requestAnimationFrame(look); else done(out); };
+      look();
+    })""")
+    mid = [o for o in seen if 0.05 < o < 0.95]
+    vals = {"opacity": seen[:16]}
+    if len(mid) < 2:
+        return [("fail", "dim-fades", f"closing a panel, the dim cut out ({len(mid)} frames mid-fade)", vals)]
+    return [("note", "dim-fades", f"the dim fades out with the panel ({len(mid)} frames mid-fade)", vals)]

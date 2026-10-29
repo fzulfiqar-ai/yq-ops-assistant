@@ -1409,7 +1409,10 @@ def _():
             "app.shop_api.shop_order_cancel": {("20 per 1 hour", "rate_limit_key"), ("3 per 1 hour", "order_token_key")},
             "app.shop_api.market_restock": {("60 per 1 minute", "rate_limit_key"), ("20 per 1 minute", "device_key")},
             "app.shop_api.market_upcoming_interest": {("60 per 1 minute", "rate_limit_key"),
-                                                      ("20 per 1 minute", "device_key")}}
+                                                      ("20 per 1 minute", "device_key")},
+            # YQ Assist v2: a problem report from the chat
+            "app.shop_api.market_ticket": {("10 per 1 minute", "rate_limit_key"), ("3 per 1 minute", "device_key"),
+                                           ("10 per 1 day", "device_key")}}
     for name, lims in want.items():
         got = {(str(lim.limit), lim.key_func.__name__) for lim in m.limiter._route_limits.get(name, [])}
         assert got == lims, (name, got)

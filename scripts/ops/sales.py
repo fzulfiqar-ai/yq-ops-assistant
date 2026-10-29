@@ -145,7 +145,7 @@ EVIDENCE_SHOWN = 2                    # order numbers printed on a DO TODAY row 
 # attention_focus, by the reader's own names). When one of these did not answer, an item can be missing
 # only because it could not be worked out, so the register is not touched.
 ATTENTION_SOURCES = ("anchor", "orders", "match", "salesmen", "reps", "attainment", "receivables", "ar_owner",
-                     "stock", "movers", "margin_totals", "below_cost")
+                     "stock", "movers", "margin_totals", "below_cost", "chat_tickets")
 MOVES_DAYS = 7                        # the MOVEMENTS line: the stock ledger's last seven days (/yq-moves' own default)
 MOVES_BASIS = "at landed cost"        # what its BHD rests on: the /yq-stock basis, not the sales one
 FLOOR_KEY = "watch.floor_bhd"         # a transfer item valued below this stays off DO TODAY (/yq-watch lists it)

@@ -67,6 +67,8 @@ PLAYBOOK = {
     "attn|rep_silence": ("You", "Ask the rep what is holding his invoices back; check his stock and his route "
                                 "first", 1, 1),
     "attn|stale_data": ("You", "Load the newest Focus reports", 0, 1),
+    "attn|chat_tickets": ("The ticket's rep, then you", "Open each chat ticket, call the shop and mark it in progress "
+                                                        "or resolved (portal: YQ Assist, Tickets)", 1, 1),
     "profit_held": ("Accounts", "Post cost of sales in Focus for the invoices it is missing, then export the "
                                 "profitability report again", 3, 1),
     "inv_changed": ("Accounts", "Check why these invoices changed after they were exported", 3, 2),

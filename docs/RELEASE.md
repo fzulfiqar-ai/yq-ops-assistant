@@ -475,6 +475,233 @@ engine files, so `/yq-load` waits until Claude reverts `main` or the API is depl
 
 ---
 
+## Release assist1: the free-AI repair + YQ Assist, the marketplace chat (28-Oct-2026)
+
+**What ships.** (1) The router repair: on 28-Oct every default model the free rotation used was gone or refused, so
+the portal's AI had no working provider; it now uses the models that answer (Groq's qwen3.8-27b and gpt-oss, Mistral).
+(2) YQ Assist on the marketplace (docs/MARKETPLACE.md § YQ Assist): the chat, the microphone, the camera (a product, a
+box or a written list), pasted lists, "Ask the assistant" on an empty search, and the portal's **Merchant voice** page.
+The chat ships **off** (`shop_market_ai_enabled` = 0) and the page shows nothing until it is switched on.
+
+**Before step 1, the owner, in Render → the API service → Environment ("Save", not "Save and deploy"):**
+
+| Key | Why | Where to get it |
+|---|---|---|
+| `GROQ_API_KEY` | the backbone: chat, photos, voice; check it is set | console.groq.com → API Keys |
+| `MISTRAL_API_KEY` | second host, also reads photos and speech | console.mistral.ai → API Keys (free "Experiment" plan) |
+| `GEMINI_API_KEY` | third host (slow on 28-Oct, still a fallback) | aistudio.google.com → Get API key |
+| `OPENROUTER_API_KEY` | replace: the current key answers 401 "User not found" | openrouter.ai/keys |
+| `MOONSHOT_API_KEY`, `SAMBANOVA_API_KEY` | delete: suspended / invalid (Moonshot is prepaid, not free) | — |
+
+**When.** After a morning load. The release changes `app/`, so from the pull until the API deploy has finished
+`/yq-load` refuses ("a portal release is merged but not live"): go from the pull to the deploy in one sitting. The web
+(market + portal) deploys by itself after CI on the push to `main`; until the API is live the bubble stays hidden and
+the Merchant voice page says "not switched on yet".
+
+```
+git pull --ff-only                                                         # main = the assist1 commit Claude names
+python -m scripts.yq_backup release assist1                                # 1. the encrypted backup
+python -m scripts.apply_sql scripts/market_assist_migration.sql --rehearse # 2. "Rehearsal OK" (on production, rolled back)
+python -m scripts.apply_sql scripts/market_assist_migration.sql            #    "Done." (an error = nothing applied: tell Claude)
+python -m scripts.audit_grants                                             #    must exit 0
+python -m scripts.render_deploy status                                     # 3. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait               #    <sha> = the assist1 commit Claude names
+curl -s https://api.yqmarketplace.com/health                               # 4. "commit" = the first 12 characters of <sha>
+python -m scripts.ops status                                               #    no "merged but not live": /yq-load works again
+```
+
+**5. Check the AI, then switch the chat on.** Portal → Merchant voice → *Free AI today*: the Groq rows say available
+(a row with only failures needs a new key). Portal → Settings → the marketplace chat switch → on (live within a
+minute). On your phone at yqmarketplace.com, tap **Ask YQ** and try: "fast charger for iphone 15"; the same in Arabic;
+paste "20 C07 / 10 type c cable / 5 power bank" on three lines; the microphone; a photo of a charger box; "talk to my
+salesman"; a thumbs up and "Suggest an idea". The idea and the questions appear on the Merchant voice page.
+
+**If something is wrong.** The chat off: Settings → the switch → off (a minute). The API back: `python -m
+scripts.render_deploy rollback --deploy <the id of step 3> --wait`. The two new tables can stay (nothing reads them
+without the new API); to remove them, run the reverse lines at the top of `scripts/market_assist_migration.sql` with
+`apply_sql`. Then tell Claude.
+
+---
+
+## Release assist2: YQ Assist v2, the chat that sells, supports and escalates (built 29-Oct-2026)
+
+**What ships** (docs/MARKETPLACE.md § YQ Assist v2):
+- **The brain.** "What sells", deals and "plan my order" show in-stock items only, each with its reason. A sold-out
+  match brings in-stock alternatives. A policy question gets the office's approved words or goes to the rep. The rep
+  is brought in for a problem, a price, credit or an account, or when the shop is upset.
+- **Speed and safety.** The reply streams its stage ("Checking stock", "Writing"). A chat timeout benches a provider
+  for 30 s, not 5 minutes, so the portal's AI keeps its providers. The history comes from our own log, shop names are
+  masked before any model call, and every turn is logged with its milliseconds, a failed one included.
+- **Problem reports (tickets).** Damaged, wrong, missing, not working, delivery, a return, a call back. A ticket
+  names an order only when this device holds it, and never more than was delivered; goods bought on a visit are
+  reported without an order. Photos go to a private bucket with their location data removed. Each ticket sends a
+  Telegram line to the owner and a card on the rep's Today screen, and the Command Centre shows "N chat tickets
+  open". Reminders follow after the SLA. Chats are deleted after 180 days, closed tickets after 730.
+- **The look.** The orb, the water opening, the phone sheet, the six tiles, the plan, ticket and hand-off cards, and
+  the line "AI · can make mistakes".
+- **The back office.** Reports → **YQ Assist** has Today, Conversations, Tickets, Insights (with "Teach the
+  assistant"), Ideas & problems and Free AI today.
+
+**Tickets ship off** (`shop_ai_support_enabled` = 0): while off, a problem in the chat goes to the rep on WhatsApp, as
+in assist1. Policy answers ship empty, so every policy question goes to the rep until an answer is written in Insights.
+
+**When.** After a morning load. The release changes `app/`, so from the pull until the API deploy has finished
+`/yq-load` refuses ("a portal release is merged but not live"): go from the pull to the deploy in one sitting. The web
+deploys by itself after CI on the push to `main`. Until the API is live, the new chat page reads the old API's plain
+reply (the tiles are answered by the model, not from data), and the new YQ Assist tabs say "not switched on yet".
+
+**Before step 1.** CI is green for the head commit Claude names. `python -m scripts.probe_models` shows Groq available.
+
+```
+git pull --ff-only                                                            # main = the assist2 commit Claude names
+python -m scripts.yq_backup release assist2                                   # 1. the encrypted backup
+python -m scripts.apply_sql scripts/market_assist_v2_migration.sql --rehearse # 2. "Rehearsal OK" (on production, rolled back)
+python -m scripts.apply_sql scripts/market_assist_v2_migration.sql            #    "Done." (an error = nothing applied: tell Claude)
+python -m scripts.audit_grants                                                #    must exit 0
+python -m scripts.render_deploy status                                        # 3. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                  #    <sha> = the assist2 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                  # 4. "commit" = the first 12 characters of <sha>
+python -m scripts.ops status                                                  #    no "merged but not live": /yq-load works again
+```
+
+**5. Check, then switch on.**
+1. Reports → YQ Assist → *Today*: the tiles show numbers, not "not switched on yet".
+2. Settings → *Chat problem reports (tickets)* → on (live within a minute).
+3. On your phone at yqmarketplace.com, tap the orb and try:
+   - **What's selling now**: no card says Sold out.
+   - "fast charger for iphone 15", then the same in Arabic.
+   - "help me plan my order": one tap puts it in the cart.
+   - "my charger came broken": the ticket card, then a T-number. You get a Telegram line, the ticket is in
+     Reports → YQ Assist → Tickets, and the Command Centre shows "1 chat ticket open". Mark it resolved as
+     "Not valid" there afterwards.
+   - "what is your return policy": it goes to the rep. Write that answer in Insights → *Teach the assistant*, then
+     ask again: the reply is marked "Official YQ answer".
+   - "give me a better price": the rep, with "Ask for a call back".
+4. Close the chat while it is still answering: the orb shows a dot when the reply is ready.
+
+**If something is wrong.**
+- Tickets off: Settings → the switch → off (a minute).
+- The chat off: *Marketplace chat (YQ Assist)* → off.
+- The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 3> --wait`.
+- The data: the new tables and columns can stay, because the assist1 API never reads them. To remove them, run the
+  reverse lines at the top of `scripts/market_assist_v2_migration.sql` with `apply_sql`, then `audit_grants`.
+- Then tell Claude.
+
+## Release assist2.1: YQ Assist 2.1, the salesman voice (built 29-Oct-2026)
+
+**What ships** (docs/MARKETPLACE.md § YQ Assist 2.1):
+- **It asks before guessing.** "Does it fit my phone?" gets "Which phone is it for?" with phone chips. A question
+  that names nothing never gets "not in our catalogue".
+- **One next step per answer, with up to four quick replies.** The extra suggestion is what shops buy with the item
+  (in stock), then a real deal in its category.
+- **A salesman's 2–3 sentences** in the shop's language for typed questions. Tiles and chips stay instant (no model).
+- **It speaks first when opened**: the product open, this phone's usual items, or what shops order most.
+- **A small line beside the button**, once per visit, after 15 s on a shop or product page (Settings → *Chat
+  reaches out (bubble)*, on by default).
+- **"How do I report damaged goods?" gets the steps.** What happens after a report stays the rep's.
+
+**No migration**; the API and the web change. **Order:** the API first, from the release branch, so the merge then
+deploys the web onto it (the first way at the top of this file). Either half also works alone: the new web on the
+assist2 API shows no quick replies and the plain welcome, and the assist2 web ignores the new fields.
+
+**Before step 1.**
+- CI is green for the release commit Claude names on the branch `worktree-assist-sales`, which Claude first makes a
+  fast-forward of `main`.
+- `python -m scripts.probe_models` shows Groq available.
+
+```
+python -m scripts.yq_backup release assist2-1                                 # 1. the encrypted backup
+python -m scripts.render_deploy status                                        # 2. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                  #    <sha> = the assist2.1 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                  # 3. "commit" = the first 12 characters of <sha>
+```
+
+**4. The web.** Claude pushes `main` (the same commit, a fast-forward), and the web deploys itself after CI. In the
+main folder, run `git pull --ff-only`, then `python -m scripts.ops status`, which must not say "merged but not live".
+
+**5. Check on your phone** at yqmarketplace.com:
+1. Stay on the home page about 15 s. "Want today's best sellers?" appears beside the chat button once. Tap it: the
+   best sellers, all in stock, with category chips.
+2. Open the chat again: it speaks first.
+3. Tap *Does it fit my phone?*. It asks which phone; tap *iPhone 14 or older*: Lightning items and a suggestion.
+4. Type "what is the process of damage stock": the reporting steps and your rep's WhatsApp (with tickets on, a
+   *Report a problem* chip).
+5. Type "what is selling most?": a sentence that ends on a question, the cards and the chips.
+6. The same in Arabic (عربي at the top).
+
+**Then:**
+- Settings → *Chat problem reports (tickets)* → on, so the damage answer can start a report in the chat.
+- YQ Assist → Insights → *Teach the assistant*: write the returns and damage answer once. The chat then gives it as
+  the "Official YQ answer".
+
+**If something is wrong.**
+- The bubble: Settings → *Chat reaches out (bubble)* → off (a minute).
+- The chat: *Marketplace chat (YQ Assist)* → off.
+- The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 2> --wait`. The web on `main` can
+  stay: it works with the assist2 API (no quick replies, no opening line).
+- Then tell Claude.
+
+---
+
+## Release assist2.2: YQ Assist 2.2, one conversation with a human voice (built 29-Oct-2026)
+
+**What ships** (docs/MARKETPLACE.md § YQ Assist 2.2):
+- **The YQ mark in the orb** in the chat and on the desktop button. The phone button keeps its chat icon.
+- **The bubble names something real and changes each visit:** your campaign when one is live, an item this phone
+  asked to be told about that is back, the shop's usual items, the lines being cleared at the normal trade price, what
+  sells. "Not now" still rests it for a day.
+- **Products named the way people say them** ("the X01 UC Type-C cable"), not bare codes.
+- **One conversation, not the same reply twice.**
+  - "What should I order?" gets a starter order.
+  - "How can you help me sell more?" gets help from the shop's data.
+  - "What else?" shows new cards.
+  - A question already asked is not asked again.
+- **Problems: the AI tries first, the rep second.** *Report a problem* asks what happened. For an item that is not
+  working it gives the quick checks first; for a late order it shows its status. A replacement, a refund or checks
+  that did not help go to the rep, with the message written.
+- **Complaints get an apology and a question**, never sales chips.
+- **Arabic answers use your own Arabic lines.**
+- **Sold-out cards get "Tell me when it's back"** in the chat.
+
+**No migration**; the API and the web change. **Order:** the API first, then `main` (the web follows after CI).
+Either half also works alone: the new web on the assist2.1 API shows the old bubble line, and the assist2.1 web
+ignores the new fields.
+
+**Before step 1.**
+- CI is green for the release commit Claude names on the branch `worktree-assist-sales`, which Claude first makes a
+  fast-forward of `main`.
+- `python -m scripts.probe_models` shows Groq available.
+
+```
+python -m scripts.yq_backup release assist2-2                                 # 1. the encrypted backup
+python -m scripts.render_deploy status                                        # 2. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                  #    <sha> = the assist2.2 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                  # 3. "commit" = the first 12 characters of <sha>
+```
+
+**4. The web.** Claude pushes `main` (the same commit, a fast-forward), and the web deploys itself after CI. In the
+main folder, run `git pull --ff-only`, then `python -m scripts.ops status`, which must not say "merged but not live".
+
+**5. Check on your phone** at yqmarketplace.com (tap *Refresh* when the page offers a new version):
+1. Open the chat: the orb carries the YQ mark.
+2. Type "What should I order?", then "How can you help me to push sale?", then "Your product is very bad". You
+   should get a starter order, then help that names two products, then an apology that asks what happened (no
+   sales chips).
+3. Tap *Report a problem* → *It's not working* → *Cables*: the quick checks. Then *Still not working*: your rep,
+   with the message written.
+4. Close the chat and stay on the home page about 15 s: the bubble names something real. Come back later in a new
+   visit: another line.
+5. The same in Arabic (عربي at the top).
+
+**If something is wrong.**
+- The bubble: Settings → *Chat reaches out (bubble)* → off (a minute).
+- The chat: *Marketplace chat (YQ Assist)* → off.
+- The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 2> --wait`. The web on `main` can
+  stay: on the assist2.1 API it shows the old bubble line and the 2.1 answers.
+- Then tell Claude.
+
+---
+
 ## Reference: what R6 added to the checks
 
 - `/health` → `commit` (RENDER_GIT_COMMIT): the smoke can prove which build answers.

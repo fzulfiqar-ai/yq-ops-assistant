@@ -497,6 +497,32 @@ check('a pull inside a pasted list or a field scrolls it, never the sheet (final
   eq(SH.pullAllowed(null, body), true, 'no target (synthetic): the body rule alone')
 })
 
+// K1 menu aim (29-Oct-2026): a hand heading from a category to its panel crosses the rows below it
+const MA = await mod('market/lib/menuAim.ts').catch((e) => ({ missing: e }))
+check('menu aim: heading for the panel keeps the category; a hand moving down the list switches at once', () => {
+  if (MA.missing) throw new Error('market/lib/menuAim.ts did not load: ' + (MA.missing.message || MA.missing))
+  const panel = { left: 240, right: 960, top: 0, bottom: 400 } // the list is x 0–240, the panel to its right
+  eq(MA.headingForPanel({ x: 100, y: 50 }, { x: 130, y: 70 }, panel), true, 'right and a little down, toward the panel')
+  eq(MA.headingForPanel({ x: 100, y: 50 }, { x: 101, y: 90 }, panel), false, 'straight down the list')
+  eq(MA.headingForPanel({ x: 100, y: 50 }, { x: 80, y: 60 }, panel), false, 'moving away from the panel')
+  eq(MA.headingForPanel({ x: 100, y: 50 }, { x: 100, y: 50 }, panel), false, 'not moving')
+  eq(MA.headingForPanel({ x: 100, y: 380 }, { x: 140, y: 385 }, panel), true, 'from a low row toward the panel bottom')
+  eq(MA.headingForPanel({ x: 100, y: 380 }, { x: 140, y: 395 }, panel), false, 'steeper than its bottom corner: heading below the panel')
+  // Arabic: the list is on the right (x 960–1200) and the panel to its left
+  const rtl = { left: 240, right: 960, top: 0, bottom: 400 }
+  eq(MA.headingForPanel({ x: 1100, y: 50 }, { x: 1070, y: 70 }, rtl, true), true, 'Arabic: left and a little down, toward the panel')
+  eq(MA.headingForPanel({ x: 1100, y: 50 }, { x: 1130, y: 60 }, rtl, true), false, 'Arabic: moving away from the panel')
+})
+check('menu aim trail: the heading is measured from the 4th-last position; a fresh move is not a rest', () => {
+  if (typeof MA.createTrail !== 'function') throw new Error('market/lib/menuAim.ts has no createTrail()')
+  const t = MA.createTrail()
+  eq([t.oldest(), t.latest()], [undefined, undefined], 'empty before the first move')
+  for (let i = 1; i <= 6; i += 1) t.move(i * 10, i)
+  eq(t.oldest(), { x: 30, y: 3 }, 'the oldest of the last four')
+  eq(t.latest(), { x: 60, y: 6 }, 'the latest')
+  eq(t.restedMs() < 50, true, 'just moved: not resting')
+})
+
 const HI = await mod('market/lib/history.ts').catch((e) => ({ missing: e }))
 check('Back goes Home when this tab has no shop page behind it, even after a filter replaced the entry (final review #6)', () => {
   if (HI.missing) throw new Error('market/lib/history.ts did not load: ' + (HI.missing.message || HI.missing))

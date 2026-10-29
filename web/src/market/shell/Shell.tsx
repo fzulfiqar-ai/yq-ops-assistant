@@ -1,7 +1,8 @@
-import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { lazyPage } from '@/lib/lazyPage'
 import { cn } from '@/lib/utils'
+import { AssistLauncher } from '../assist/AssistLauncher'
 import { splashDue } from '../lib/splashGate'
 import { useMarket } from '../MarketContext'
 import { ErrorBoundary } from '../ui/ErrorBoundary'
@@ -115,6 +116,12 @@ function ShellBody() {
       <ErrorBoundary key={`palette:${paletteOpen ? 1 : 0}`} overlay onDismiss={closePalette}>
         <Suspense fallback={null}>{paletteOpen && <SearchPalette />}</Suspense>
       </ErrorBoundary>
+      {/* YQ Assist: the chat launcher, beside the page slot so a page change never remounts it (the
+       * slot is keyed per page); nothing renders unless the office has switched the chat on. A chat
+       * that breaks disappears; the shop under it carries on. */}
+      <ErrorBoundary silent>
+        <AssistLauncher />
+      </ErrorBoundary>
       {/* Its own boundary, and a night field for the gap: the first frame of a session's first load is
        * the brand, with the horizon and the logo animating in on top of it. A product panel or the
        * palette loading later must never paint it, hence the split. Mounted only when the opening is
@@ -122,13 +129,23 @@ function ShellBody() {
        * An opening that breaks is skipped, and its night frame lifted. */}
       {NEEDS_SPLASH && (
         <ErrorBoundary silent onError={liftBootFrame}>
-          <Suspense fallback={<div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" />}>
+          <Suspense fallback={<SplashGap />}>
             <Splash />
           </Suspense>
         </ErrorBoundary>
       )}
     </>
   )
+}
+
+/**
+ * The gap while the opening's code arrives. The served first frame (#yq-boot: the night field with the
+ * logo tile) is still up and covers it, so nothing is drawn over it: a plain night field here hid the
+ * logo for about a second (design review, 29-Oct-2026). Only if that frame is already gone does the
+ * gap get its own night field.
+ */
+function SplashGap() {
+  return document.getElementById('yq-boot') ? null : <div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" />
 }
 
 function MobileShell() {
@@ -143,7 +160,23 @@ function MobileShell() {
   // hide the nav (+ dock) on scroll-down; page bars always stay. A page change scrolls to the
   // top (EntryParams), which reports 'top' and brings the nav back. While a sheet is open the
   // body cannot scroll, so the direction cannot change.
-  const hidden = dir === 'down' && !hasPageBar && pathname !== '/checkout'
+  // K4: a photo flying to the cart calls the bar back (lib/flight): it hides while scrolling down,
+  // and the photo would land on nothing (design review)
+  const [flying, setFlying] = useState(false)
+  useEffect(() => {
+    let t = 0
+    const on = () => {
+      setFlying(true)
+      window.clearTimeout(t)
+      t = window.setTimeout(() => setFlying(false), 1600)
+    }
+    window.addEventListener('yq:cart-flight', on)
+    return () => {
+      window.removeEventListener('yq:cart-flight', on)
+      window.clearTimeout(t)
+    }
+  }, [])
+  const hidden = dir === 'down' && !hasPageBar && pathname !== '/checkout' && !flying
 
   // measure the bottom stack so pages (and toasts) can clear it
   useLayoutEffect(() => {
@@ -167,6 +200,7 @@ function MobileShell() {
       </main>
       <div
         ref={stackRef}
+        data-bottom-stack=""
         className={cn('fixed inset-x-0 bottom-0 z-nav flex flex-col justify-end transition-transform duration-3 ease-m', hidden && 'pointer-events-none')}
         style={{
           paddingBottom: 'var(--m-safe-b)',

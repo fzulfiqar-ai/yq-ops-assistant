@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ChevronDown, CircleUserRound, Search, Tag, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { SearchHints } from '../components/SearchField'
+import { TypedHints } from '../components/SearchField'
 import { useMarket, useOrder } from '../MarketContext'
 import { isDeal } from '../lib/facets'
 import { bhd, categorySlug, niceCategory } from '../lib/format'
@@ -10,8 +10,12 @@ import { dealSets } from '../lib/home'
 import { NAV_ICONS } from '../lib/icons'
 import { useCartAddTick, useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
+import { HoverPill } from '../ui/HoverPill'
 import { MegaNav } from './MegaNav'
 import { useShell } from './ShellContext'
+
+/** a mouse rests this long on Browse before the menu opens (K1): a hand passing over it never flashes it */
+const MENU_INTENT_MS = 90
 
 /**
  * Tablet/desktop header. Sticky, glass, 72px. Logo + "Where Bahrain restocks." · Browse (mega-nav
@@ -27,9 +31,16 @@ import { useShell } from './ShellContext'
  * column, scroll-margin for in-page anchors — pins to `var(--m-sticky-h, var(--m-header-h))`,
  * never to a hard-coded 72px.
  */
+/** the strip's placeholder pills while the catalogue arrives, about the width of the category chips */
+const STRIP_HOLD = [58, 70, 92, 84, 82, 132, 130, 116]
+
 export function StickyHeader() {
   const { viewport, openPalette, openCart, paletteOpen } = useShell()
-  const { categories, items, itemsByCode, rep, data } = useMarket()
+  // the hint holds still behind an open panel or sheet, as the page does (round 2)
+  const { categories, items, itemsByCode, rep, data, status } = useMarket()
+  // the catalogue is on its way (a first load): the strip and the deals link keep their place, so the page
+  // never drops 45 px and the search never narrows when it lands (release review, 29-Oct-2026)
+  const arriving = status === 'loading' && categories.length === 0
   const { quote } = useOrder()
   const lines = useCartLines()
   const { items: count, units } = useCartCounts()
@@ -44,6 +55,18 @@ export function StickyHeader() {
   const [tickSeen, setTickSeen] = useState(tick)
   const [pathSeen, setPathSeen] = useState(pathname)
   const closeTimer = useRef<number | undefined>(undefined)
+  const openTimer = useRef<number | undefined>(undefined)
+  // the pointer that pressed Browse: a mouse click never closes the menu hovering just opened
+  const pressedBy = useRef('')
+  // the menu's timers never outlive the header (the shell swaps it out below 1024 px)
+  useEffect(() => {
+    const open = openTimer
+    const close = closeTimer
+    return () => {
+      window.clearTimeout(open.current)
+      window.clearTimeout(close.current)
+    }
+  }, [])
   const headerRef = useRef<HTMLElement>(null)
   const megaRef = useRef<HTMLDivElement>(null)
   const desktop = viewport === 'desktop' || viewport === 'wide'
@@ -70,11 +93,18 @@ export function StickyHeader() {
       setMega(false)
       megaRef.current?.querySelector<HTMLElement>('button[aria-haspopup]')?.focus()
     }
+    // the page dims under the open menu (K1), so a scroll of the page under it closes it
+    const fromY = window.scrollY
+    const onScroll = () => {
+      if (Math.abs(window.scrollY - fromY) > 48) setMega(false)
+    }
     document.addEventListener('pointerdown', onDown)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScroll, { passive: true })
     return () => {
       document.removeEventListener('pointerdown', onDown)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScroll)
     }
   }, [mega])
   useEffect(() => {
@@ -119,20 +149,33 @@ export function StickyHeader() {
 
   const openMega = () => {
     window.clearTimeout(closeTimer.current)
+    window.clearTimeout(openTimer.current)
     setMega(true)
   }
+  // a mouse opens it after a short rest (K1), so a hand passing over Browse on its way to the search
+  // or the logo never flashes the menu open; a click opens it at once
+  const openMegaSoon = () => {
+    window.clearTimeout(closeTimer.current)
+    if (mega) return
+    window.clearTimeout(openTimer.current)
+    openTimer.current = window.setTimeout(() => setMega(true), MENU_INTENT_MS)
+  }
   const closeMegaSoon = () => {
+    window.clearTimeout(openTimer.current)
     window.clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => setMega(false), 160)
   }
 
   // `hit`: 40px drawn, a 44px tap area on touch screens (market.css) — the look is unchanged
   const linkBase = 'hit relative inline-flex h-10 items-center gap-1.5 rounded-sm px-3 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
-  const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:bg-plum-wash hover:text-ink')
+  const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:text-ink')
 
   return (
-    <header ref={headerRef} className="sticky top-0 z-header">
-      <div className="glass border-b border-line">
+    <header ref={headerRef} className="header-lift sticky top-0 z-header">
+      {/* `relative z-[1]`: the row is its own stacking context above the strip below, so the strip,
+          painted later, never covers the mega-nav's first row or takes its clicks (it did while each
+          frosted bar was a context of its own: 29-Oct-2026). The bars are solid since round 2. */}
+      <div className="bar-solid relative z-[1] border-b border-line">
         <div className="container-m flex h-header items-center gap-3 lg:gap-4">
           <Link to="/" aria-label={`${S.brand} · ${S.kicker}`} className="hit relative flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
             <img src="/yq-logo-160.webp" alt="" width={40} height={40} className="h-10 w-10 rounded-sm" />
@@ -149,15 +192,27 @@ export function StickyHeader() {
           {desktop ? (
             <div
               ref={megaRef}
-              className="relative shrink-0"
-              onPointerEnter={(e) => e.pointerType === 'mouse' && openMega()}
+              // pb-2 + -mb-2: the 8 px between the button and the menu is part of this hover area (a
+              // bridge), so a slow hand crossing it never starts the 160 ms close; the layout is unchanged
+              className="relative -mb-2 shrink-0 pb-2"
+              onPointerEnter={(e) => e.pointerType === 'mouse' && openMegaSoon()}
               onPointerLeave={(e) => e.pointerType === 'mouse' && closeMegaSoon()}
             >
               <button
                 type="button"
                 aria-haspopup="true"
                 aria-expanded={mega}
-                onClick={() => setMega((v) => !v)}
+                onPointerDown={(e) => {
+                  pressedBy.current = e.pointerType
+                }}
+                onClick={() => {
+                  // hovering already opened the menu for a mouse, so its click only ever opens (it used
+                  // to toggle the menu shut); a tap or the keyboard still toggles
+                  const mouse = pressedBy.current === 'mouse'
+                  pressedBy.current = ''
+                  if (mouse) openMega()
+                  else setMega((v) => !v)
+                }}
                 className={cn(
                   'inline-flex h-11 items-center gap-1.5 rounded-sm px-3.5 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
                   mega || pathname.startsWith('/shop') || pathname.startsWith('/t/') || pathname.startsWith('/brands/') ? 'bg-plum-soft text-plum-ink' : 'text-ink hover:bg-plum-wash',
@@ -168,21 +223,24 @@ export function StickyHeader() {
               {megaMounted && <MegaNav leaving={!mega} onGone={() => setMegaMounted(false)} onClose={() => setMega(false)} onEnter={openMega} onLeave={closeMegaSoon} />}
             </div>
           ) : (
-            <NavLink to="/shop" className={linkCls}>
+            // outside the shortcuts' hover pill: this one keeps its own wash
+            <NavLink to="/shop" className={(s) => cn(linkCls(s), !s.isActive && 'hover:bg-plum-wash')}>
               {S.nav.browse}
             </NavLink>
           )}
 
-          {/* search → palette; the rotating example stands in for a placeholder */}
+          {/* search → palette; a typed example stands in for a placeholder (round 2: the owner chose
+              "Typing hint"), and the trigger answers the mouse: a plum edge and glow, the glass nudges,
+              a press gives */}
           <button
             type="button"
             onClick={() => openPalette()}
             aria-label={S.searchLabel}
-            className="group flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-md border border-line bg-surface pe-2 ps-3.5 text-start text-md transition duration-1 ease-m hover:border-ink/25 hover:shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 lg:max-w-[640px]"
+            className="m-press group flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-md border border-line bg-surface pe-2 ps-3.5 text-start text-md transition duration-1 ease-m hover:border-plum/45 hover:shadow-[0_0_0_4px_hsl(var(--m-plum)/0.08),0_8px_20px_-12px_hsl(var(--m-plum)/0.5)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 active:scale-[.985] lg:max-w-[640px]"
           >
-            <Search size={18} strokeWidth={2} aria-hidden="true" className="shrink-0 text-plum" />
-            <SearchHints hints={S.search.hints} paused={paletteOpen} className="min-w-0 flex-1" leadClassName="text-ink-3" hintClassName="text-ink-2" />
-            <kbd className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 xl:inline">{S.search.shortcut}</kbd>
+            <Search size={18} strokeWidth={2} aria-hidden="true" className="shrink-0 text-plum transition-transform duration-2 ease-m group-hover:-rotate-12 group-hover:scale-110" />
+            <TypedHints hints={S.search.hints} paused={paletteOpen} className="min-w-0 flex-1" leadClassName="text-ink-3" hintClassName="text-ink-2" />
+            <kbd dir="ltr" className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 xl:inline">{S.search.shortcut}</kbd>
           </button>
 
           {/* Four anonymous 15px glyphs — a tag, a lightning bolt, a receipt, a person — is what this
@@ -194,14 +252,22 @@ export function StickyHeader() {
               "Search “20W charger”". Labelling all four would cost ~100px more and squeeze the
               trigger under 140px, so Orders (receipt) and My YQ (person/rep photo) — conventional
               icons — keep title + aria-label until 1280, where everything is labelled. */}
-          <nav aria-label={S.nav.shortcuts} className="ms-auto hidden shrink-0 items-center gap-0.5 md:flex">
-            {hasDeals && (
+          <nav aria-label={S.nav.shortcuts} className="relative ms-auto hidden shrink-0 items-center gap-0.5 md:flex">
+            <HoverPill className="rounded-sm" />
+            {hasDeals ? (
               <Link to="/shop?f=deals" aria-current={dealsActive ? 'page' : undefined} className={linkCls({ isActive: dealsActive })}>
                 <span aria-hidden="true" className="grid h-5 w-5 place-items-center rounded-full bg-deal-soft text-deal-ink">
                   <Tag size={12} strokeWidth={2.2} />
                 </span>
                 <span>{dealsLabel}</span>
               </Link>
+            ) : (
+              arriving && (
+                <span aria-hidden="true" className={cn(linkCls({ isActive: false }), 'invisible')}>
+                  <span className="h-5 w-5" />
+                  <span>{S.shop.clearance}</span>
+                </span>
+              )
             )}
             {desktop && (
               <NavLink to="/quick" className={linkCls}>
@@ -219,6 +285,8 @@ export function StickyHeader() {
 
           <button
             type="button"
+            // K4: where an added photo lands below 1280 px (lib/flight: the mini-cart column is 1)
+            data-cart-target={2}
             onClick={() => (wide ? navigate('/cart') : pathname === '/cart' ? undefined : openCart())}
             className={cn(
               'relative ms-1 inline-flex h-11 shrink-0 items-center gap-2 overflow-hidden rounded-sm px-3.5 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
@@ -230,12 +298,17 @@ export function StickyHeader() {
             <span>{S.nav.restock}</span>
             {count > 0 && (
               <span aria-hidden="true" className={cn('grid h-5 min-w-[20px] place-items-center rounded-full bg-white/15 px-1.5 text-xs font-bold tnum text-white', bump && 'anim-bump')}>
-                {count > 99 ? '99+' : count}
+                {/* K8: a new number rolls in (keyed: each change remounts it with the tick) */}
+                <span key={count} data-cart-count="" className="anim-tick-up">
+                  {count > 99 ? '99+' : count}
+                </span>
               </span>
             )}
             {count > 0 && (
               <span aria-hidden="true" className="hidden border-s border-white/15 ps-2 font-display tnum 2xl:inline">
-                {bhd(total)}
+                <span key={total} className="anim-tick-up inline-block">
+                  {bhd(total)}
+                </span>
               </span>
             )}
             {min && (
@@ -245,11 +318,22 @@ export function StickyHeader() {
             )}
           </button>
         </div>
+        {/* K1: a soft dim over the strip and the page while the menu is open; the header row stays
+            bright. Inside the row's layer, so it sits over the strip and under the menu; a press on
+            it closes the menu (the press-outside rule above) and reaches nothing under it. */}
+        {desktop && megaMounted && (
+          <div
+            aria-hidden="true"
+            className={cn('absolute inset-x-0 top-full h-[100dvh] bg-ink/20', mega ? '[animation:m-fade-in_200ms_var(--m-ease-out)_both]' : 'pointer-events-none [animation:m-fade-out_140ms_var(--m-ease-in)_both]')}
+          />
+        )}
       </div>
 
-      {showStrip && categories.length > 0 && (
-        <div className="glass border-b border-line">
-          <div className="container-m no-scrollbar flex h-11 items-center gap-1.5 overflow-x-auto">
+      {showStrip && (categories.length > 0 || arriving) && (
+        <div className="bar-solid border-b border-line">
+          <div className="container-m no-scrollbar relative flex h-11 items-center gap-1.5 overflow-x-auto">
+            {arriving && STRIP_HOLD.map((w, i) => <span key={i} aria-hidden="true" className="h-7 shrink-0 rounded-full bg-line/50" style={{ width: w }} />)}
+            {categories.length > 0 && <HoverPill className="rounded-full" />}
             {categories.map((c) => {
               const to = `/t/${categorySlug(c)}`
               const active = pathname === to
@@ -259,7 +343,7 @@ export function StickyHeader() {
                   to={to}
                   className={cn(
                     'hit relative shrink-0 rounded-full px-3.5 py-1.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
-                    active ? 'bg-ink text-white' : 'text-ink-2 hover:bg-plum-wash hover:text-ink',
+                    active ? 'bg-ink text-white' : 'text-ink-2 hover:text-ink',
                   )}
                 >
                   {niceCategory(c)}

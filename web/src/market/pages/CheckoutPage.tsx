@@ -14,7 +14,7 @@ import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { errorText } from '../lib/serverWords'
 import { useServerWords } from '../lib/useServerWords'
 import { clearSmallAck } from '../lib/smallOrder'
-import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
+import { PageBar, useHideNav, usePageTitle, useShellViewport } from '../shell/ShellContext'
 import { useReducedMotion } from '../shell/useViewport'
 import { cartStore, useCartCounts, useCartLines } from '../store/cart'
 import { ltrText } from '../i18n'
@@ -47,7 +47,7 @@ export default function CheckoutPage() {
   const totalText = quote ? bhd(quote.total_bhd) : `≈ ${bhd(estimate)}`
   const { rep, data, itemsByCode, recognized } = m
   const words = useServerWords()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const reduced = useReducedMotion()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
@@ -452,7 +452,7 @@ export default function CheckoutPage() {
           {/* the lines, so the merchant sees what they are confirming */}
           <div className="mt-4 rounded-lg border border-line bg-surface">
             <div className="flex items-center justify-between px-4 pt-3">
-              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.cart.title}</h2>
+              <h2 className="text-xs font-semibold text-ink-3">{S.cart.title}</h2>
               <Link to="/cart" className="hit relative text-xs font-semibold text-plum hover:underline">
                 {S.cart.edit}
               </Link>
@@ -490,7 +490,7 @@ export default function CheckoutPage() {
 
           {/* how it works */}
           <div className="mt-4 rounded-lg border border-line bg-surface p-4">
-            <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.checkout.how}</h2>
+            <h2 className="text-xs font-semibold text-ink-3">{S.checkout.how}</h2>
             <ol className="mt-2 space-y-2">
               {S.placed.next.map((step, i) => (
                 <li key={step} className="flex items-start gap-2.5 text-sm text-ink-2">

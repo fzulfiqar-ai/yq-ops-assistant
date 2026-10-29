@@ -1,4 +1,4 @@
-import { useEffect, useState, type PointerEvent as ReactPointerEvent, type RefObject } from 'react'
+import { useEffect, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type RefObject } from 'react'
 
 /**
  * Sheet behaviour shared by both builds (28-Oct-2026 polish, motion list M5): the marketplace's
@@ -27,6 +27,25 @@ export const OUT_MS = 200
 
 let locks = 0
 let saved = { overflow: '', paddingRight: '', gutter: '' }
+const lockWatchers = new Set<(locked: boolean) => void>()
+
+/** Told when the page locks (the first lock) and unlocks (the last release): the market's wheel
+ *  glide (market/lib/glide) pauses with the page, so nothing moves behind an open layer. */
+export function onScrollLock(fn: (locked: boolean) => void): () => void {
+  lockWatchers.add(fn)
+  return () => {
+    lockWatchers.delete(fn)
+  }
+}
+
+export const scrollLocked = (): boolean => locks > 0
+
+const watchLock = (fn: () => void) => onScrollLock(() => fn())
+/** True while any layer holds the page: the market's slider and search hint hold still behind an open
+ *  panel, as its CSS animations do (html[data-layer], set by lockScroll). */
+export function useLayerOpen(): boolean {
+  return useSyncExternalStore(watchLock, scrollLocked, () => false)
+}
 
 /**
  * Between pages the html keeps a stable scrollbar gutter, so a short page and a long one line up. A
@@ -48,6 +67,8 @@ export function lockScroll(): () => void {
       body.style.paddingRight = `${pad + bar}px`
     }
     body.style.overflow = 'hidden'
+    html.dataset.layer = ''
+    lockWatchers.forEach((fn) => fn(true))
   }
   let released = false
   return () => {
@@ -57,6 +78,8 @@ export function lockScroll(): () => void {
       body.style.overflow = saved.overflow
       body.style.paddingRight = saved.paddingRight
       html.style.scrollbarGutter = saved.gutter
+      delete html.dataset.layer
+      lockWatchers.forEach((fn) => fn(false))
     }
   }
 }

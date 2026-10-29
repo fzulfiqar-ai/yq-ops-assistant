@@ -17,7 +17,7 @@ import { MarketCard } from './MarketCard'
 import { SearchGroups, SearchPreparing } from './SearchResults'
 
 const POPULAR_MAX = 5
-const SECTION_H = 'text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2'
+const SECTION_H = 'text-xs font-semibold text-ink-2'
 
 /** Real best sellers / movers that are in stock — the shelf merchants reorder from most. */
 function popularRestocks(items: ShopItem[]): ShopItem[] {

@@ -381,8 +381,24 @@ export interface TodayData {
   baskets: Baskets | null
   link_week: LinkWeek | null
   restock: { item_code: string; display_name: string; count: number; phones: string[]; first_at: string; ids: number[]; stock_qty?: number | null; back_in_stock: boolean }[]
+  /** YQ Assist v2: the problems and call-back requests my shops raised in the chat (app/followups.py _chat_tickets) */
+  chat?: ChatTicket[]
   errors: Record<string, string>
   generated_at?: string
+}
+
+export interface ChatTicket {
+  id: number
+  ref: string
+  kind: string
+  label: string
+  status: 'new' | 'in_progress' | 'waiting_shop'
+  lines: { item_code: string; qty: number }[]
+  note: string | null
+  created_at: string
+  order_no: string | null
+  shop: string | null
+  wa_url: string | null
 }
 
 export function useToday() {

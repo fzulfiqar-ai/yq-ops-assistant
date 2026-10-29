@@ -35,7 +35,7 @@ export function BrandTiles({ items, className }: { items: ShopItem[]; className?
                 </span>
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate font-display text-base font-extrabold uppercase tracking-[0.02em] text-ink">{t.brand}</span>
+                <span className="block truncate font-display text-base font-extrabold text-ink">{t.brand}</span>
                 <span className="block text-xs tnum text-ink-2">{S.brands.lines(t.count)}</span>
               </span>
               <ChevronRight size={16} className="shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100 rtl:group-hover:-translate-x-0.5" aria-hidden="true" />

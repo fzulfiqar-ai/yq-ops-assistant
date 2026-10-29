@@ -2,7 +2,7 @@ import { Children, isValidElement, useEffect, useRef, useState, type ReactNode }
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useReveal } from '../hooks/useReveal'
-import { useShell } from '../shell/ShellContext'
+import { useShellViewport } from '../shell/ShellContext'
 import { scrollMotion } from '../shell/useViewport'
 import { S } from '../strings'
 import { SectionHeader } from '../ui/SectionHeader'
@@ -23,7 +23,7 @@ import { SectionHeader } from '../ui/SectionHeader'
  * element passed to useReveal. Scroll rails get no reveal — their cards are off-screen sideways.
  */
 export function Rail({ id, title, subtitle, action, seeAllTo, children, max = 6 }: { id: string; title: string; subtitle?: string; action?: ReactNode; seeAllTo?: string; children: ReactNode; max?: number }) {
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const desktop = viewport === 'desktop' || viewport === 'wide'
   const all = Children.toArray(children)
   const shown = desktop ? all.slice(0, viewport === 'wide' ? Math.min(max, 6) : Math.min(max, 4)) : all

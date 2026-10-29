@@ -612,6 +612,16 @@ export const en = {
     thisPhone: 'Orders from this phone',
     otherPhone: 'Ordered from another phone? Ask your representative to send you your orders link.',
     all: 'All orders',
+    /** the empty Orders page: what happens after an order (design review, 29-Oct-2026) */
+    steps: {
+      title: 'How an order moves',
+      send: 'Send your restock',
+      sendHint: 'Pick lines in the shop, or paste a list in Quick order.',
+      confirm: 'Your rep confirms it',
+      confirmHint: 'Prices and stock are checked before anything is packed.',
+      deliver: 'Delivered to your shop',
+      deliverHint: 'Follow it on this page, live.',
+    },
   },
   me: {
     title: 'My YQ',

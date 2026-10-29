@@ -15,7 +15,7 @@ import { currentRef, forgetRef, isSlugShaped, rememberedOrders, rememberRef } fr
 import { categoryTiles, heroSplit, liveOffer, orderLines, splitReorder } from '../lib/home'
 import { buildSlides, heroDeck, SECTION_SLIDE_IDS, SOON_SLIDE_ID, useClaimSlides } from '../lib/slides'
 import { useUpcoming } from '../lib/upcoming'
-import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
+import { usePageTitle, useSearchBand, useShellViewport } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
 import { S } from '../strings'
@@ -91,9 +91,11 @@ export default function Home() {
   const navigate = useNavigate()
   const m = useMarket()
   const { myOrders } = useOrder()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const { data, status, items, itemsByCode, categories, rep, recognized, campaigns } = m
   const lines = useCartLines()
+  // the cart this visit to Home opened with: an Add made here never drops a card in above the hand
+  const [cartAtStart] = useState(lines.length > 0)
   usePageTitle(null, false, rep ? `${rep.first_name || rep.name} · ${S.brand}` : `${S.brand} · ${S.company}`)
   useSearchBand()
 
@@ -194,7 +196,7 @@ export default function Home() {
   // the Order again card (cart empty, last order known — or still loading) already offers the
   // reorder: no second button above it
   const againCard = lines.length === 0 && recognized && (againLines.length > 0 || reorder.sold.length > 0 || pendingOrders)
-  const continueTop = lines.length > 0 || recognized
+  const continueTop = cartAtStart || recognized
   // With nothing to continue the card is the paste card, and it keeps its mid-page slot (HomeBelow)
   // — the phone's one paste moment besides the closing band, which is why the phone deck drops
   // 'd:quick'. Desktop already makes that offer twice (the hero/aside and the band), so there the
@@ -216,7 +218,7 @@ export default function Home() {
             // With one tile the stage keeps a little less of the row, so the single tile lands
             // landscape (~3:2) instead of a cramped square — the tile's own layout is copy beside
             // art, and that needs width.
-            <div className={cn('grid gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-cols-[minmax(0,1.95fr)_minmax(0,1fr)]' : stage.tiles.length === 1 && 'grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]')}>
+            <div className={cn('hero-drift grid gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-cols-[minmax(0,1.95fr)_minmax(0,1fr)]' : stage.tiles.length === 1 && 'grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]')}>
               <PromoSlider slides={stage.hero} layout="desktop" className="min-w-0" />
               {stage.tiles.length > 0 && (
                 <ul className={cn('grid min-w-0 gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-rows-2' : 'grid-rows-1')}>
@@ -235,7 +237,7 @@ export default function Home() {
 
         <HomeBlocks.CategoryTiles tiles={tiles} />
 
-        <div className="flex flex-col gap-3 empty:hidden lg:gap-4">
+        <div className="intro-steps flex flex-col gap-3 empty:hidden lg:gap-4">
           {continueTop && continueCard}
           {recognized && openOrder && <HomeBlocks.TrackCard order={openOrder} />}
           {offer && <HomeBlocks.OfferStrip offer={offer} />}

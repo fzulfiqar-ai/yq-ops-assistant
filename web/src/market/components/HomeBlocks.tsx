@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Clock, MessageCircle, Package, RotateCcw, Tag, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -100,12 +101,41 @@ const TILE_RING = ['ring-tile-lilac', 'ring-tile-apricot', 'ring-tile-mint']
 const TILE_WASH = ['bg-tile-lilac/60', 'bg-tile-apricot/60', 'bg-tile-mint/60']
 
 export function CategoryTiles({ tiles, className }: { tiles: { category: string; count: number; newCount: number; image: ShopItem | null }[]; className?: string }) {
+  // F5: the entrance (html[data-intro], main.market.tsx) lets go once these discs and the next steps
+  // have played, counted from when they came — a catalogue that lands late still gets its entrance
+  const shown = tiles.length > 0
+  // ...and the discs come in WITH their photos: the entrance holds (at most 800 ms) until the first
+  // eight have decoded - they used to pop in as empty circles that filled in later (design review)
+  const [intro] = useState(() => typeof document !== 'undefined' && 'intro' in document.documentElement.dataset)
+  const [photosIn, setPhotosIn] = useState(false)
+  const listRef = useRef<HTMLUListElement>(null)
+  useEffect(() => {
+    if (!intro || !shown) return
+    let done = false
+    const go = () => {
+      if (done) return
+      done = true
+      setPhotosIn(true)
+    }
+    const cap = window.setTimeout(go, 800)
+    const imgs = Array.from(listRef.current?.querySelectorAll('img') ?? []).slice(0, 8)
+    void Promise.all(imgs.map((i) => i.decode().catch(() => undefined))).then(go)
+    return () => {
+      done = true
+      window.clearTimeout(cap)
+    }
+  }, [intro, shown])
+  useEffect(() => {
+    if (!intro || !photosIn) return
+    const t = window.setTimeout(() => delete document.documentElement.dataset.intro, 1700)
+    return () => window.clearTimeout(t)
+  }, [intro, photosIn])
   if (!tiles.length) return null
   return (
     <section className={className} aria-label={S.categories.title}>
-      <ul className="grid grid-cols-4 gap-x-1.5 gap-y-3.5 md:grid-cols-8 lg:gap-x-3">
+      <ul ref={listRef} className={cn('grid grid-cols-4 gap-x-1.5 gap-y-3.5 md:grid-cols-8 lg:gap-x-3', intro && !photosIn && 'intro-wait')}>
         {tiles.map((t, i) => (
-          <li key={t.category} className="min-w-0">
+          <li key={t.category} className="intro-disc min-w-0" style={{ ['--k' as string]: i }}>
             <Link
               to={`/t/${categorySlug(t.category)}`}
               onClick={() => track('rail_click', { meta: { rail: 'tile', pos: i } })}
@@ -176,7 +206,7 @@ export function TrackCard({ order, className }: { order: MyOrderSummary; classNa
         <Package size={18} aria-hidden="true" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2 tnum">
+        <span className="block text-xs font-semibold text-ink-2 tnum">
           <Ltr>{order.order_no}</Ltr>
         </span>
         <span className="block truncate font-display text-sm font-bold text-ink">

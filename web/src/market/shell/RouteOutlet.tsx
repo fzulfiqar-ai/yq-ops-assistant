@@ -16,7 +16,7 @@ import { PageSkeleton } from '../ui/Skeleton'
  * Home, a product deep link (/p/{code}) and a rep storefront (/{slug}) share one key: they are the
  * same page, and the panel opening or closing must never remount it.
  */
-const PAGES = new Set(['t', 'shop', 'search', 'quick', 'about', 'brands', 'cart', 'checkout', 'orders', 'me', 'o'])
+const PAGES = new Set(['t', 'shop', 'search', 'quick', 'about', 'brands', 'cart', 'checkout', 'orders', 'me', 'o', 'ask'])
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function pageKey(pathname: string): string {

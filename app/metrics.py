@@ -1609,7 +1609,49 @@ def attention_live(ctx: Ctx) -> list[dict]:
                              "Focus has invoiced them but the order is not marked Delivered",
                              "Open orders with a confirmed Focus link or a typed invoice number",
                              ("/shop-orders", "Open the order desk"), n))
+    out.extend(chat_tickets_item(ctx))
     return out
+
+
+CHAT_TICKETS_SQL = ("SELECT ref, kind, status, created_at, first_seen_at FROM v_assist_open_tickets "
+                    "ORDER BY created_at LIMIT 200")
+
+
+def _chat_tickets(r: Reader) -> list[dict]:
+    try:
+        return r.q(CHAT_TICKETS_SQL) or []
+    except Exception as e:  # noqa: BLE001 -- the view arrives with market_assist_v2_migration.sql
+        if _is_missing_relation(e):
+            return []
+        raise
+
+
+CHAT_TICKET_LABEL = {"damaged": "Damaged", "wrong_item": "Wrong item", "missing": "Missing pieces",
+                     "not_working": "Not working", "delivery": "Delivery", "return": "Return", "other": "Other",
+                     "callback": "Call back", "account": "Account / credit"}
+
+
+def chat_tickets_item(ctx: Ctx) -> list[dict]:
+    """YQ Assist v2 (owner 29-Oct-2026: "the owner watches every ticket"): the open chat tickets, oldest first,
+    labelled by their T-reference and kind, never a shop's name (v_assist_open_tickets, yq_readonly). Red when
+    one has waited over SLA_BUSINESS_HOURS without being opened. Absent until market_assist_v2_migration runs."""
+    rows = ctx.r.run("chat_tickets", lambda: _chat_tickets(ctx.r))
+    if not rows:
+        return []
+    for x in rows:
+        start = parse_ts(x.get("created_at"))
+        x["hours"] = round(business_minutes(start, ctx.r.now) / 60, 1) if start else None
+    unopened = [x for x in rows if x.get("status") == "new" and not x.get("first_seen_at")]
+    late = [x for x in unopened if (x["hours"] or 0) > SLA_BUSINESS_HOURS]
+    n = len(rows)
+    return [_item("chat_tickets", "alert" if late else "warn", f"{n} chat ticket{'s' if n != 1 else ''} open",
+                  f"Oldest {_hours_text(rows[0]['hours'])} · {len(unopened)} not opened yet"
+                  + (f" · {len(late)} past {SLA_BUSINESS_HOURS} business hours" if late else ""),
+                  "YQ Assist: damaged, wrong or missing items, delivery problems and call-back requests shops raised "
+                  "in the chat, not yet resolved · now",
+                  ("/merchant-voice?tab=tickets", "Open the tickets"), n, None,
+                  [{"label": x["ref"], "sub": f"{CHAT_TICKET_LABEL.get(x['kind'], x['kind'])} · {_hours_text(x['hours'])}",
+                    "to": f"/merchant-voice?tab=tickets&open={x['ref']}"} for x in rows[:6]])]
 
 
 def attention_focus(ctx: Ctx) -> list[dict]:
@@ -1907,10 +1949,10 @@ def _assemble(period: str, focus: dict, reader: Reader | None) -> dict:
     live_r = reader or Reader(q=fr.q, qp=fr.qp, salesmen_fn=fr.salesmen_fn)
     # the live reader sees the Focus sources as already read; only the orders are read again
     for k, v in fr.memo.items():
-        if k not in ("orders", "match", "orders_source"):
+        if k not in ("orders", "match", "orders_source", "chat_tickets"):     # chat tickets are live too (v2)
             live_r.memo.setdefault(k, v)
     if reader is None:
-        live_r.errors.update({k: v for k, v in fr.errors.items() if k not in ("orders", "match")})
+        live_r.errors.update({k: v for k, v in fr.errors.items() if k not in ("orders", "match", "chat_tickets")})
     ctx = _make_ctx(live_r, period)
     _load_orders(live_r, _live_since(period, live_r, ctx.focus_to))
     team = build_module(ctx, "team")

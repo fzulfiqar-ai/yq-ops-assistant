@@ -149,6 +149,9 @@
     --m-ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* enter: arrives fast, settles */
     --m-ease-in: cubic-bezier(0.4, 0, 1, 1); /* exit */
     --m-ease-sheet: cubic-bezier(0.32, 0.72, 0, 1); /* sheets: settle without a bounce */
+    /* press release (K5, 29-Oct-2026): a damped spring (zeta 0.5) — it passes its size by 16% of the
+     * travel and settles, the way a physical key comes back. Unsupported: the transition eases. */
+    --m-ease-press: linear(0, 0.053 4.2%, 0.184 8.3%, 0.359 12.5%, 0.547 16.7%, 0.725 20.8%, 0.878 25%, 0.999 29.2%, 1.085 33.3%, 1.137 37.5%, 1.16 41.7%, 1.161 45.8%, 1.145 50%, 1.12 54.2%, 1.09 58.3%, 1.059 62.5%, 1.032 66.7%, 1.01 70.8%, 0.993 75%, 0.981 79.2%, 0.975 83.3%, 0.973 87.5%, 0.975 91.7%, 0.978 95.8%, 1);
     --m-d-1: 120ms;
     --m-d-2: 200ms;
     --m-d-3: 320ms;
@@ -278,6 +281,12 @@
       }
     }
   }
+  /* The desktop header and category strip are solid (29-Oct-2026, round 2): their frost was recomputed on
+   * every scroll frame and under every open layer on a PC's integrated graphics, the same reason the
+   * phone's bars never blurred. Fully opaque (release review: at 97 % the card titles ghosted through). */
+  .bar-solid {
+    background-color: hsl(var(--m-surface));
+  }
   .skeleton {
     position: relative;
     overflow: hidden;
@@ -319,10 +328,24 @@
    * same specificity) set transition-property to transform alone: card photos popped in over the
    * tint instead of fading (final review, 28-Oct-2026). Two classes outrank any one utility; the
    * transform keeps the zoom's own duration (duration-3). */
+  /* K3 (29-Oct-2026): the hover zoom is slow on purpose (700 ms, the enter curve): a photo that
+   * leans in reads as considered; a 320 ms snap read as a twitch */
   .m-photo .m-photo-img {
     transition-property: opacity, transform;
-    transition-duration: var(--m-d-2), var(--m-d-3);
-    transition-timing-function: var(--m-ease), var(--m-ease);
+    transition-duration: var(--m-d-2), 700ms;
+    transition-timing-function: var(--m-ease), var(--m-ease-out);
+  }
+  /* press feel (K5): a press gives at once (90 ms); the release springs back past its size and
+   * settles (--m-ease-press). Two classes of specificity: the element's own `transition` utility
+   * would otherwise replace this list. */
+  .m-press.m-press {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+    transition-duration: 120ms, 120ms, 120ms, 120ms, 120ms, 460ms;
+    transition-timing-function: var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease-press);
+  }
+  .m-press.m-press:active {
+    transition-duration: 120ms, 120ms, 120ms, 120ms, 120ms, 90ms;
+    transition-timing-function: var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease-out);
   }
   .m-photo[data-state='wait'] .m-photo-img {
     opacity: 0;
@@ -399,6 +422,66 @@
 .m-page-in {
   animation: m-page-in var(--m-d-2) var(--m-ease-out) both;
 }
+/* K7 (29-Oct-2026): on a PC the next page glides in with presence, 16 px over 320 ms; a phone keeps
+ * the quick 8 px / 200 ms (its pages change under a thumb, many times a minute) */
+@keyframes m-page-in-pc {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (min-width: 1024px) {
+  .m-page-in {
+    animation: m-page-in-pc 320ms var(--m-ease-out) both;
+  }
+}
+/* F2: the top slider drifts and dims as the page leaves it (it scrolls a little slower than the
+ * page, receding); F3: the sticky header is flat at the top of the page and gains a soft shadow
+ * once the page moves under it. Scroll-driven: no listener; without scroll timelines both stand still. */
+@keyframes m-hero-drift {
+  to {
+    transform: translate3d(0, 6%, 0) scale(0.96);
+    opacity: 0.5;
+  }
+}
+@keyframes m-header-lift {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@supports (animation-timeline: scroll()) {
+  /* the drift: a mouse PC only — on a touch tablet its .96 scale took the slider dots under the 36 px
+   * tap floor once the page had moved */
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) and (hover: hover) and (pointer: fine) {
+    html:not([data-lite]) .hero-drift {
+      transform-origin: 50% 0;
+      animation: m-hero-drift linear both;
+      animation-timeline: view();
+      animation-range: exit 0% exit 100%;
+    }
+  }
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+    .header-lift::after {
+      content: '';
+      position: absolute;
+      inset-inline: 0;
+      top: 100%;
+      height: 16px;
+      pointer-events: none;
+      background: linear-gradient(to bottom, hsl(var(--m-ink) / 0.12), transparent);
+      animation: m-header-lift linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 120px;
+    }
+  }
+}
 @keyframes m-fade-in {
   from {
     opacity: 0;
@@ -441,6 +524,53 @@
   to {
     opacity: 0;
     transform: translate3d(0, 6px, 0) scale(0.985);
+  }
+}
+/* the Browse menu (K1, 29-Oct-2026): it drops from Browse over a soft dim, its right side changes
+ * with a short slide in the reading direction, and its four cards rise in a wave */
+@keyframes m-drop {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -6px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@keyframes m-drop-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scale(0.99);
+  }
+}
+@keyframes m-swap-in {
+  from {
+    opacity: 0;
+    transform: translate3d(calc(8px * var(--m-dir, 1)), 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes m-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes m-fade-out {
+  to {
+    opacity: 0;
   }
 }
 /* The side drawer (ui/Sheet variant="drawer") sits at the inline END — the left edge in Arabic — so
@@ -583,8 +713,13 @@
   }
 }
 
+/* Calm but alive (round 2, 29-Oct-2026, the owner's choice for visitors whose computer asks for reduced
+ * motion): on a desktop an element marked .calm-fade keeps its own fade — opacity only, by construction:
+ * the stage's slides, a reel photo, a product panel and its dim — so the page still changes without
+ * anything rising, zooming, floating or flying. Everything else lands at once, as before; a phone or a
+ * tablet keeps it all still. */
 @media (prefers-reduced-motion: reduce) {
-  *,
+  *:not(.calm-fade),
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
@@ -598,6 +733,22 @@
   /* a waiting photo tile is a still tint (::before), not a sweep */
   .m-photo[data-state='wait']::after {
     display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) and (max-width: 1023.98px) {
+  .calm-fade {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+@media (prefers-reduced-motion: reduce) and (min-width: 1024px) {
+  /* a panel fades in and out with its dim, no slide (ui/Sheet.tsx) */
+  [data-sheet-panel].calm-fade {
+    animation: m-fade-in 240ms ease-out backwards;
+  }
+  [data-sheet-panel].calm-fade[data-leaving] {
+    animation: m-fade-out 160ms var(--m-ease-in) both;
   }
 }
 
@@ -669,6 +820,89 @@
   }
   html[data-reveal]:not([data-lite]) .reveal.is-instant [data-section-head] {
     transition: none;
+  }
+}
+/* PC edition (F4, 29-Oct-2026): on a desktop a card rises further and settles (24 px, from .97 scale)
+ * over 560 ms, in a wave across its row (--i is the column: 60 ms a step, at most 6). A flick or a jump
+ * still shows everything at once (.is-instant). The photo-focus blur that came with it was measured in
+ * real Chrome by the design review and dropped: 8-12 frames over 50 ms per flick with it, 4-5 without
+ * (the plan made it conditional on that budget). */
+@media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+  html[data-reveal]:not([data-lite]) .reveal {
+    transform: translate3d(0, 24px, 0) scale(0.97);
+    transition: opacity 560ms var(--m-ease-out), transform 560ms var(--m-ease-out);
+    transition-delay: calc(min(var(--i, 0), 6) * 60ms);
+  }
+}
+/* Section titles rise out of a mask as they come up the screen (F4). A scroll-driven animation: no
+ * observer, so a title can never be left hidden; a browser without scroll timelines shows it still. */
+/* transform and opacity only (round 2): a clip-path keyframe kept the rise off the compositor, a
+ * main-thread paint per scroll frame for every title in range */
+@keyframes m-title-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 0.5em, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+    html:not([data-lite]) [data-section-head] > :first-child {
+      animation: m-title-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 10% entry 90%;
+    }
+  }
+}
+/* The first screen comes alive (F5): on the first page of a visit, on a mouse PC, the category discs
+ * come in one after another and the next-step cards rise after them. main.market.tsx sets
+ * html[data-intro] (never on Back/Forward, under reduced motion, on a lite device or when the opening
+ * plays) and takes it away after 2.6 s. The slider is never part of it: the page is never later to show. */
+@keyframes m-intro {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+  html[data-intro] .intro-disc {
+    animation: m-intro 520ms var(--m-ease-out) both;
+    animation-delay: calc(var(--k, 0) * 60ms + 120ms);
+  }
+  html[data-intro] .intro-wait .intro-disc {
+    animation-play-state: paused;
+  }
+  html[data-intro] .intro-steps > * {
+    animation: m-intro 560ms var(--m-ease-out) both;
+    animation-delay: calc(var(--k, 0) * 90ms + 520ms);
+  }
+  .intro-steps > :nth-child(2) {
+    --k: 1;
+  }
+  .intro-steps > :nth-child(3) {
+    --k: 2;
+  }
+  .intro-steps > :nth-child(4) {
+    --k: 3;
+  }
+  .intro-steps > :nth-child(5) {
+    --k: 4;
+  }
+}
+/* the reveal wave follows the grid's own columns (F4): four of them, five from 3xl (DealsSection) */
+.wave-cols > * {
+  --i: var(--i4, 0);
+}
+@media (min-width: 1800px) {
+  .wave-cols > * {
+    --i: var(--i5, 0);
   }
 }
 /* end v3: reveal */
@@ -763,9 +997,10 @@ html[data-lite] .m-photo::after {
     --arc-blur: 26px;
   }
   @media (prefers-reduced-motion: no-preference) {
+    /* no will-change (round 2): the rise promotes the arcs while it runs; a permanent one kept the night
+     * band's blurred arcs composited, so their blur was re-applied on every scroll frame */
     .horizon.is-rising > i {
       animation: m-horizon-rise var(--arc-dur) cubic-bezier(0.16, 1, 0.3, 1) var(--arc-delay) both;
-      will-change: transform, opacity;
     }
   }
 }
@@ -778,18 +1013,127 @@ html[data-lite] .m-photo::after {
     transform: translate3d(0, calc(var(--horizon-y, 50%) + var(--arc-rise)), 0) scale(var(--arc-s), var(--arc-s-y0));
   }
 }
-/* .is-opening (components/Splash.tsx, full-screen): the arcs' box is wider than the screen and sunk
- * below it, so the rim reads as a low dawn curve rather than a dome. In both presets the white rim
- * crests at ~66% of the height (portrait 65.6%, landscape 66.2%) and the core is dark again by ~76%;
- * the splash lays its text above and below that line, so change the two together. */
+/* .is-opening (components/Splash.tsx and the served first frame, full-screen): the arcs' box is wider
+ * than the screen and sunk below it, so the rim reads as a low dawn curve rather than a dome. In both
+ * presets the white rim crests at ~66% of the height (portrait 65.6%, landscape 66.2%) and the core is
+ * dark again by ~76%; the splash lays its text above and below that line, so change the two together.
+ * Markup: <div class="horizon is-opening is-rising"><i/><div class="open-glow"><i/><i/><i/></div></div>,
+ * then <div class="open-veils"/>. The rim is the horizon's own first arc, with its own rise. */
 @layer components {
-  .horizon.is-opening > i {
+  .horizon.is-opening > i,
+  .horizon.is-opening > .open-glow > i {
     inset: 35% -30% -25%;
   }
   @media (min-aspect-ratio: 1/1) {
-    .horizon.is-opening > i {
+    .horizon.is-opening > i,
+    .horizon.is-opening > .open-glow > i {
       inset: 23% -20% -50%;
     }
+  }
+}
+/* The glow: the violet, blue and core arcs in ONE layer (29-Oct-2026, round 2). They draw their blur as
+ * gradients (no filter: the compositor re-applies one on every frame its layer moves, and three
+ * full-screen blurs stepped the opening at 4-9 fps headless), each on a ::before grown by --glow-k all
+ * round, with stops that follow the blur's own edge profile (scripts/make_opening_glow.py writes the
+ * block). They rise together in .open-glow, one composited layer instead of three, and once risen the
+ * night frame stands still: a screen-sized layer that moves or loops is recomposited on every frame, the
+ * cost an integrated GPU could not carry through the hold. */
+@layer components {
+  .horizon.is-opening > .open-glow {
+    position: absolute;
+    inset: 0;
+    transform-origin: 50% 100%;
+  }
+  .horizon.is-opening > .open-glow > i {
+    position: absolute;
+    border-radius: 50%;
+    transform: translate3d(0, var(--horizon-y, 50%), 0) scale(var(--arc-s));
+  }
+  .horizon.is-opening > .open-glow > i::before {
+    content: '';
+    position: absolute;
+    inset: calc(var(--glow-k) * -50%);
+  }
+  .horizon.is-opening > .open-glow > i:nth-child(1),
+  .horizon.is-opening > .open-glow > i:nth-child(3) {
+    --arc-s: 1.2;
+  }
+  .horizon.is-opening > .open-glow > i:nth-child(2) {
+    --arc-s: 1.24;
+  }
+  /* glow: generated by scripts/make_opening_glow.py */
+  .horizon.is-opening > .open-glow > i:nth-child(1)::before {
+    --glow-k: 0.1922;
+    background-image: radial-gradient(closest-side, hsl(var(--m-arc-3)), hsl(var(--m-arc-3) / 0.977) 71.48%, hsl(var(--m-arc-3) / 0.894) 76.13%, hsl(var(--m-arc-3) / 0.691) 80.78%, hsl(var(--m-arc-3) / 0.500) 83.88%, hsl(var(--m-arc-3) / 0.309) 86.98%, hsl(var(--m-arc-3) / 0.106) 91.63%, hsl(var(--m-arc-3) / 0.023) 96.28%, transparent 100.00%);
+  }
+  .horizon.is-opening > .open-glow > i:nth-child(2)::before {
+    --glow-k: 0.1302;
+    background-image: radial-gradient(closest-side, hsl(var(--m-arc-2)), hsl(var(--m-arc-2) / 0.977) 79.62%, hsl(var(--m-arc-2) / 0.894) 82.94%, hsl(var(--m-arc-2) / 0.691) 86.27%, hsl(var(--m-arc-2) / 0.500) 88.48%, hsl(var(--m-arc-2) / 0.309) 90.70%, hsl(var(--m-arc-2) / 0.106) 94.02%, hsl(var(--m-arc-2) / 0.023) 97.34%, transparent 100.00%);
+  }
+  .horizon.is-opening > .open-glow > i:nth-child(3)::before {
+    --glow-k: 0.3162;
+    background-image: radial-gradient(closest-side, hsl(var(--m-arc-1)), hsl(var(--m-arc-1) / 0.977) 57.50%, hsl(var(--m-arc-1) / 0.894) 64.43%, hsl(var(--m-arc-1) / 0.691) 71.36%, hsl(var(--m-arc-1) / 0.500) 75.98%, hsl(var(--m-arc-1) / 0.309) 80.60%, hsl(var(--m-arc-1) / 0.106) 87.53%, hsl(var(--m-arc-1) / 0.023) 94.46%, transparent 100.00%);
+  }
+  @media (min-aspect-ratio: 1/1) {
+    .horizon.is-opening > .open-glow > i:nth-child(1)::before {
+      --glow-k: 0.1469;
+      background-image: radial-gradient(closest-side, hsl(var(--m-arc-3)), hsl(var(--m-arc-3) / 0.977) 77.34%, hsl(var(--m-arc-3) / 0.894) 81.03%, hsl(var(--m-arc-3) / 0.691) 84.73%, hsl(var(--m-arc-3) / 0.500) 87.19%, hsl(var(--m-arc-3) / 0.309) 89.65%, hsl(var(--m-arc-3) / 0.106) 93.35%, hsl(var(--m-arc-3) / 0.023) 97.04%, transparent 100.00%);
+    }
+    .horizon.is-opening > .open-glow > i:nth-child(2)::before {
+      --glow-k: 0.0995;
+      background-image: radial-gradient(closest-side, hsl(var(--m-arc-2)), hsl(var(--m-arc-2) / 0.977) 83.99%, hsl(var(--m-arc-2) / 0.894) 86.60%, hsl(var(--m-arc-2) / 0.691) 89.21%, hsl(var(--m-arc-2) / 0.500) 90.95%, hsl(var(--m-arc-2) / 0.309) 92.69%, hsl(var(--m-arc-2) / 0.106) 95.30%, hsl(var(--m-arc-2) / 0.023) 97.91%, transparent 100.00%);
+    }
+    .horizon.is-opening > .open-glow > i:nth-child(3)::before {
+      --glow-k: 0.2417;
+      background-image: radial-gradient(closest-side, hsl(var(--m-arc-1)), hsl(var(--m-arc-1) / 0.977) 65.56%, hsl(var(--m-arc-1) / 0.894) 71.18%, hsl(var(--m-arc-1) / 0.691) 76.79%, hsl(var(--m-arc-1) / 0.500) 80.54%, hsl(var(--m-arc-1) / 0.309) 84.28%, hsl(var(--m-arc-1) / 0.106) 89.89%, hsl(var(--m-arc-1) / 0.023) 95.51%, transparent 100.00%);
+    }
+  }
+  /* end glow */
+  @media (prefers-reduced-motion: no-preference) {
+    .horizon.is-opening.is-rising > .open-glow {
+      animation: m-open-glow-rise 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+  }
+}
+@keyframes m-open-glow-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 30%, 0) scale(1, 1.4);
+  }
+}
+/* The veils over the glow, the portal sign-in's (web/src/pages/Login.tsx:52-53) mirrored for a horizon
+ * that rises from the bottom, as two backgrounds of one element (round 2: one layer, not two): a fade to
+ * #0c0720 over the lower third, so the merchant's line reads on deep purple instead of on the white rim,
+ * over a radial darkening that leaves the crest bright and calms the spill. Splash.tsx and the served
+ * first frame (web/vite.config.ts) draw it. */
+@layer components {
+  .open-veils {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: linear-gradient(to top, #0c0720, rgba(12, 7, 32, 0.85), transparent), radial-gradient(120% 80% at 50% 110%, transparent, rgba(12, 7, 32, 0.45));
+    background-size: 100% 30%, 100% 100%;
+    background-position: bottom, center;
+    background-repeat: no-repeat;
+  }
+  /* the logo's halo breathes, not the dawn (round 2): a small gradient layer, no filter */
+  .open-halo {
+    background-image: radial-gradient(closest-side, hsl(var(--m-arc-3) / 0.34), hsl(var(--m-arc-3) / 0.14) 55%, transparent);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .open-halo {
+      animation: m-open-halo 2600ms ease-in-out infinite alternate;
+    }
+  }
+}
+@keyframes m-open-halo {
+  from {
+    opacity: 0.7;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.06);
   }
 }
 /* .is-offset (components/SlideCard.tsx, ComposedCreative.tsx): a promo card on the night canvas. The
@@ -968,12 +1312,11 @@ html[data-lite] .m-photo::after {
 .slide-card[data-size='aside'] .slide-scrim {
   background: linear-gradient(0deg, hsl(var(--scrim) / 0.94) 0%, hsl(var(--scrim) / 0.8) 40%, hsl(var(--scrim) / 0) 70%);
 }
+/* sentence case, like every label (design review, 29-Oct-2026: tracked caps were the template tell) */
 .slide-kicker {
-  font-size: 11px;
-  line-height: 14px;
+  font-size: 12px;
+  line-height: 16px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 .slide-title {
   font-size: 19px;
@@ -1192,7 +1535,218 @@ html[data-lite] .m-photo::after {
 [dir='rtl'] .slide-scrim {
   transform: scaleX(-1);
 }
+/* Living slides (29-Oct-2026, the owner: "shows like a video"): through its dwell a product slide is
+ * never a still picture. Its discs float, out of step, on the independent translate / rotate
+ * properties, so they add to the fan's transform and its spring instead of replacing them; its art
+ * breathes slowly in and out (scale on .creative, linear, so it never stands still); a light sweeps
+ * across the centre product every 7 s. All on the compositor. A slide off stage pauses where it is
+ * (no snap back while it leaves), and reduced motion or a lite phone gets none of it. */
+@keyframes m-disc-float {
+  from {
+    translate: 0 -1.5cqh;
+    rotate: -0.8deg;
+  }
+  to {
+    translate: 0 1.5cqh;
+    rotate: 0.8deg;
+  }
+}
+@keyframes m-art-breathe {
+  to {
+    scale: 1.045;
+  }
+}
+@keyframes m-disc-sheen {
+  0% {
+    transform: translate3d(-120%, 0, 0);
+  }
+  18%,
+  100% {
+    transform: translate3d(120%, 0, 0);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-lite]) .creative {
+    animation: m-art-breathe 6s linear infinite alternate;
+  }
+  html:not([data-lite]) .creative-disc {
+    animation: m-disc-float var(--float, 5.2s) ease-in-out calc(var(--k, 0) * -1.9s) infinite alternate;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='l'] {
+    --float: 6.1s;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='r'] {
+    --float: 5.6s;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='c'] {
+    overflow: hidden;
+  }
+  html:not([data-lite]) .creative-disc[data-pos='c']::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 34%, hsl(0 0% 100% / 0.42) 50%, transparent 66%);
+    animation: m-disc-sheen 7s cubic-bezier(0.4, 0, 0.2, 1) 1.4s infinite both;
+  }
+  html:not([data-lite]) [data-slide-state='idle'] .creative,
+  html:not([data-lite]) [data-slide-state='idle'] .creative-disc,
+  html:not([data-lite]) [data-slide-state='idle'] .creative-disc::after,
+  html:not([data-lite]) [data-carousel='paused'] .creative,
+  html:not([data-lite]) [data-carousel='paused'] .creative-disc,
+  html:not([data-lite]) [data-carousel='paused'] .creative-disc::after {
+    animation-play-state: paused;
+  }
+}
+/* The banner's motion (29-Oct-2026, round 2: the owner chose "Product reel"). A live SlideCard (the
+ * desktop stage, the Spotlight, a category banner) on a desktop:
+ * - The reel (components/ComposedCreative.tsx): each disc holds its photos as stacked layers; the
+ *   next zooms in from 1.1 and fades up over the last, which eases back under it. The disc clips them.
+ * - The count rises: the number in the title or the line is drawn by a CSS counter whose value
+ *   (--count, a registered integer) animates from 0 each time the slide comes on stage. The number
+ *   itself keeps its place (hidden), so the line never reflows.
+ * - The light: a soft diagonal beam crosses the card every 6 s, under the copy; transform only.
+ * All three hold on an idle slide; none runs on a phone or tablet, a lite device or under reduced motion. */
+.creative-disc > .reel {
+  position: absolute;
+  inset: 0;
+}
+.creative-disc > .reel-next {
+  opacity: 0;
+  pointer-events: none;
+}
+.creative[data-reel] .creative-disc {
+  overflow: hidden;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .creative-disc > .reel-in {
+    animation: m-reel-in 700ms var(--m-ease-out) both;
+  }
+  .creative-disc > .reel-out {
+    animation: m-reel-out 700ms var(--m-ease-in) both;
+  }
+}
+/* calm (reduced motion): the new photo fades in over the last, no zoom (the layer is .calm-fade) */
+@media (prefers-reduced-motion: reduce) {
+  .creative-disc > .reel-in {
+    animation: m-reel-fade 600ms var(--m-ease) both;
+  }
+}
+@keyframes m-reel-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes m-reel-in {
+  from {
+    opacity: 0;
+    transform: scale(1.1);
+  }
+}
+@keyframes m-reel-out {
+  to {
+    transform: scale(0.94);
+  }
+}
+@property --count {
+  syntax: '<integer>';
+  inherits: false;
+  initial-value: 0;
+}
+@keyframes m-count {
+  from {
+    --count: 0;
+  }
+}
+.slide-beam {
+  display: none;
+}
+@keyframes m-slide-beam {
+  0% {
+    transform: translate3d(-140%, 0, 0) skewX(-16deg);
+  }
+  24%,
+  100% {
+    transform: translate3d(400%, 0, 0) skewX(-16deg);
+  }
+}
+@media (min-width: 1024px) and (prefers-reduced-motion: no-preference) {
+  html:not([data-lite]) .slide-count {
+    position: relative;
+    display: inline-block;
+    font-variant-numeric: tabular-nums;
+  }
+  /* the number itself stays in place, transparent (still the text a screen reader reads); the counter is
+   * drawn over it, its units digit where the number's is (right: digits run left to right in Arabic too),
+   * and hidden from assistive tech */
+  html:not([data-lite]) .slide-count[data-go] {
+    --count: var(--n);
+    counter-reset: slide-count var(--count);
+    -webkit-text-fill-color: transparent;
+    animation: m-count 900ms var(--m-ease-out) both;
+  }
+  html:not([data-lite]) .slide-count[data-go]::after {
+    content: counter(slide-count);
+    content: counter(slide-count) / '';
+    -webkit-text-fill-color: currentcolor;
+    position: absolute;
+    top: 0;
+    right: 0;
+  }
+  html:not([data-lite]) [data-slide-state='idle'] .slide-count[data-go] {
+    animation: none;
+  }
+  html:not([data-lite]) .slide-beam {
+    display: block;
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  html:not([data-lite]) .slide-beam::before {
+    content: '';
+    position: absolute;
+    top: -25%;
+    bottom: -25%;
+    left: 0;
+    width: 34%;
+    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / var(--beam-a, 0.34)) 50%, transparent);
+    transform: translate3d(-140%, 0, 0) skewX(-16deg);
+    animation: m-slide-beam 6s cubic-bezier(0.45, 0, 0.25, 1) var(--beam-at, 1.4s) infinite both;
+  }
+  html:not([data-lite]) .canvas-plum .slide-beam,
+  html:not([data-lite]) .canvas-night .slide-beam {
+    --beam-a: 0.16;
+  }
+  /* out of step with the stage's */
+  html:not([data-lite]) .slide-card[data-size='aside'] .slide-beam {
+    --beam-at: 4.4s;
+  }
+  /* held with its slideshow (paused, focused, off screen: PromoSlider data-carousel) */
+  html:not([data-lite]) [data-slide-state='idle'] .slide-beam::before,
+  html:not([data-lite]) [data-carousel='held'] .slide-beam::before,
+  html:not([data-lite]) [data-carousel='paused'] .slide-beam::before {
+    animation-play-state: paused;
+  }
+  [dir='rtl'] .slide-beam {
+    transform: scaleX(-1);
+  }
+}
 /* end v3: slider */
+
+/* While a layer is open, the page behind it holds still (round 2, 29-Oct-2026: the slides, floats and
+ * shimmers kept moving under the product panel's dim). lib/sheet.ts lockScroll sets html[data-layer];
+ * layers are portalled outside #root, so they keep their own motion. Desktop only, and never what lives
+ * in #root above the page (release review): the opening (a shared product link opening during it froze
+ * its words at 0), the toasts (one fired under a panel froze invisible at its first frame, yet caught
+ * the clicks meant for the panel's Add) and the chat's button and line. */
+@media (min-width: 1024px) {
+  html[data-layer] #root *:not([data-splash], [data-splash] *, [data-toasts] *, [data-assist-launcher], [data-assist-launcher] *, [data-assist-peek], [data-assist-peek] *),
+  html[data-layer] #root *:not([data-splash] *, [data-toasts] *, [data-assist-launcher] *, [data-assist-peek] *)::before,
+  html[data-layer] #root *:not([data-splash] *, [data-toasts] *, [data-assist-launcher] *, [data-assist-peek] *)::after {
+    animation-play-state: paused !important;
+  }
+}
 
 /* v3: hints */
 /* Rotating search hints (components/SearchField.tsx): the outgoing hint lifts out of the one-line
@@ -1236,6 +1790,27 @@ html[data-lite] .m-photo::after {
 }
 .anim-hint-out {
   animation: m-hint-out 200ms var(--m-ease) both;
+}
+/* The typed hint's caret (components/SearchField.tsx TypedHints, the desktop header, round 2): a thin
+ * plum bar after the example, solid while it is typed or erased, blinking while it holds. */
+.typed-caret {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 1.5px;
+  height: 1.05em;
+  margin-inline-start: 1px;
+  border-radius: 1px;
+  background-color: hsl(var(--m-plum));
+}
+@media (prefers-reduced-motion: no-preference) {
+  .typed:not([data-typing]) > .typed-caret {
+    animation: m-caret 1.06s steps(1, end) infinite;
+  }
+}
+@keyframes m-caret {
+  50% {
+    opacity: 0;
+  }
 }
 /* end v3: hints */
 
@@ -1328,3 +1903,280 @@ html[data-lite] .m-photo::after {
 :root[dir='rtl'] {
   --m-dir: -1;
 }
+
+/* v3: assist */
+/* YQ Assist v2 (29-Oct-2026): the orb, the water, the stages. The orb is the assistant's face and its motion is
+ * its state: idle breathes, listening follows the voice (--orb-level, set per frame from the microphone),
+ * thinking swirls fast, answered pulses once, busy slows and cools. Opening: a drop's two rings, then the panel
+ * fills from the launcher's corner (desktop) or lands with a water line that settles flat (phone). Only transform
+ * and opacity animate; everything is gated on no-preference, the kill switch above leaves the last frame (the
+ * decorative layers end invisible, the content visible) and lite mode drops the decoration. Plain CSS (not a
+ * layer) so the state classes survive the build. */
+@keyframes assist-swirl {
+  to {
+    transform: rotate(1turn);
+  }
+}
+@keyframes assist-breathe {
+  50% {
+    transform: scale(1.045);
+  }
+}
+@keyframes assist-ring {
+  from {
+    transform: scale(0.7);
+    opacity: 0.6;
+  }
+  to {
+    transform: scale(2.3);
+    opacity: 0;
+  }
+}
+@keyframes assist-pulse {
+  40% {
+    transform: scale(1.12);
+  }
+}
+@keyframes assist-fill {
+  from {
+    transform: scale(0.03);
+    opacity: 1;
+  }
+  65% {
+    opacity: 1;
+  }
+  to {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+@keyframes assist-rise {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}
+@keyframes assist-wave {
+  0% {
+    transform: scaleY(1);
+  }
+  40% {
+    transform: scaleY(0.4);
+  }
+  65% {
+    transform: scaleY(0.65);
+  }
+  85% {
+    transform: scaleY(0.15);
+  }
+  100% {
+    transform: scaleY(0);
+  }
+}
+@keyframes assist-in {
+  from {
+    transform: translateY(12px) scale(0.98);
+    opacity: 0;
+  }
+}
+@keyframes assist-out {
+  to {
+    transform: translateY(10px) scale(0.98);
+    opacity: 0;
+  }
+}
+@keyframes assist-dim {
+  50% {
+    opacity: 0.55;
+  }
+}
+.assist-orb {
+  --s: var(--orb-size, 36px);
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: var(--s);
+  height: var(--s);
+  border-radius: 9999px;
+  overflow: hidden;
+  isolation: isolate;
+  /* the header's own two shades (owner, 29-Oct-2026: "match the purple up top"): the logo plum and the lighter
+   * sash on the same hard diagonal as .band-sash, mirrored for Arabic */
+  background: linear-gradient(148deg, hsl(var(--m-plum)) 0 47%, hsl(var(--m-sash)) 47% 100%);
+  box-shadow: inset 0 -2px 6px hsl(var(--m-plum-ink) / 0.35), 0 6px 16px -6px hsl(var(--m-plum) / 0.6);
+  transform: scale(calc(1 + var(--orb-level, 0) * 0.22));
+  transition: transform 90ms linear;
+}
+[dir='rtl'] .assist-orb {
+  background: linear-gradient(212deg, hsl(var(--m-plum)) 0 47%, hsl(var(--m-sash)) 47% 100%);
+}
+/* the light that moves: a soft sweep round the orb (its speed is the state), never a colour of its own */
+.assist-orb__swirl {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: conic-gradient(from 0deg, transparent 0 62%, hsl(0 0% 100% / 0.3) 82%, transparent 96%);
+}
+.assist-orb__glint {
+  position: absolute;
+  inset: 14% 50% 58% 18%;
+  border-radius: 9999px;
+  background: hsl(0 0% 100% / 0.45);
+  filter: blur(1.5px);
+}
+.assist-orb::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px hsl(0 0% 100% / 0.32);
+}
+/* 2.2 (owner, 29-Oct-2026: "put the yq logo ... only for those which are empty"): the logo's own white "yq?", traced
+ * from yq-logo.png into yq-mark.svg, in every orb that carries no icon. A mask, so it is the mark's exact shape in
+ * plain white, above the moving light; never mirrored for Arabic (a logo reads the same both ways). The glint
+ * steps back under it. */
+.assist-orb__mark {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 64%;
+  height: 37.7%; /* the mark's own 100 : 58.9 */
+  transform: translateY(6%); /* the letters' bowls, not their tails, on the centre */
+  background: #fff;
+  -webkit-mask: url('/yq-mark.svg') center / contain no-repeat;
+  mask: url('/yq-mark.svg') center / contain no-repeat;
+}
+.assist-orb.has-mark .assist-orb__glint {
+  opacity: 0.4;
+}
+.assist-orb.is-busy {
+  filter: saturate(0.55);
+}
+.assist-rings {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.assist-rings > span {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid hsl(var(--m-plum) / 0.45);
+  opacity: 0;
+}
+.assist-fill {
+  position: absolute;
+  z-index: 0;
+  width: 260%;
+  aspect-ratio: 1;
+  inset-block-end: -130%;
+  inset-inline-end: -130%;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle, hsl(var(--m-plum-wash)) 0 32%, hsl(var(--m-plum-soft)) 52%, hsl(var(--m-plum) / 0.22) 66%, transparent 70%);
+}
+.assist-wave {
+  position: absolute;
+  inset-inline: 0;
+  top: 1px;
+  height: 18px;
+  transform: translateY(-100%) scaleY(0);
+  transform-origin: bottom;
+  color: hsl(var(--m-surface));
+  pointer-events: none;
+}
+.assist-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+}
+.assist-bars > span {
+  width: 3px;
+  height: 100%;
+  border-radius: 3px;
+  background: hsl(var(--m-plum));
+  transform: scaleY(calc(0.15 + var(--lv, 0) * var(--k, 1)));
+  transition: transform 90ms linear;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .assist-orb.is-idle {
+    animation: assist-breathe 4.2s var(--m-ease) infinite;
+  }
+  .assist-orb.is-idle .assist-orb__swirl {
+    animation: assist-swirl 9s linear infinite;
+  }
+  .assist-orb.is-listening .assist-orb__swirl {
+    animation: assist-swirl 3s linear infinite;
+  }
+  .assist-orb.is-thinking .assist-orb__swirl {
+    animation: assist-swirl 1.3s linear infinite;
+  }
+  .assist-orb.is-busy .assist-orb__swirl {
+    animation: assist-swirl 16s linear infinite;
+  }
+  .assist-orb.is-answered {
+    animation: assist-pulse 520ms var(--m-ease-out) 1;
+  }
+  .assist-rings.go > span {
+    animation: assist-ring 640ms var(--m-ease-out) both;
+  }
+  .assist-rings.go > span + span {
+    animation-delay: 150ms;
+  }
+  .assist-rings.listen > span {
+    animation: assist-ring 1.8s var(--m-ease-out) infinite;
+  }
+  .assist-rings.listen > span + span {
+    animation-delay: 0.9s;
+  }
+  .assist-fill.go {
+    animation: assist-fill 420ms var(--m-ease-out) both;
+  }
+  .assist-wave.go {
+    animation: assist-wave 640ms var(--m-ease-sheet) both;
+  }
+  .assist-in {
+    animation: assist-in 280ms var(--m-ease-out) both;
+  }
+  .assist-out {
+    animation: assist-out 200ms var(--m-ease-in) both;
+  }
+  .assist-sheet-in {
+    animation: m-sheet-up 280ms var(--m-ease-sheet) both;
+  }
+  .assist-sheet-out {
+    animation: m-sheet-down 200ms var(--m-ease-in) both;
+  }
+  .assist-rise > * {
+    animation: assist-rise 280ms var(--m-ease-out) both;
+  }
+  .assist-rise > :nth-child(2) {
+    animation-delay: 40ms;
+  }
+  .assist-rise > :nth-child(3) {
+    animation-delay: 80ms;
+  }
+  .assist-rise > :nth-child(4) {
+    animation-delay: 120ms;
+  }
+  .assist-rise > :nth-child(n + 5) {
+    animation-delay: 160ms;
+  }
+  .assist-stage {
+    animation: assist-dim 1.6s ease-in-out infinite;
+  }
+}
+html[data-lite] .assist-orb,
+html[data-lite] .assist-orb__swirl,
+html[data-lite] .assist-rise > *,
+html[data-lite] .assist-stage {
+  animation: none !important;
+}
+html[data-lite] .assist-rings,
+html[data-lite] .assist-fill,
+html[data-lite] .assist-wave {
+  display: none;
+}
+/* end v3: assist */

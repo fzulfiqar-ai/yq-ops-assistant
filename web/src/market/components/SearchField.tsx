@@ -1,10 +1,19 @@
-import { forwardRef, useEffect, useState, type FormEvent } from 'react'
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { Search, X } from 'lucide-react'
+import { useLayerOpen } from '@/lib/sheet'
 import { cn } from '@/lib/utils'
 import { useReducedMotion } from '../shell/useViewport'
 import { S } from '../strings'
 
 const HINT_EVERY_MS = 2400
+/** the typed hint's pace: a character typed, a character erased, the whole example held, the gap before the next */
+const TYPE_MS = 55
+const ERASE_MS = 30
+const HOLD_MS = 1600
+const GAP_MS = 160
+/** calm (reduced motion): the next whole example every 3 s, through a 200 ms fade out and in */
+const CALM_EVERY_MS = 3000
+const CALM_FADE_MS = 200
 
 /**
  * The rotating example query — "Search “20W charger”" — shown where a placeholder would be (the
@@ -50,6 +59,119 @@ export function SearchHints({ hints, paused, className, leadClassName, hintClass
         <span key={`in-${tick}`} className={cn('absolute inset-x-0 top-0 truncate', before !== null && 'anim-hint-in', hintClassName)}>
           {S.search.hintQuoted(hints[now])}
         </span>
+      </span>
+    </span>
+  )
+}
+
+/**
+ * The desktop header's example search, typed (round 2, 29-Oct-2026: the owner chose "Typing hint"):
+ * after "Search" an example appears a character at a time, holds, is erased and the next one is typed,
+ * a thin plum caret after it (solid while it types, blinking while it holds). Purely visual: aria-hidden,
+ * the trigger around it carries the accessible name. The characters are set straight on the text node
+ * (React renders it empty), so a keystroke costs no render. It stands on a whole example — never half a
+ * word — while `paused` (the palette or a panel is open), while the trigger has focus and in a hidden tab.
+ * Under reduced motion it never types: calm but alive, the whole next example fades in every 3 s. The
+ * phone band keeps SearchHints.
+ */
+export function TypedHints({ hints, paused, className, leadClassName, hintClassName }: { hints: readonly string[]; paused?: boolean; className?: string; leadClassName?: string; hintClassName?: string }) {
+  const reduced = useReducedMotion()
+  // a panel or another layer open: it stands still (watched here, so the header never re-renders for it)
+  const layered = useLayerOpen()
+  const textRef = useRef<HTMLSpanElement>(null)
+  const boxRef = useRef<HTMLSpanElement>(null)
+  // which example, and how many of its characters show (-1: all); kept across a pause
+  const at = useRef({ i: 0, n: -1 })
+  const run = !paused && !layered && hints.length > 1
+  const typing = run && !reduced
+  useLayoutEffect(() => {
+    const el = textRef.current
+    const box = boxRef.current
+    if (!el || !box || !hints.length) return
+    const s = at.current
+    // characters, not UTF-16 units: an Arabic example is typed letter by letter and shapes as it grows
+    const word = (i: number) => Array.from(hints[i % hints.length])
+    // the quotes come with the first and the last character, so a lone quote never shows (release review)
+    const mark = S.search.hintQuoted('\u0000')
+    const cut = mark.indexOf('\u0000')
+    const open = cut < 0 ? '' : mark.slice(0, cut)
+    const close = cut < 0 ? '' : mark.slice(cut + 1)
+    let chars = word(s.i)
+    const show = (n: number) => {
+      s.n = n
+      el.textContent = n <= 0 ? '' : open + chars.slice(0, n).join('') + (n >= chars.length ? close : '')
+    }
+    // before the first paint, and on every pause: the whole example
+    show(chars.length)
+    box.removeAttribute('data-typing')
+    if (!run) return
+    const trigger = box.closest('button')
+    const held = () => document.hidden || Boolean(trigger?.matches(':focus'))
+    if (reduced) {
+      // calm: the whole next example, faded out and in (Web Animations, opacity only)
+      let fade: Animation | null = null
+      const id = window.setInterval(() => {
+        if (held()) return
+        fade = el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: CALM_FADE_MS, easing: 'ease-in', fill: 'forwards' })
+        fade.onfinish = () => {
+          s.i = (s.i + 1) % hints.length
+          chars = word(s.i)
+          show(chars.length)
+          fade?.cancel()
+          fade = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: CALM_FADE_MS, easing: 'ease-out' })
+        }
+      }, CALM_EVERY_MS)
+      return () => {
+        window.clearInterval(id)
+        fade?.cancel()
+      }
+    }
+    let timer = 0
+    const later = (ms: number, fn: () => void) => {
+      timer = window.setTimeout(fn, ms)
+    }
+    const stand = () => {
+      show(chars.length)
+      hold()
+    }
+    const hold = () => {
+      box.removeAttribute('data-typing')
+      later(HOLD_MS, () => {
+        if (held()) return hold()
+        box.setAttribute('data-typing', '')
+        erase()
+      })
+    }
+    const erase = () => {
+      if (held()) return stand()
+      if (s.n > 0) {
+        show(s.n - 1)
+        return later(ERASE_MS, erase)
+      }
+      later(GAP_MS, () => {
+        s.i = (s.i + 1) % hints.length
+        chars = word(s.i)
+        type()
+      })
+    }
+    const type = () => {
+      if (held()) return stand()
+      if (s.n < chars.length) {
+        show(s.n + 1)
+        return later(TYPE_MS, type)
+      }
+      hold()
+    }
+    hold()
+    return () => window.clearTimeout(timer)
+  }, [run, reduced, hints])
+  if (!hints.length) return null
+  return (
+    <span aria-hidden="true" className={cn('pointer-events-none flex min-w-0 items-center gap-[0.3em] overflow-hidden whitespace-nowrap leading-[1.6]', className)}>
+      <span className={cn('shrink-0', leadClassName)}>{S.search.hintLead}</span>
+      <span ref={boxRef} className="typed flex h-[1.6em] min-w-0 flex-1 items-center">
+        <span ref={textRef} className={cn('min-w-0 truncate', hintClassName)} />
+        {typing && <i className="typed-caret" />}
       </span>
     </span>
   )

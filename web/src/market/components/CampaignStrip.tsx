@@ -27,7 +27,7 @@ export function CategoryBanner({ campaigns, category, items, className }: { camp
   if (!slide) return null
   return (
     <div className={cn('mb-3', className)}>
-      <SlideCard slide={slide} size="tile" where="category" className="aspect-[5/2] sm:aspect-[7/2] lg:aspect-[5/1]" />
+      <SlideCard slide={slide} size="tile" where="category" className="aspect-[5/2] sm:aspect-[7/2] lg:aspect-[5/1]" live />
     </div>
   )
 }

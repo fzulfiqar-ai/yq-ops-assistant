@@ -20,6 +20,20 @@ const REMEMBER = 60 // entries
 
 let positions: Record<string, number> = read()
 
+/**
+ * How the keeper moves the page. The market's wheel glide (market/lib/glide) routes these jumps
+ * through itself, as immediate moves: a glide still running from a click made mid-scroll would
+ * otherwise carry the next page down with it, or drag Back off its restored place.
+ */
+let writeScroll = (y: number) => window.scrollTo(0, y)
+export function setScrollWriter(fn: ((y: number) => void) | null): void {
+  writeScroll = fn || ((y: number) => window.scrollTo(0, y))
+}
+/** a page's own jump (Track order to the top): through the same writer, so a running glide cannot undo it */
+export function jumpTo(y: number): void {
+  writeScroll(y)
+}
+
 function read(): Record<string, number> {
   try {
     const v = JSON.parse(sessionStorage.getItem(STORE) || '{}')
@@ -83,7 +97,7 @@ export function useScrollKeeper(): void {
     lastPath.current = location.pathname
     const target = navType === 'POP' ? positions[location.key] : undefined
     if (target == null) {
-      if (!samePage) window.scrollTo(0, 0)
+      if (!samePage) writeScroll(0)
       return
     }
     // Follow the page as it grows, and hold the position until its height has been steady for
@@ -120,7 +134,7 @@ export function useScrollKeeper(): void {
         steadySince = now
       }
       const room = h - window.innerHeight
-      window.scrollTo(0, Math.min(target, Math.max(0, room)))
+      writeScroll(Math.min(target, Math.max(0, room)))
       if ((room >= target && now - steadySince >= STEADY_MS) || now - started > RESTORE_MS) return finish()
       raf = requestAnimationFrame(step)
     }

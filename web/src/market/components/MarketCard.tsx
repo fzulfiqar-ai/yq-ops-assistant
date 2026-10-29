@@ -1,12 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Check, Clock, Eye, Heart, MessageCircle, Plus, Store } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { BadgeKind, ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
 import { track } from '../lib/events'
-import { launchFlight } from '../lib/flight'
+import { flyToCart, launchFlight } from '../lib/flight'
 import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, proofText, stepOf, unitAt, variantOf } from '../lib/format'
-import { useShell } from '../shell/ShellContext'
+import { useShellActions } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
 import { ltrText } from '../i18n'
@@ -84,6 +84,15 @@ export interface MarketCardProps {
 }
 
 const ADDED_MS = 600
+
+/** K3: where the card's faint light sits (its ::after reads --mx / --my); a mouse only, no render */
+function followLight(e: ReactPointerEvent<HTMLElement>) {
+  if (e.pointerType !== 'mouse') return
+  const el = e.currentTarget
+  const r = el.getBoundingClientRect()
+  el.style.setProperty('--mx', `${Math.round(e.clientX - r.left)}px`)
+  el.style.setProperty('--my', `${Math.round(e.clientY - r.top)}px`)
+}
 /** A margin this share of retail (or more) earns the "High margin" tag. */
 const HIGH_MARGIN_PCT = 50
 /** Ask for every badge, then pick: a hidden one must not eat the card's only badge slot. */
@@ -156,7 +165,7 @@ export function CardKicker({ item, className }: { item: Pick<ShopItem, 'brand' |
     <span dir="ltr" className={cn('flex min-w-0 items-baseline gap-1 text-2xs leading-[14px] text-ink-3 rtl:justify-end', className)}>
       {brand && (
         <>
-          <span className="shrink-0 font-semibold uppercase tracking-[0.06em]">{brand}</span>
+          <span className="shrink-0 font-semibold">{brand}</span>
           <span aria-hidden="true">·</span>
         </>
       )}
@@ -286,11 +295,14 @@ function TierLine({ qty, price }: { qty: number; price: string }) {
 
 export const MarketCard = memo(function MarketCard({ item, variant = 'grid', from, priority, presetQty, hideBadge, className }: MarketCardProps) {
   const m = useMarket()
-  const { openProduct } = useShell()
+  const { openProduct } = useShellActions()
   const toast = useToast()
   const qty = useCartQty(item.item_code)
   const saved = useIsSaved(item.item_code)
   const [added, setAdded] = useState(false)
+  // K4: once "Added" has shown, the stepper comes in (it popped in place of it); never for a line
+  // that was in the cart when the card first drew
+  const [stepIn, setStepIn] = useState(false)
   /** 'add' — no line yet, the keypad states the first quantity; 'edit' — change the line's quantity */
   const [keypad, setKeypad] = useState<'add' | 'edit' | null>(null)
   const timer = useRef<number | undefined>(undefined)
@@ -333,9 +345,14 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   }, [from, item.item_code, openProduct])
 
   const flash = useCallback(() => {
+    // K4: the photo flies to the cart (lib/flight), from the direct Add and from the keypad alike
+    flyToCart(imgWrap.current?.querySelector('img'))
     setAdded(true)
     window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setAdded(false), ADDED_MS)
+    timer.current = window.setTimeout(() => {
+      setAdded(false)
+      setStepIn(true)
+    }, ADDED_MS)
     try {
       navigator.vibrate?.(8)
     } catch {
@@ -376,13 +393,13 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     if (added) {
       return round ? (
         <div className="flex justify-end">
-          <div aria-live="polite" className="grid h-10 w-10 place-items-center rounded-full bg-plum text-white shadow-1">
+          <div aria-live="polite" className="grid h-10 w-10 place-items-center rounded-full bg-plum text-white shadow-1 [animation:m-pop_200ms_var(--m-ease-out)_both]">
             <Check size={18} aria-hidden="true" />
             <span className="sr-only">{S.card.added}</span>
           </div>
         </div>
       ) : (
-        <div aria-live="polite" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm bg-plum text-sm font-semibold text-white', tall)}>
+        <div aria-live="polite" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm bg-plum text-sm font-semibold text-white [animation:m-pop_200ms_var(--m-ease-out)_both]', tall)}>
           <Check size={16} aria-hidden="true" /> {S.card.added}
         </div>
       )
@@ -390,7 +407,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     if (selected) {
       // a committed line must never look lighter than one that was ignored: the stepper carries
       // a plum wash of the same weight as the Add block it replaced
-      return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad('edit')} className="w-full bg-plum-wash" />
+      return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad('edit')} className={cn('w-full bg-plum-wash', stepIn && '[animation:m-pop_200ms_var(--m-ease-out)_both]')} />
     }
     /**
      * Nothing is remembered for this line yet, so there is no honest quantity to add: the button
@@ -409,7 +426,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
             onClick={press}
             aria-label={label}
             // 40 px of ink, 48 px of target: the pseudo-element carries the rest of the tap area
-            className="relative grid h-10 w-10 shrink-0 place-items-center rounded-full bg-plum text-white shadow-1 transition duration-1 ease-m after:absolute after:-inset-1 active:scale-95 hover:bg-plum-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2"
+            className="m-press relative grid h-10 w-10 shrink-0 place-items-center rounded-full bg-plum text-white shadow-1 transition duration-1 ease-m after:absolute after:-inset-1 hover:scale-[1.06] hover:bg-plum-deep active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2"
           >
             {defaultQty > 1 ? <span className={cn('font-bold leading-none tnum', String(defaultQty).length > 2 ? 'text-2xs' : 'text-[13px]')}>+{defaultQty}</span> : <Plus size={18} aria-hidden="true" />}
           </button>
@@ -423,7 +440,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         disabled={!canOrder && asked}
         aria-label={label}
         className={cn(
-          'hit relative flex w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
+          'm-press hit relative flex w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
           tall,
           canOrder ? (out ? 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash' : 'bg-plum text-white shadow-1 hover:bg-plum-deep') : asked ? 'cursor-default border border-ok/30 bg-ok-soft text-ok' : 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash',
         )}
@@ -553,10 +570,14 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   return (
     <article
       data-stock={item.stock_status || 'in_stock'}
+      onPointerMove={followLight}
       className={cn(
-        'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition duration-2 ease-m',
+        // K3 (29-Oct-2026), a mouse only (hover variants): the card rises 4 px into a deeper shadow
+        // on the enter curve, and a faint plum light follows the cursor across it (--mx/--my)
+        'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition-[transform,box-shadow,border-color] duration-[280ms] [transition-timing-function:var(--m-ease-out)]',
+        "after:pointer-events-none after:absolute after:inset-0 after:opacity-0 after:transition-opacity after:duration-300 after:content-[''] after:[background:radial-gradient(240px_circle_at_var(--mx,50%)_var(--my,30%),hsl(var(--m-plum)/0.12),transparent_70%)] group-hover:after:opacity-100",
         compact ? 'cv-compact w-[clamp(10rem,46vw,13rem)] shrink-0 lg:w-auto' : priority ? '' : 'cv-card',
-        selected ? 'border-plum/50 shadow-[0_0_0_1px_hsl(var(--m-plum)/.18),var(--m-shadow-2)]' : 'border-line shadow-1 hover:-translate-y-0.5 hover:border-ink/15 hover:shadow-2',
+        selected ? 'border-plum/50 shadow-[0_0_0_1px_hsl(var(--m-plum)/.18),var(--m-shadow-2)]' : 'border-line shadow-1 hover:z-[1] hover:-translate-y-1 hover:border-ink/15 hover:shadow-3',
         className,
       )}
     >
@@ -574,7 +595,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           <Heart size={compact ? 15 : 16} aria-hidden="true" className={cn(saved && 'fill-current')} />
         </button>
         {/* press feedback (motion M9): the photo gives a little under the finger before the sheet opens */}
-        <button type="button" onClick={open} className="block w-full transition-transform duration-1 ease-m active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
+        <button type="button" onClick={open} className="m-press block w-full transition-transform duration-1 ease-m active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
           <div ref={imgWrap}>
             <ProductImage
               item={item}
@@ -584,7 +605,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
               priority={priority}
               eager={priority}
               className="w-full"
-              imgClassName={cn('p-3 transition-transform duration-3 ease-m group-hover:scale-[1.03]', out && 'opacity-70 saturate-[.25]')}
+              imgClassName={cn('p-3 transition-transform duration-3 ease-m group-hover:scale-[1.06]', out && 'opacity-70 saturate-[.25]')}
               iconSize={compact ? 28 : 40}
               showCaption={!compact}
             />

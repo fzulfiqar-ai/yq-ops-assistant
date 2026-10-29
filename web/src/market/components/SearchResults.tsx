@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Check, ChevronRight, Clock, Hash, MessageCircle } from 'lucide-react'
+import { Check, ChevronRight, Clock, Hash, MessageCircle, Sparkles } from 'lucide-react'
 import type { ShopItem } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
@@ -15,6 +15,9 @@ import { ProductImage } from '../ui/ProductImage'
 import { SectionHeader } from '../ui/SectionHeader'
 import { Skeleton } from '../ui/Skeleton'
 import { MarketCard } from './MarketCard'
+import { useAssistEnabled } from '../assist/enabled'
+import { openAssist } from '../assist/open'
+import { L } from '../assist/launcherStrings'
 import { soldOutSplit } from '../lib/facets'
 import { SoldOutDivider } from './SoldOut'
 
@@ -32,7 +35,7 @@ import { SoldOutDivider } from './SoldOut'
  */
 
 const POPULAR_MAX = 6
-const LABEL = 'text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2'
+const LABEL = 'text-xs font-semibold text-ink-2'
 
 export function SearchEmpty({ onPick }: { onPick: (q: string) => void }) {
   const { items, categories } = useMarket()
@@ -133,6 +136,7 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
   const { categories, items, rep } = useMarket()
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
   const [noted, setNoted] = useState('')
+  const assistOn = useAssistEnabled()
   const query = q.trim()
   const first = rep?.first_name || ''
   const askUrl = rep?.whatsapp_url && query ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.shop.askHave(first, query))}` : null
@@ -179,9 +183,14 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
           </Button>
         )
       )}
+      {assistOn && query ? (
+        <Button variant="secondary" className="mt-3" onClick={() => openAssist({ message: query })} icon={<Sparkles size={15} aria-hidden="true" />}>
+          {L.ask}
+        </Button>
+      ) : null}
       {tiles.length > 0 && (
         <div className="mt-6">
-          <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h3>
+          <h3 className="text-xs font-semibold text-ink-2">{S.search.categories}</h3>
           <CategoryGrid tiles={tiles} className="mt-2" />
         </div>
       )}
@@ -206,7 +215,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
     <div className={className}>
       {grouped.codes.length > 0 && (
         <section aria-label={S.search.codes}>
-          <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.codes}</h2>
+          <h2 className="text-xs font-semibold text-ink-2">{S.search.codes}</h2>
           <div className="mt-1">
             {grouped.codes.map((it, i) => (
               <Fragment key={it.item_code}>
@@ -221,7 +230,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
       )}
       {grouped.products.length > 0 && (
         <section aria-label={S.search.products} className={cn(grouped.codes.length > 0 && 'mt-5')}>
-          <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">
+          <h2 className="text-xs font-semibold text-ink-2">
             {S.search.products} <span className="tnum text-ink-3">· {grouped.products.length}</span>
           </h2>
           <div className="mt-1">
@@ -238,7 +247,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
       )}
       {grouped.categories.length > 0 && (
         <section aria-label={S.search.categories} className="mt-5">
-          <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h2>
+          <h2 className="text-xs font-semibold text-ink-2">{S.search.categories}</h2>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {grouped.categories.map((c) => (
               <Link key={c} to={`/t/${categorySlug(c)}`} className={cn(chip, 'inline-flex items-center font-semibold')}>

@@ -33,6 +33,8 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
   const words = useServerWords()
   const { quote, quoting } = useOrder()
   const lines = useCartLines()
+  // K8 (29-Oct-2026): a line added while the column shows slides in; the lines it opened with do not
+  const [firstCodes] = useState(() => new Set(lines.map((l) => l.item_code)))
   const { items, units } = useCartCounts()
   const { closeCart, openProduct } = useShell()
   const navigate = useNavigate()
@@ -57,7 +59,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
   return (
     <section className={cn('flex flex-col overflow-hidden bg-surface', inDrawer ? 'h-full' : 'max-h-[72dvh] shrink-0 rounded-xl border border-line shadow-1')} aria-label={S.cart.mini}>
       <header className={cn('flex items-center gap-2.5 border-b border-line-2 px-4 py-3', inDrawer && 'pe-14')}>
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-plum-wash text-plum" aria-hidden="true">
+        <span data-cart-target={inDrawer ? undefined : 1} className="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-plum-wash text-plum" aria-hidden="true">
           <RestockIcon size={16} />
         </span>
         <h2 className="font-display text-md font-bold text-ink">{S.cart.mini}</h2>
@@ -103,7 +105,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                 const dead = Boolean(q?.unavailable)
                 const name = item ? productName(item) : line.item_code
                 return (
-                  <li key={line.item_code} className="flex items-center gap-3 py-2.5">
+                  <li key={line.item_code} className={cn('flex items-center gap-3 py-2.5', !firstCodes.has(line.item_code) && '[animation:m-rise_300ms_var(--m-ease-out)_both]')}>
                     <button type="button" onClick={() => openProduct(line.item_code, 'minicart')} className="h-11 w-11 shrink-0 overflow-hidden rounded-sm border border-line-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70" aria-label={name}>
                       <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={44} imgClassName={cn('p-1', dead && 'opacity-45 saturate-50')} iconSize={16} showCaption={false} />
                     </button>

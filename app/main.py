@@ -120,13 +120,16 @@ _DEV_ORIGINS = [
 # credentials are never needed cross-origin (CSRF therefore does not apply: a cross-site form
 # cannot attach the Authorization header). The header list is what web/src/lib/api.ts,
 # shopApi.ts and market/lib/marketApi.ts send plus the crons' X-Agent-Key; Content-Disposition
-# is exposed so a download can read its filename (R1 security, 24-Sep-2026).
+# is exposed so a download can read its filename (R1 security, 24-Sep-2026). X-Device-Id is the
+# YQ Assist microphone upload's (web/src/market/assist/assistApi.ts postVoice: a multipart body
+# carries no JSON device id, the rate limiter reads the header). Without it the browser's
+# preflight was refused and no recording ever reached the API (29-Oct-2026).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(set(settings.allowed_origins) | set(_DEV_ORIGINS)),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Agent-Key", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "X-Agent-Key", "Accept", "X-Device-Id"],
     expose_headers=["Content-Disposition", "Retry-After"],
     # Every portal call carries Authorization, so each distinct URL needs a preflight; the
     # browser keeps the answer this long (Chrome caps it at 2 h; Starlette's default is 10 min),

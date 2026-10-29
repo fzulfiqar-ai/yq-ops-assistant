@@ -71,6 +71,7 @@ export const NAV: NavItem[] = [
   { section: 'Reports', label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
   { section: 'Reports', label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
   { section: 'Reports', label: 'Shop analytics', to: '/shop-analytics', icon: BarChart3, feature: 'Shop Admin' },
+  { section: 'Reports', label: 'YQ Assist', to: '/merchant-voice', icon: MessageSquare, feature: 'Shop Admin' },
   { section: 'Admin', label: 'Data upload', to: '/data', icon: Database }, // admin-only
   { section: 'Admin', label: 'Team & access', to: '/team', icon: Users }, // admin-only
   { section: 'AI tools / Archive', label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },

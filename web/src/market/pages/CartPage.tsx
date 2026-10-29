@@ -16,7 +16,7 @@ import { rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
 import { bhd, bhdMinus, fmtDateShort, minQtyOf, money, nextTier, productName, stepOf, unitAt, variantOf } from '../lib/format'
 import { bestSellers, orderLines, regularStock, splitReorder, type RegularLine } from '../lib/home'
-import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
+import { PageBar, useHideNav, usePageTitle, useShellActions, useShellViewport } from '../shell/ShellContext'
 import { blockText, couponText, errorText, lineBlockedText, warningTexts } from '../lib/serverWords'
 import { useServerWords } from '../lib/useServerWords'
 import { useCartCounts, useCartLines } from '../store/cart'
@@ -52,7 +52,8 @@ export default function CartPage() {
   const m = useMarket()
   const { quote, quoting, quoteError, gate, retryQuote, retrying, coupon, setCoupon, note, setNote } = useOrder()
   const { itemsByCode, rep } = m
-  const { viewport, openProduct } = useShell()
+  const viewport = useShellViewport()
+  const { openProduct } = useShellActions()
   const toast = useToast()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
@@ -544,7 +545,7 @@ function EmptyShelf() {
 /** The last order, one tap back into the restock (the lines that can be ordered today and are not already added), then its sold-out lines with "Tell me when back". */
 function OrderAgainCard({ lines, sold, placedAt }: { lines: RegularLine[]; sold: RegularLine[]; placedAt?: string | null }) {
   const m = useMarket()
-  const { openProduct } = useShell()
+  const { openProduct } = useShellActions()
   const total = lines.reduce((s, l) => s + (unitAt(l.item, l.qty) ?? 0) * l.qty, 0)
   return (
     <div className="mt-4 overflow-hidden rounded-xl border border-line bg-surface shadow-1">

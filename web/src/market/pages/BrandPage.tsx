@@ -11,7 +11,7 @@ import { ConnectingState, EmptyState } from '../components/States'
 import { useMarket } from '../MarketContext'
 import type { UpcomingItem, UpcomingPayload } from '../lib/marketApi'
 import { cachedUpcoming, fetchUpcoming } from '../lib/upcoming'
-import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
+import { usePageTitle, useSearchBand, useShellViewport } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { locale, S } from '../strings'
 import { LinkButton } from '../ui/Button'
@@ -36,7 +36,7 @@ export default function BrandPage() {
   const brand = decodeURIComponent(raw).trim().toUpperCase()
   const t = upcomingCopy()
   const { items, status, reload } = useMarket()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const desktop = isDesktopLike(viewport)
   const phone = viewport === 'phone'
   // { tick, data } — the effect records which attempt it answered; "loading" is derived (the

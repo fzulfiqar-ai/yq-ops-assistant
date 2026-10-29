@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Check, Mail, MessageCircle, PackageSearch, RotateCcw, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { jumpTo } from '@/lib/scrollKeeper'
 import type { MarketOrderResponse, OrderStatusPayload } from '@/lib/shopApi'
 import { CheckMark } from '../components/CheckMark'
 import { SoldOutRows } from '../components/SoldOut'
@@ -189,7 +190,7 @@ export default function TrackingPage() {
   /** Track order: the same page without the confirmation hero — the live view, from the top */
   const toTracking = () => {
     navigate(location.pathname, { replace: true, state: null })
-    window.scrollTo({ top: 0 })
+    jumpTo(0)
   }
 
   if (err || !token) {
@@ -217,7 +218,7 @@ export default function TrackingPage() {
               </p>
               {isSmall && !placed.duplicate && placed.assigned && repLine && <p className="mt-1 text-xs font-medium text-plum-ink">{repLine}</p>}
               <div className="mt-5 rounded-md bg-plum-soft px-4 py-3">
-                <div className="text-2xs font-semibold uppercase tracking-[0.1em] text-plum">{S.placed.number}</div>
+                <div className="text-xs font-semibold text-plum">{S.placed.number}</div>
                 <div className="mt-0.5 font-display text-2xl font-extrabold tnum text-ink">
                   <Ltr>{placed.order_no}</Ltr>
                 </div>
@@ -263,7 +264,7 @@ export default function TrackingPage() {
                 <div>
                   {!placed && (
                     <>
-                      <div className="text-2xs font-semibold uppercase tracking-wide text-ink-2">{S.placed.number}</div>
+                      <div className="text-xs font-semibold text-ink-2">{S.placed.number}</div>
                       <h2 className="font-display text-xl font-extrabold tnum text-ink">
                         <Ltr>{data.order_no}</Ltr>
                       </h2>

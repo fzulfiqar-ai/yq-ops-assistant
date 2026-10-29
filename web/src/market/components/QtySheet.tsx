@@ -5,7 +5,7 @@ import { bhd, minQtyOf, stepOf, unitAt, productName } from '../lib/format'
 import { ltr } from '../i18n'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, SheetCloser } from '../ui/Sheet'
 
 /**
  * Type a quantity: a big numeric field, quick picks (pack multiples or 6/12/24/48/100), the tier
@@ -26,10 +26,11 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
   const n = Math.max(0, Math.floor(Number(draft) || 0))
   const valid = n >= min && n <= 9999
   const unit = valid ? unitAt(item, n) : null
+  // true when it applied: the caller then closes the keypad through the sheet, which slides it away
   const apply = () => {
-    if (!valid) return
+    if (!valid) return false
     onApply(n)
-    onClose()
+    return true
   }
   return (
     <Sheet
@@ -39,31 +40,37 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
       title={S.qty.title}
       subtitle={`${ltr(`${item.item_code} · ${productName(item)}`)}${min > 1 ? ` · ${S.card.min(min)}` : ''}${step > 1 ? ` · ${S.card.packs(step)}` : ''}`}
       footer={
-        <div className="flex gap-2">
-          {value > 0 && (
-            <Button
-              variant="danger"
-              size="lg"
-              onClick={() => {
-                onRemove()
-                onClose()
-              }}
-            >
-              {S.qty.remove}
-            </Button>
+        <SheetCloser>
+          {(close) => (
+            <div className="flex gap-2">
+              {value > 0 && (
+                <Button
+                  variant="danger"
+                  size="lg"
+                  onClick={() => {
+                    onRemove()
+                    close()
+                  }}
+                >
+                  {S.qty.remove}
+                </Button>
+              )}
+              <Button size="lg" className="flex-1" disabled={!valid} onClick={() => apply() && close()}>
+                {S.qty.apply}
+                {valid && unit != null ? <span className="tnum opacity-90">· {bhd(unit * n)}</span> : null}
+              </Button>
+            </div>
           )}
-          <Button size="lg" className="flex-1" disabled={!valid} onClick={apply}>
-            {S.qty.apply}
-            {valid && unit != null ? <span className="tnum opacity-90">· {bhd(unit * n)}</span> : null}
-          </Button>
-        </div>
+        </SheetCloser>
       }
     >
       <div className="px-4 py-4 md:px-5">
+        <SheetCloser>
+          {(close) => (
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value.replace(/\D/g, '').slice(0, 4))}
-          onKeyDown={(e) => e.key === 'Enter' && apply()}
+          onKeyDown={(e) => e.key === 'Enter' && apply() && close()}
           onFocus={(e) => e.currentTarget.select()}
           inputMode="numeric"
           pattern="[0-9]*"
@@ -71,8 +78,10 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
           aria-label={S.qty.title}
           className="h-16 w-full rounded-md border border-line bg-surface text-center font-display text-3xl font-extrabold tnum text-ink outline-none focus:border-plum focus:ring-2 focus:ring-plum/15"
         />
+          )}
+        </SheetCloser>
         {!valid && draft !== '' && <p className="mt-1.5 text-center text-xs font-medium text-bad">{n < min ? S.card.min(min) : S.qty.tooMany}</p>}
-        <div className="mt-4 text-xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.qty.presets}</div>
+        <div className="mt-4 text-xs font-semibold text-ink-2">{S.qty.presets}</div>
         <div className="mt-2 grid grid-cols-5 gap-2">
           {presets.map((p) => (
             <button

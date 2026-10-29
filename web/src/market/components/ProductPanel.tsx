@@ -56,10 +56,12 @@ export default function ProductPanel({ code }: { code: string }) {
     rememberViewed(item.item_code)
     track('item', { item_code: item.item_code })
   }, [item])
-  // photo flight (lib/flight): the tapped card's photo lands here. A callback ref runs as the photo
-  // mounts, before the first paint, while the sheet still sits at the start of its slide.
+  // photo flight (lib/flight): the tapped card's photo lands here, before the first paint, while the
+  // sheet still sits at the start of its slide. Measured at the end of the commit (a microtask from the
+  // photo's ref): by then the sheet's layout effect has locked the scroll, so the landing box is where
+  // the photo rests once the scrollbar's gutter has gone (it landed ~10 px off on a PC: round 2)
   const heroRef = useCallback((el: HTMLDivElement | null) => {
-    if (el) landFlight(code, el)
+    if (el) queueMicrotask(() => landFlight(code, el))
   }, [code])
   /**
    * The sticky bar repeats the price only once the real one has scrolled away — otherwise the
@@ -273,7 +275,7 @@ export default function ProductPanel({ code }: { code: string }) {
               <table className="w-full text-start text-sm">
                 <caption className="sr-only">{S.card.breaksCaption}</caption>
                 <thead>
-                  <tr className="bg-canvas text-2xs uppercase tracking-[0.06em] text-ink-2">
+                  <tr className="bg-canvas text-xs text-ink-2">
                     <th scope="col" className="px-3 py-2 text-start font-semibold">
                       {S.card.colQty}
                     </th>
@@ -308,7 +310,7 @@ export default function ProductPanel({ code }: { code: string }) {
 
           {detail && (
             <div className="mt-5">
-              <h3 className="text-2xs font-bold uppercase tracking-[0.08em] text-ink-2">{S.card.details}</h3>
+              <h3 className="text-xs font-bold text-ink-2">{S.card.details}</h3>
               {/* the supplier's spec, as written: English, an island in an Arabic page (no invented translation) */}
               <p className="mt-1.5 whitespace-pre-line text-sm leading-[1.6] text-ink-2">
                 <Ltr>{detail}</Ltr>

@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils'
 import { useMarket, useOrder } from '../MarketContext'
 import { track } from '../lib/events'
 import { bhd, minQtyOf, normalizeQty, productName, variantOf } from '../lib/format'
-import { useShell } from '../shell/ShellContext'
+import { useShellActions, useShellViewport } from '../shell/ShellContext'
 import { isPhoneLike } from '../shell/useViewport'
 import { useCartCounts, useCartQty } from '../store/cart'
 import { ltrText } from '../i18n'
@@ -163,7 +163,7 @@ function useGapFillers(max: number): GapFillers {
 
 export function WholesaleState({ variant, onRequestSmall, actions = true, fillers: withFillers = true, announce = false, className }: WholesaleStateProps) {
   const { quote, quoting, gate } = useOrder()
-  const { viewport } = useShell()
+  const viewport = useShellViewport()
   const { items: cartItems } = useCartCounts()
   const navigate = useNavigate()
   const headingId = useId()
@@ -216,7 +216,7 @@ export function WholesaleState({ variant, onRequestSmall, actions = true, filler
         </p>
         {fillers.length > 0 && (
           <div className="mt-2.5 border-t border-plum/10 pt-2">
-            <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.wholesale.fill}</h3>
+            <h3 className="text-xs font-semibold text-ink-3">{S.wholesale.fill}</h3>
             <ul className="mt-0.5 divide-y divide-plum/10 pb-0.5">
               {fillers.map((f) => (
                 <FillerRow key={f.g.item_code} f={f} dense />
@@ -266,7 +266,7 @@ export function WholesaleState({ variant, onRequestSmall, actions = true, filler
         </div>
         {split && !met && fillers.length > 0 && (
           <div className="mt-3 border-t border-line-2 pt-2.5">
-            <h4 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.wholesale.fill}</h4>
+            <h4 className="text-xs font-semibold text-ink-3">{S.wholesale.fill}</h4>
             <ul className="mt-0.5 divide-y divide-line-2">
               {fillers.map((f) => (
                 <FillerRow key={f.g.item_code} f={f} />
@@ -309,7 +309,7 @@ export function WholesaleState({ variant, onRequestSmall, actions = true, filler
 
       {fillers.length > 0 && (
         <div className="mt-4 border-t border-line-2 pt-3.5">
-          <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.wholesale.fill}</h3>
+          <h3 className="text-xs font-semibold text-ink-3">{S.wholesale.fill}</h3>
           <FillerRows gap={gap} className="mt-0.5" />
         </div>
       )}
@@ -431,7 +431,7 @@ function Kicker({ met, quoting, near }: { met: boolean; quoting: boolean; near?:
   const Icon = met ? PackageCheck : Boxes
   return (
     <div className="flex items-center justify-between gap-2">
-      <span className={cn('inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-2xs font-semibold uppercase tracking-[0.1em] ring-1 ring-inset', near ? 'bg-deal-soft text-deal-ink ring-deal/20' : 'bg-plum-wash text-plum-ink ring-plum/10')}>
+      <span className={cn('inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold ring-1 ring-inset', near ? 'bg-deal-soft text-deal-ink ring-deal/20' : 'bg-plum-wash text-plum-ink ring-plum/10')}>
         <Icon size={12} strokeWidth={2} aria-hidden="true" />
         {S.wholesale.kicker}
       </span>
@@ -485,7 +485,7 @@ const ADDED_MS = 700
 function FillerRow({ f, dense }: { f: Filler; dense?: boolean }) {
   const { g, item, qty, closes } = f
   const m = useMarket()
-  const { openProduct } = useShell()
+  const { openProduct } = useShellActions()
   const inCart = useCartQty(g.item_code) > 0
   const [flash, setFlash] = useState(false)
   const timer = useRef<number | undefined>(undefined)

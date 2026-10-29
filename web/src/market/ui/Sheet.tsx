@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -65,6 +65,17 @@ export interface SheetProps {
   vtName?: string
 }
 
+/**
+ * The sheet's own animated close, for an action inside it that is done with the sheet (the keypad's
+ * Apply): it plays the exit, then calls onClose. Calling the parent's onClose directly unmounted the
+ * sheet in one frame — the keypad vanished instead of sliding away (final review, 29-Oct-2026).
+ */
+const SheetCloseCtx = createContext<(() => void) | null>(null)
+export function SheetCloser({ children }: { children: (close: () => void) => ReactNode }) {
+  const close = useContext(SheetCloseCtx)
+  return <>{children(close ?? (() => {}))}</>
+}
+
 export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size = 'md', children, footer, header, bare, className, vtName }: SheetProps) {
   const restoreRef = useRef<HTMLElement | null>(null)
   const titleId = useId()
@@ -97,12 +108,15 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
   // focus back to the opener, moved it to the panel again (the keypad's keyboard closed mid-number)
   // and re-stacked the layer, so a palette could land above the product opened from it (final
   // review, 28-Oct-2026). The key handler reads the latest close from here.
+  // A layout effect (29-Oct-2026, round 2): the scroll lock lands before the sheet's first paint. As a
+  // passive effect it ran a frame late, so the drawer stepped sideways by the scrollbar's width during
+  // its slide and the photo flight measured its landing before that step (10 px off on a PC).
   const closeRef = useRef(close)
   useEffect(() => {
     closeRef.current = close
   }, [close])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     restoreRef.current = document.activeElement as HTMLElement | null
     const unlock = lockScroll()
@@ -174,6 +188,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
   const lift = bottomSheet ? { marginBottom: 'var(--kb, 0px)', maxHeight: 'calc(92dvh - var(--kb, 0px))' } : undefined
 
   return createPortal(
+    <SheetCloseCtx.Provider value={close}>
     <div className="fixed inset-0 z-sheet flex" role="presentation">
       <button
         ref={attachBackdrop}
@@ -183,8 +198,10 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         onClick={close}
         // the entrance fills `backwards` only: with `both` its finished keyframe outranked the opacity
         // the drag writes, so the dim stayed full under a dragged sheet and cut out at the end
-        style={{ animation: closing ? `m-fade-in ${OUT_MS}ms ease-in reverse both` : 'm-fade-in 200ms ease-out backwards' }}
-        className="absolute inset-0 h-full w-full cursor-default bg-ink/45 [@media(hover:hover)_and_(pointer:fine)]:backdrop-blur-[2px]"
+        // the exit is its own keyframes: the entrance's, reversed, kept its finished clock and cut to 0 at once
+        style={{ animation: closing ? `m-fade-out ${OUT_MS}ms ease-in both` : 'm-fade-in 200ms ease-out backwards' }}
+        // darker on a desktop, where no blur sets the layer apart any more (round 2: solid surfaces)
+        className="calm-fade absolute inset-0 h-full w-full cursor-default bg-ink/45 lg:bg-ink/55"
       />
       <div
         ref={attachPanel}
@@ -196,7 +213,8 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         data-sheet-panel=""
         data-leaving={closing ? '' : undefined}
         style={{ viewTransitionName: vtName, ...lift }}
-        className={cn('relative flex flex-col overflow-hidden bg-surface shadow-3 outline-none', shape, closing ? exit : enter, className)}
+        // calm-fade: under reduced motion a desktop panel fades in and out with its dim (market.css)
+        className={cn('calm-fade relative flex flex-col overflow-hidden bg-surface shadow-3 outline-none', shape, closing ? exit : enter, className)}
       >
         {/* Grab handle — the affordance that says "this slides". Phones only; a 24 px strip to catch. */}
         <div aria-hidden="true" onPointerDown={onPointerDown} className={cn('flex touch-none justify-center pb-2 pt-2.5', isDrawer || !isDialog ? 'md:hidden' : 'sm:hidden')}>
@@ -242,7 +260,8 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
 
         {footer ? <div className="border-t border-line-2 bg-surface px-4 pb-[max(0.875rem,var(--m-safe-b))] pt-3 md:px-5">{footer}</div> : null}
       </div>
-    </div>,
+    </div>
+    </SheetCloseCtx.Provider>,
     document.body,
   )
 }

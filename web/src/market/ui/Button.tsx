@@ -13,7 +13,7 @@ export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'wa' 
 export type ButtonSize = 'sm' | 'md' | 'lg' | 'xl'
 
 const BASE =
-  'inline-flex select-none items-center justify-center gap-2 whitespace-nowrap font-semibold transition duration-1 ease-m active:scale-[.985] disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas'
+  'm-press inline-flex select-none items-center justify-center gap-2 whitespace-nowrap font-semibold transition duration-1 ease-m active:scale-[.98] disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas'
 
 const VARIANT: Record<ButtonVariant, string> = {
   primary: 'bg-plum text-white hover:bg-plum-deep shadow-1',
@@ -107,7 +107,7 @@ export function IconButton({
       aria-label={label}
       title={label}
       className={cn(
-        'grid shrink-0 place-items-center rounded-sm text-ink-2 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
+        'm-press grid shrink-0 place-items-center rounded-sm text-ink-2 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
         dim,
         className,
       )}
