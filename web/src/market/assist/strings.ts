@@ -120,9 +120,10 @@ const en = {
   privacyTitle: 'About this chat',
   privacyBody:
     "Answers come from the YQ catalogue; the prices and stock on the cards are the catalogue's own. Nothing is ordered until you send it, and your representative confirms every order. Chats are kept for 180 days to improve the service. Please do not share card numbers, passwords or ID numbers.",
-  why: { usual: 'Your usual', selling: 'Selling in your categories', deal: "Today's offer", minimum: 'Closes your minimum', alternative: 'In stock instead', sold_out: 'Sold out', popular: 'Ordered by shops' } as Record<string, string>,
+  why: { usual: 'Your usual', selling: 'Selling in your categories', deal: "Today's offer", clearance: 'Clearing line', minimum: 'Closes your minimum', alternative: 'In stock instead', sold_out: 'Sold out', popular: 'Ordered by shops' } as Record<string, string>,
   planTitle: 'Your order plan',
-  planSteps: (u: number, s: number, d: number) => [u ? `${u} usual` : '', s ? `${s} selling` : '', d ? `${d} offers` : ''].filter(Boolean).join(' · '),
+  planSteps: (u: number, s: number, d: number, c = 0) =>
+    [u ? `${u} usual` : '', s ? `${s} selling` : '', d ? `${d} offers` : '', c ? `${c} clearing` : ''].filter(Boolean).join(' · '),
   minimumOf: (now: string, min: string) => `${now} of the ${min} minimum`,
   minimumMet: (min: string) => `Above the ${min} minimum`,
   officialAnswer: 'Official YQ answer',
@@ -278,9 +279,10 @@ const ar: typeof en = {
   privacyTitle: 'عن هذه المحادثة',
   privacyBody:
     'الإجابات من كتالوج YQ، والأسعار والمخزون على البطاقات من الكتالوج نفسه. لا يُطلب شيء حتى ترسله، ومندوبك يؤكد كل طلب. نحتفظ بالمحادثات ١٨٠ يومًا لتحسين الخدمة. من فضلك لا تشارك أرقام البطاقات أو كلمات المرور أو أرقام الهوية.',
-  why: { usual: 'معتاد لديك', selling: 'مطلوب في فئاتك', deal: 'عرض اليوم', minimum: 'يكمل الحد الأدنى', alternative: 'متوفر بديلًا', sold_out: 'نفدت الكمية', popular: 'تطلبه المحلات' } as Record<string, string>,
+  why: { usual: 'معتاد لديك', selling: 'مطلوب في فئاتك', deal: 'عرض اليوم', clearance: 'صنف للتصفية', minimum: 'يكمل الحد الأدنى', alternative: 'متوفر بديلًا', sold_out: 'نفدت الكمية', popular: 'تطلبه المحلات' } as Record<string, string>,
   planTitle: 'خطة طلبك',
-  planSteps: (u: number, s: number, d: number) => [u ? `${u} معتاد` : '', s ? `${s} مطلوب` : '', d ? `${d} عروض` : ''].filter(Boolean).join(' · '),
+  planSteps: (u: number, s: number, d: number, c = 0) =>
+    [u ? `${u} معتاد` : '', s ? `${s} مطلوب` : '', d ? `${d} عروض` : '', c ? `${c} للتصفية` : ''].filter(Boolean).join(' · '),
   minimumOf: (now: string, min: string) => `${now} من الحد الأدنى ${min}`,
   minimumMet: (min: string) => `فوق الحد الأدنى ${min}`,
   officialAnswer: 'إجابة YQ الرسمية',

@@ -855,12 +855,13 @@ def _():
     with Rig(U("price")) as _rig:
         assert _ask(message="how much?")["reply"] == T["price_which"]
     cat = _shelf(PB10=(), SP1=())                                             # no real offer left: clearing lines only
-    lines = [{"item_code": "UK20", "qty": 10, "why": "selling"}, {"item_code": "PB20", "qty": 2, "why": "deal"}]
+    lines = [{"item_code": "UK20", "qty": 10, "why": "selling"}, {"item_code": "PB20", "qty": 2, "why": "clearance"}]
     saved = ma.plan_order
     try:
         ma.plan_order = lambda *_a, **_k: [dict(x) for x in lines]
-        assert ma._h_plan(cat, [], None, None, T)[0]["reply"] == T["plan_new_clear"]
-        lines[1]["item_code"] = "PB10"
+        r = ma._h_plan(cat, [], None, None, T)[0]
+        assert r["reply"] == T["plan_new_clear"] and r["plan"]["clearance"] == 1 and r["plan"]["deal"] == 0
+        lines[1].update(item_code="PB10", why="deal")
         assert ma._h_plan(_shelf_cat(), [], None, None, T)[0]["reply"] == T["plan_new"]
         del lines[1]
         assert ma._h_plan(_shelf_cat(), [], 30, None, T)[0]["reply"] == T["plan_budget"].format(budget="30") + " " + \

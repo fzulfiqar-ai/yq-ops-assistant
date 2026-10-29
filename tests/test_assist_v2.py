@@ -243,7 +243,7 @@ def _():
         assert r["reply"].startswith("I've put your order together") and rig.sent == []
     with Rig() as _rig:                                     # a new shop: the shelf's best sellers and deals
         r = _ask(message="Plan my order", action="plan")
-        assert r["reply"].startswith("A starter order for you") and {ln["why"] for ln in r["lines"]} <= {"selling", "deal"}
+        assert r["reply"].startswith("A starter order for you") and {ln["why"] for ln in r["lines"]} <= {"selling", "deal", "clearance"}
     with Rig(U("plan", budget=10)) as _rig:                 # a budget trims from the end
         r = _ask(message="I have 10 BD, plan my order")
         assert sum(ln["qty"] * next(i["price_bhd"] for i in SHELF if i["item_code"] == ln["item_code"])

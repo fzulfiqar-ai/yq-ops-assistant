@@ -99,6 +99,8 @@ export interface AskPlan {
   usual: number
   selling: number
   deal: number
+  /** 2.2: the plan's clearing lines (the normal trade price, never called an offer); absent on an older API */
+  clearance?: number
   minimum: boolean
   budget: number | null
 }

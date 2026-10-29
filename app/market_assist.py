@@ -807,8 +807,8 @@ def plan_order(cat: dict, tokens: list[str], budget: float | None = None, ref: s
               if not cats or str(it.get("category") or "") in cats]
     for it in movers[:3 if usual else 6]:
         add(it, None, "selling")
-    for it, _w in deal_picks(cat, "", limit=2):
-        add(it, None, "deal")
+    for it, w in deal_picks(cat, "", limit=2):         # 2.2: a clearing line is no offer (the normal trade price)
+        add(it, None, "clearance" if w == "clearance" else "deal")
     if budget:
         while len(lines) > 1 and _est_bhd(cat, lines) > budget and lines[-1]["why"] != "usual":
             seen.discard(lines.pop()["item_code"].upper())
@@ -1494,12 +1494,10 @@ def _h_plan(cat: dict, tokens: list[str], budget: float | None, ref: str | None,
         return _result("plan", T["plan_none"], miss=True, next=[_chip(T, "top")]), "miss"
     whys = [ln["why"] for ln in lines]
     plan = {"usual": whys.count("usual"), "selling": whys.count("selling"), "deal": whys.count("deal"),
-            "minimum": "minimum" in whys, "budget": budget}
+            "clearance": whys.count("clearance"), "minimum": "minimum" in whys, "budget": budget}
     add = [{"item_code": ln["item_code"], "qty": ln["qty"]} for ln in lines]
     # 2.2 B: the line says what the plan really holds: real offers, clearing lines (the normal trade price), or neither
-    deals = [cat["by_code"].get(ln["item_code"].upper()) or {} for ln in lines if ln["why"] == "deal"]
-    kind = ("" if any(b in (d.get("badges") or []) for d in deals for b in ("price_drop", "on_offer"))
-            else "_clear" if deals else "_plain")
+    kind = "" if "deal" in whys else "_clear" if "clearance" in whys else "_plain"
     line = T[("plan" if plan["usual"] else "plan_new") + kind]
     if budget:                          # the budget said after a plan: the plan rebuilt, in its own words
         line = (T["plan_rebudget"].format(budget=f"{budget:g}") if again
