@@ -1658,6 +1658,25 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             pg.close()
 
 
+def menu_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
+    """The desktop Browse menu (smooth.browse_menu, 29-Oct-2026): a mouse on 1366/1920, a tap on the
+    1024x768 touch row; on a fresh page, so the page it opens reaches nothing else."""
+    pg = ctx.new_page()
+    install_mocks(pg, st.order_kind)
+    try:
+        pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
+        settle(pg, st)
+        for level, check, detail, values in smooth.browse_menu_touch(pg) if vp.touch else smooth.browse_menu(pg):
+            if level == "note":
+                run.notes.append(check + ": " + detail)
+            else:
+                finding(run, level, check, detail, values)
+    except PWError as exc:
+        finding(run, "fail", "smooth-error", "browse-menu: Playwright error: " + str(exc)[:240])
+    finally:
+        pg.close()
+
+
 def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Report, lead: bool) -> None:
     run = Run(state=st.key, route=st.route, viewport=vp.name, label=st.label)
     ctx = new_context(browser, vp, st)
@@ -1731,6 +1750,9 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
         # smoothness (S1–S6): lead viewports, English, motion on — each on its own fresh page
         if lead and LANG == "en" and not (st.reduced or REDUCE_ALL) and st.key in ("home", "shop"):
             smooth_run(run, ctx, vp, st, base)
+        # the Browse menu: every desktop width, both languages, motion on
+        if vp.klass == "desktop" and st.key == "home" and not (st.reduced or REDUCE_ALL):
+            menu_run(run, ctx, vp, st, base)
 
         # last of all, on a FRESH page of the same context (same init script, same no-prod-writes
         # net): the sold-out order check presses "Show more" until the whole listing is rendered

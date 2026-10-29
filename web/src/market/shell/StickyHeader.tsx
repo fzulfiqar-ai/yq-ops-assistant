@@ -44,6 +44,8 @@ export function StickyHeader() {
   const [tickSeen, setTickSeen] = useState(tick)
   const [pathSeen, setPathSeen] = useState(pathname)
   const closeTimer = useRef<number | undefined>(undefined)
+  // the pointer that pressed Browse: a mouse click never closes the menu hovering just opened
+  const pressedBy = useRef('')
   const headerRef = useRef<HTMLElement>(null)
   const megaRef = useRef<HTMLDivElement>(null)
   const desktop = viewport === 'desktop' || viewport === 'wide'
@@ -132,7 +134,10 @@ export function StickyHeader() {
 
   return (
     <header ref={headerRef} className="sticky top-0 z-header">
-      <div className="glass border-b border-line">
+      {/* `relative z-[1]`: with a mouse each frosted layer is its own stacking context (the blur),
+          so the strip below, painted later, covered the mega-nav's first row and took its clicks
+          (29-Oct-2026). The row now paints above the strip, and the menu it holds with it. */}
+      <div className="glass relative z-[1] border-b border-line">
         <div className="container-m flex h-header items-center gap-3 lg:gap-4">
           <Link to="/" aria-label={`${S.brand} · ${S.kicker}`} className="hit relative flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
             <img src="/yq-logo-160.webp" alt="" width={40} height={40} className="h-10 w-10 rounded-sm" />
@@ -157,7 +162,17 @@ export function StickyHeader() {
                 type="button"
                 aria-haspopup="true"
                 aria-expanded={mega}
-                onClick={() => setMega((v) => !v)}
+                onPointerDown={(e) => {
+                  pressedBy.current = e.pointerType
+                }}
+                onClick={() => {
+                  // hovering already opened the menu for a mouse, so its click only ever opens (it used
+                  // to toggle the menu shut); a tap or the keyboard still toggles
+                  const mouse = pressedBy.current === 'mouse'
+                  pressedBy.current = ''
+                  if (mouse) openMega()
+                  else setMega((v) => !v)
+                }}
                 className={cn(
                   'inline-flex h-11 items-center gap-1.5 rounded-sm px-3.5 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
                   mega || pathname.startsWith('/shop') || pathname.startsWith('/t/') || pathname.startsWith('/brands/') ? 'bg-plum-soft text-plum-ink' : 'text-ink hover:bg-plum-wash',

@@ -136,6 +136,13 @@ within its target is kept as a run note. Not run under `--reduced-motion` or `--
 A Playwright error inside one of them is the hard failure `smooth-error`. A check that finds nothing
 to measure (no quick-view card, no zoom button) is a warning, never a pass.
 
+**The Browse menu (`browse-menu`, 29-Oct-2026)** runs on every desktop width (1024×768 touch, 1366,
+1920, or the `--widths` given), in English and Arabic, on Home, on a fresh page. With a mouse:
+hovering Browse opens the menu with its first row on top (the category strip once painted over the
+menu's first 45 px, so a click there opened the strip's chip), a click on Browse while hovering keeps
+it open (it used to toggle shut what hover had opened), and a click on the first row opens that row's
+page. On the touch row: a tap opens the menu and a second tap closes it.
+
 ## How it measures
 
 - **Sweep, not one screen.** Geometry and text checks run at the top of the page and then one screen
