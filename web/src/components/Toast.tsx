@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -48,9 +49,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [dismiss],
   )
 
+  // The layer is portalled to <body> (28-Oct-2026): the portal's intro wraps the whole app in
+  // `relative isolate`, so a toast rendered in place sat below every sheet (those portal to <body>),
+  // and "Order confirmed", "Delivered" and cancel errors were invisible under an open sheet.
   return (
     <ToastCtx.Provider value={{ toast }}>
       {children}
+      {createPortal(
       <div
         className="pointer-events-none fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom,0px)+5.25rem)] z-[100] flex flex-col items-end gap-2 sm:inset-x-auto sm:bottom-5 sm:right-5 sm:w-full sm:max-w-sm"
         aria-live="polite"
@@ -78,7 +83,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             </button>
           </div>
         ))}
-      </div>
+      </div>,
+        document.body,
+      )}
     </ToastCtx.Provider>
   )
 }

@@ -1,4 +1,5 @@
 import { createRoot } from 'react-dom/client'
+import { installPreloadReload } from './lib/preloadReload'
 import './index.css'
 
 /**
@@ -19,20 +20,10 @@ import './index.css'
 // who keeps the app open all day). The static host used to answer a missing /assets/* file with
 // index.html + HTTP 200, so the import failed and the page was stuck until the tab was closed; with
 // the R6 Worker it is a real 404, and either way Vite reports it as `vite:preloadError`. One reload
-// fetches the new index.html and its chunks. Once per session, so a genuinely broken build cannot
-// loop. Same handler as src/main.market.tsx.
-window.addEventListener('vite:preloadError', (event) => {
-  let already = false
-  try {
-    already = sessionStorage.getItem('yq-preload-reload') === '1'
-    sessionStorage.setItem('yq-preload-reload', '1')
-  } catch {
-    /* ignore */
-  }
-  if (already) return
-  event.preventDefault()
-  window.location.reload()
-})
+// fetches the new index.html and its chunks. One per BUILD (28-Oct-2026, lib/preloadReload): the old
+// once-per-session flag was never cleared, so the second deploy a rep's open tab lived through left
+// it on "Something went wrong". A broken build still cannot loop, and offline it never reloads.
+installPreloadReload()
 
 const root = createRoot(document.getElementById('root')!)
 

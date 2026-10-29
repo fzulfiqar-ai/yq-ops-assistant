@@ -467,18 +467,16 @@ def _():
     assert "instrument-sans-v1.woff2" in _read("web/vite.config.ts")
 
 
-@test("the vite:preloadError reload handler: the market once per BUILD (lib/preloadReload), the portal once per session until it moves too")
+@test("the vite:preloadError reload handler: one reload per BUILD in both entries (lib/preloadReload)")
 def _():
-    # the portal's own handler, unchanged until the portal polish moves main.tsx onto the helper
-    portal = _read("web/src/main.tsx")
-    assert "window.addEventListener('vite:preloadError'" in portal
-    assert "sessionStorage.getItem('yq-preload-reload') === '1'" in portal
-    assert "event.preventDefault()" in portal and "window.location.reload()" in portal
-    # the market (28-Oct-2026): one reload per build — the once-per-session flag was never cleared, so
-    # the second deploy a tab lived through left it with a dead tap; never offline (it would land on
-    # the browser's error page). The rule's behaviour is tested in web/scripts/merchant_test.mjs.
-    market = _read("web/src/main.market.tsx")
-    assert "import { installPreloadReload } from './lib/preloadReload'" in market and "installPreloadReload()" in market
+    # 28-Oct-2026: the once-per-session flag was never cleared, so the second deploy a tab lived through
+    # left the portal on "Something went wrong" and the market with a dead tap. One reload per build,
+    # never a loop, never offline (it would land on the browser's error page). The rule's behaviour is
+    # tested in web/scripts/merchant_test.mjs.
+    for entry in ("web/src/main.tsx", "web/src/main.market.tsx"):
+        src = _read(entry)
+        assert "import { installPreloadReload } from './lib/preloadReload'" in src and "installPreloadReload()" in src, entry
+        assert "sessionStorage.getItem('yq-preload-reload') === '1'" not in src, entry + ": the old once-per-session flag"
     helper = _read("web/src/lib/preloadReload.ts")
     assert "window.addEventListener('vite:preloadError'" in helper
     assert "const KEY = 'yq-preload-reload'" in helper and "store.getItem(KEY) === id" in helper
