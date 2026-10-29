@@ -289,6 +289,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         action: str | None = Field(default=None, max_length=16)
         # 2.1: what a chip narrows its action to (a category "cat:CABLE", catalogue words, a card's code)
         q: str | None = Field(default=None, max_length=60)
+        # 2.2: the reach-out lines this phone saw lately (a new one each visit), and the one whose tap opened this turn
+        seen: list[str] = Field(default_factory=list, max_length=6)
+        nudge: str | None = Field(default=None, max_length=24)
         # v2: the ids of the turns on screen; the server reads the chat so far from its own log (`history` is
         # still accepted from older pages and ignored: a page could forge an "assistant" line)
         history_ids: list[int] = Field(default_factory=list, max_length=6)

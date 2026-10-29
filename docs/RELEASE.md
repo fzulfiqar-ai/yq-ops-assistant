@@ -643,6 +643,65 @@ main folder, run `git pull --ff-only`, then `python -m scripts.ops status`, whic
 
 ---
 
+## Release assist2.2: YQ Assist 2.2, one conversation with a human voice (built 29-Oct-2026)
+
+**What ships** (docs/MARKETPLACE.md § YQ Assist 2.2):
+- **The YQ mark in the orb** in the chat and on the desktop button. The phone button keeps its chat icon.
+- **The bubble names something real and changes each visit:** your campaign when one is live, an item this phone
+  asked to be told about that is back, the shop's usual items, the lines being cleared at the normal trade price, what
+  sells. "Not now" still rests it for a day.
+- **Products named the way people say them** ("the X01 UC Type-C cable"), not bare codes.
+- **One conversation, not the same reply twice.**
+  - "What should I order?" gets a starter order.
+  - "How can you help me sell more?" gets help from the shop's data.
+  - "What else?" shows new cards.
+  - A question already asked is not asked again.
+- **Problems: the AI tries first, the rep second.** *Report a problem* asks what happened. For an item that is not
+  working it gives the quick checks first; for a late order it shows its status. A replacement, a refund or checks
+  that did not help go to the rep, with the message written.
+- **Complaints get an apology and a question**, never sales chips.
+- **Arabic answers use your own Arabic lines.**
+- **Sold-out cards get "Tell me when it's back"** in the chat.
+
+**No migration**; the API and the web change. **Order:** the API first, then `main` (the web follows after CI).
+Either half also works alone: the new web on the assist2.1 API shows the old bubble line, and the assist2.1 web
+ignores the new fields.
+
+**Before step 1.**
+- CI is green for the release commit Claude names on the branch `worktree-assist-sales`, which Claude first makes a
+  fast-forward of `main`.
+- `python -m scripts.probe_models` shows Groq available.
+
+```
+python -m scripts.yq_backup release assist2-2                                 # 1. the encrypted backup
+python -m scripts.render_deploy status                                        # 2. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                  #    <sha> = the assist2.2 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                  # 3. "commit" = the first 12 characters of <sha>
+```
+
+**4. The web.** Claude pushes `main` (the same commit, a fast-forward), and the web deploys itself after CI. In the
+main folder, run `git pull --ff-only`, then `python -m scripts.ops status`, which must not say "merged but not live".
+
+**5. Check on your phone** at yqmarketplace.com (tap *Refresh* when the page offers a new version):
+1. Open the chat: the orb carries the YQ mark.
+2. Type "What should I order?", then "How can you help me to push sale?", then "Your product is very bad". You
+   should get a starter order, then help that names two products, then an apology that asks what happened (no
+   sales chips).
+3. Tap *Report a problem* → *It's not working* → *Cables*: the quick checks. Then *Still not working*: your rep,
+   with the message written.
+4. Close the chat and stay on the home page about 15 s: the bubble names something real. Come back later in a new
+   visit: another line.
+5. The same in Arabic (عربي at the top).
+
+**If something is wrong.**
+- The bubble: Settings → *Chat reaches out (bubble)* → off (a minute).
+- The chat: *Marketplace chat (YQ Assist)* → off.
+- The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 2> --wait`. The web on `main` can
+  stay: on the assist2.1 API it shows the old bubble line and the 2.1 answers.
+- Then tell Claude.
+
+---
+
 ## Reference: what R6 added to the checks
 
 - `/health` → `commit` (RENDER_GIT_COMMIT): the smoke can prove which build answers.

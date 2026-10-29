@@ -4,14 +4,27 @@ import { useLocation } from 'react-router-dom'
 import { MessageCircle, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
-import type { AskAction } from './assistApi'
 import { enabledDevForced, useAssistEnabled } from './enabled'
-import { OPEN_EVENT, peekAllowed, peekDismissed, peekSpent, READY_EVENT, rememberOpen, wasOpen, type OpenOptions } from './open'
+import {
+  fetchNudge,
+  noteSeen,
+  OPEN_EVENT,
+  peekAllowed,
+  peekDismissed,
+  peekSpent,
+  READY_EVENT,
+  rememberOpen,
+  wasOpen,
+  type FirstMessage,
+  type Nudge,
+  type OpenOptions,
+} from './open'
 import { L } from './launcherStrings'
 import { Orb } from './Orb'
 
 // 2.1 (owner, 29-Oct-2026: "proactive", on from release): the line beside the button, once per visit, after a
-// while on a page that sells; never on the cart, checkout, orders or the chat's own page
+// while on a page that sells; never on the cart, checkout, orders or the chat's own page. 2.2: the line is the
+// server's (a clearing line, his campaign, the shop's usual, what sells: a new one each visit), else the static one.
 const PEEK_AFTER_MS = 15000
 const PEEK_FOR_MS = 12000
 
@@ -62,13 +75,13 @@ export function AssistLauncher() {
   const { pathname } = useLocation()
   const [open, setOpen] = useState(wasOpen)
   const [itemCode, setItemCode] = useState<string | null>(null)
-  const [first, setFirst] = useState<{ id: number; text: string; action?: AskAction } | null>(null)
+  const [first, setFirst] = useState<FirstMessage | null>(null)
   const stackHidden = useStackHidden()
   // v2: an answer that landed while the chat was closed (the chat keeps running), and the drop's rings on a tap
   const [ready, setReady] = useState(false)
   const [drop, setDrop] = useState(0)
-  // 2.1: the line beside the button (the product's code when it shows on a product page)
-  const [peek, setPeek] = useState<{ kind: 'item' | 'shop'; code: string | null } | null>(null)
+  // 2.1: the line beside the button (the product's code when it shows on a product page); 2.2: the server's line
+  const [peek, setPeek] = useState<{ kind: 'item' | 'shop'; code: string | null; nudge: Nudge | null } | null>(null)
   useEffect(() => {
     const on = () => setReady(true)
     window.addEventListener(READY_EVENT, on)
@@ -98,6 +111,7 @@ export function AssistLauncher() {
   useEffect(() => {
     const kind = peekPage(pathname)
     if (!enabled || !nudgeOn || open || !kind || !peekAllowed()) return
+    let live = true
     const t = window.setTimeout(() => {
       if (!peekAllowed()) return
       // a sheet over a shop page (filters, the cart) hides the button: wait for the next page rather than speak unseen
@@ -109,9 +123,17 @@ export function AssistLauncher() {
       } catch {
         code = null
       }
-      setPeek({ kind, code })
+      // 2.2: the server's line (2 s at most), else the static one; left the page or opened the chat meanwhile: none
+      void fetchNudge(code).then((nudge) => {
+        if (!live) return
+        if (nudge) noteSeen(nudge.hook)
+        setPeek({ kind, code, nudge })
+      })
     }, PEEK_AFTER_MS)
-    return () => window.clearTimeout(t)
+    return () => {
+      live = false
+      window.clearTimeout(t)
+    }
   }, [pathname, enabled, nudgeOn, open])
   useEffect(() => {
     if (!peek) return
@@ -135,7 +157,14 @@ export function AssistLauncher() {
   const takePeek = () => {
     if (!peek) return
     setItemCode(peek.code)
-    setFirst(peek.kind === 'item' && peek.code ? { id: Date.now(), text: L.firstItem, action: 'fit' } : { id: Date.now(), text: L.firstShop, action: 'top' })
+    const n = peek.nudge
+    setFirst(
+      n
+        ? { id: Date.now(), text: n.label, action: n.action, q: n.q, nudge: n.hook }
+        : peek.kind === 'item' && peek.code
+          ? { id: Date.now(), text: L.firstItem, action: 'fit' }
+          : { id: Date.now(), text: L.firstShop, action: 'top' },
+    )
     setPeek(null)
     setDrop((n) => n + 1)
     setOpen(true)
@@ -174,7 +203,7 @@ export function AssistLauncher() {
             onPointerEnter={() => void loadPanel()}
             className="min-h-12 flex-1 rounded-xl px-3 py-2 text-start text-sm font-semibold leading-snug text-ink hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
           >
-            {peek.kind === 'item' && peek.code ? L.peekItem : L.peekShop}
+            {peek.nudge?.text || (peek.kind === 'item' && peek.code ? L.peekItem : L.peekShop)}
           </button>
           <button
             type="button"
@@ -211,7 +240,8 @@ export function AssistLauncher() {
         )}
       >
         <span className="relative grid place-items-center">
-          <Orb size={54} className="shadow-3 md:hidden" />
+          {/* the phone button carries the chat icon; the desktop pill's orb (and every orb in the chat) the YQ mark */}
+          <Orb size={54} mark={false} className="shadow-3 md:hidden" />
           <Orb size={38} className="max-md:hidden" />
           <MessageCircle size={20} aria-hidden="true" className="absolute text-white md:hidden" />
           {drop > 0 ? (

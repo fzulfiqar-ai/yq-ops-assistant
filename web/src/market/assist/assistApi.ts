@@ -6,19 +6,24 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
 export type AskIntent = 'find' | 'fit' | 'add' | 'order_status' | 'usual' | 'handoff' | 'feedback' | 'chat' | 'list' | 'photo'
   | 'top' | 'deals' | 'plan' | 'ticket' | 'ticket_status' | 'policy' | 'account'
-  // 2.1: a question asked back, a suggested card, the opening line
-  | 'clarify' | 'show' | 'hello'
+  // 2.1: a question asked back, a suggested card, the opening line; 2.2: the bubble's line, how YQ helps a shop
+  // sell more, a price question
+  | 'clarify' | 'show' | 'hello' | 'nudge' | 'advice' | 'price'
 
 /** v2: the chat's tiles, answered from data with no model call (app/market_assist.py ACTIONS); 2.1 adds the phone
- * question, a card by its code, catalogue words and the opening line */
+ * question, a card by its code, catalogue words and the opening line; 2.2 the bubble's line and the sales help */
 export type AskAction = 'top' | 'deals' | 'plan' | 'usual' | 'orders' | 'handoff' | 'ticket' | 'tickets'
-  | 'fit' | 'show' | 'find' | 'hello'
+  | 'fit' | 'show' | 'find' | 'hello' | 'nudge' | 'advice'
+
+/** 2.2: a chip the page answers itself, never sent (app/market_assist.py PAGE_ACTIONS): "Tell me when it's back" on a
+ * sold-out card, the market's own restock request */
+export type PageAction = 'notify'
 
 /** 2.1: a quick reply under an answer: `say` is sent as the merchant's words; `action` (+ `q`) is answered from data */
 export interface AskNext {
   label: string
   say?: string
-  action?: AskAction
+  action?: AskAction | PageAction
   q?: string
 }
 
@@ -42,6 +47,10 @@ export interface AskBody {
   q?: string
   /** v2: the turn ids on screen; the server reads the chat so far from its own log */
   history_ids?: number[]
+  /** 2.2: the reach-out lines this browser saw lately (a new one each visit) */
+  seen?: string[]
+  /** 2.2: the line whose tap opened this turn (logged with it) */
+  nudge?: string
 }
 
 export interface AskAddLine {
@@ -90,6 +99,8 @@ export interface AskPlan {
   usual: number
   selling: number
   deal: number
+  /** 2.2: the plan's clearing lines (the normal trade price, never called an offer); absent on an older API */
+  clearance?: number
   minimum: boolean
   budget: number | null
 }
@@ -137,6 +148,8 @@ export interface AskResponse {
   escalated?: boolean
   /** 2.1: the quick replies (absent on an older API) */
   next?: AskNext[]
+  /** 2.2: the opening line's reason (reach_hooks' id), remembered so the next visit gets another */
+  hook?: string
 }
 
 export type AskStage = 'reading' | 'checking' | 'writing'

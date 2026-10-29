@@ -2,8 +2,8 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { lockScroll, OUT_MS, pushLayer, useKeyboardInset } from '@/lib/sheet'
 import { cn } from '@/lib/utils'
-import type { AskAction } from './assistApi'
 import { AssistChat } from './AssistChat'
+import type { FirstMessage } from './open'
 
 /**
  * The chat's frame (YQ Assist v2). Phone (< md): a bottom sheet over the dimmed page, a focus trap, scroll lock,
@@ -16,7 +16,7 @@ import { AssistChat } from './AssistChat'
 const FOCUSABLE = 'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
 const PHONE = '(max-width: 767px)'
 
-export default function AssistPanel({ itemCode, first, onClose }: { itemCode: string | null; first: { id: number; text: string; action?: AskAction } | null; onClose: () => void }) {
+export default function AssistPanel({ itemCode, first, onClose }: { itemCode: string | null; first: FirstMessage | null; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const titleId = useId()
   const [phone] = useState(() => typeof window !== 'undefined' && window.matchMedia(PHONE).matches)

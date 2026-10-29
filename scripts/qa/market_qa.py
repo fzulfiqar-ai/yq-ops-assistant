@@ -825,6 +825,17 @@ def install_assist(page: Page, variant: str = 'panel') -> None:
                 "next": [{"label": "الكيابل" if ar else "Cables", "action": "top", "q": "cat:CABLE"},
                          {"label": "الشواحن" if ar else "Chargers", "action": "top", "q": "cat:CHARGER"},
                          {"label": "شواحن السيارة" if ar else "Car chargers", "action": "top", "q": "cat:CAR CHARGER"}],
+                "hook": "best",
+            })
+            return
+        if asked.get("action") == "nudge":
+            # 2.2: the bubble's line (from data on the server, never a turn): one line and the one thing a tap opens
+            json_route(route, {
+                "intent": "nudge", "turn_id": None, "items": [], "add": [], "orders": [], "handoff": None,
+                "fallback": False, "miss": False, "hook": "clearance",
+                "reply": ("نصفّي 24 صنفًا بسعر الجملة المعتاد. تريد نظرة؟" if ar
+                          else "We're clearing 24 lines at the normal trade price. Take a look?"),
+                "next": [{"label": "أصناف التصفية" if ar else "Clearing lines", "action": "deals", "q": "badge:clearance"}],
             })
             return
         if variant == "list":

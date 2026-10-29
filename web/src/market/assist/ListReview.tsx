@@ -186,7 +186,7 @@ export function ListReview({ m, onPatch, onStock }: { m: Msg; onPatch: (id: stri
     <section aria-label={title} className="overflow-hidden rounded-lg border border-line bg-surface">
       <div className="border-b border-line-2 bg-plum-wash px-3.5 py-2">
         <h3 className="font-display text-sm font-bold text-plum-ink">{title}</h3>
-        {m.plan ? <p className="text-2xs font-semibold text-plum-ink/80">{A.planSteps(m.plan.usual, m.plan.selling, m.plan.deal)}</p> : null}
+        {m.plan ? <p className="text-2xs font-semibold text-plum-ink/80">{A.planSteps(m.plan.usual, m.plan.selling, m.plan.deal, m.plan.clearance)}</p> : null}
         {m.plan && minimum > 0 ? (
           <div className="mt-1.5">
             <div className="h-1.5 overflow-hidden rounded-full bg-plum-soft" aria-hidden="true">

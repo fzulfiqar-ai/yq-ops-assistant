@@ -110,5 +110,21 @@ cases:
   - {id: conv-cable-1, before: ["I need a charging cable"], message: "for iPhone 15", intent: [find, fit], cards_like: "(?i)type-?c|usb-?c"}
   - {id: conv-top-1, before: ["what is selling most?"], message: "only cables please", intent: [top, find], cards_like: "(?i)cable", sold_out: true}
   - {id: conv-item-1, before: ["do you have a 20W charger?"], message: "does it fit iphone 11?", intent: [fit, find, clarify]}
+  # ── 2.2 B (owner, 29-Oct-2026: "it doesn't talk like human... different questions but same reply") ──────────
+  # fresh: no sentence of the reply was already said earlier in the case's conversation
+  - {id: owner-order-1, message: "What should i order?", intent: [plan], sold_out: true}
+  - {id: owner-push-1, message: "How can you help me to push sale?", intent: [advice]}
+  - {id: owner-push-2, before: ["What should i order?"], message: "How can you help me to push sale?", intent: [advice]}
+  - {id: owner-bad-1, message: "Your product is very bad", intent: [ticket], escalate: false}
+  - {id: owner-bad-2, message: "your cables break after one week", intent: [ticket], escalate: false}
+  - {id: owner-refund-1, message: "I want refund for the chargers", intent: [ticket], escalate: true}
+  - {id: owner-shop-1, message: "I'm opening a new mobile shop, what do I need?", intent: [plan], sold_out: true}
+  - {id: owner-profit-1, message: "which items give me more profit?", intent: [advice, top]}
+  - {id: owner-advice-ar-1, message: "كيف أزيد مبيعاتي؟", lang: ar, intent: [advice]}
+  - {id: conv-price-1, before: ["fast charger for iphone 15"], message: "how much is it?", intent: [price]}
+  - {id: conv-more-1, before: ["what's selling?"], message: "what else?", intent: [top]}
+  - {id: conv-more-2, before: ["what's selling?", "what else?"], message: "show me more", intent: [top]}
+  - {id: conv-acct-1, before: ["can you give me discount?"], message: "I buy a lot every month", intent: [account], escalate: true}
+  - {id: conv-chat-1, before: ["what's the weather today"], message: "tell me a joke", intent: [chat]}
   - {id: pol-en-6, message: "what is the process for damaged stock?", intent: [policy, ticket], escalate: true}
   - {id: pol-en-7, message: "Waht is the process of damage stock", intent: [policy, ticket], escalate: true}

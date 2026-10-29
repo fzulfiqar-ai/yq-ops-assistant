@@ -203,7 +203,7 @@ def _():
 def _():
     with Rig(U("top", query="")) as rig:
         r = _ask(message="what is selling most these days?")
-        assert len(rig.sent) == 2 and r["reply"].startswith("Shops are ordering UK20") and not SOLD_OUT & set(r["items"])
+        assert len(rig.sent) == 2 and r["reply"].startswith("Shops are ordering the UK20") and not SOLD_OUT & set(r["items"])
     with Rig(U("top", query=""), reply="UK20 is our best seller with shops. Which do you sell most?") as rig:
         r = _ask(message="what is selling most these days?")
         assert r["reply"] == "UK20 is our best seller with shops. Which do you sell most?" and r["next"]
@@ -243,7 +243,7 @@ def _():
         assert r["reply"].startswith("I've put your order together") and rig.sent == []
     with Rig() as _rig:                                     # a new shop: the shelf's best sellers and deals
         r = _ask(message="Plan my order", action="plan")
-        assert r["reply"].startswith("A starter order for you") and {ln["why"] for ln in r["lines"]} <= {"selling", "deal"}
+        assert r["reply"].startswith("A starter order for you") and {ln["why"] for ln in r["lines"]} <= {"selling", "deal", "clearance"}
     with Rig(U("plan", budget=10)) as _rig:                 # a budget trims from the end
         r = _ask(message="I have 10 BD, plan my order")
         assert sum(ln["qty"] * next(i["price_bhd"] for i in SHELF if i["item_code"] == ln["item_code"])
@@ -557,7 +557,8 @@ def _():
         r = _ask(message="what is selling most these days?")
         assert r["intent"] == "top" and r["items"] and not set(r["items"]) & SOLD_OUT
         r = _ask(message="my order came broken, 2 chargers")
-        assert r["intent"] == "ticket" and r["escalated"]           # a problem before an order
+        # a problem before an order; 2.2 B: talked through first (what happened?), the rep once it needs one
+        assert r["intent"] == "ticket" and {c.get("q") for c in r["next"]} >= {"issue:damaged", "issue:not_working"}
         assert _ask(message="where is my order YQ-2610-0041?")["intent"] == "order_status"
         assert _ask(message="ابي اكلم المندوب")["intent"] == "handoff"
         r = _ask(message="fast charger for iphone 15")
@@ -571,6 +572,8 @@ def _():
         assert r["fallback"] and rig.client.db["shop_ask_turns"][-1]["outcome"] == "capped"
     for msg, want in (("wholesale prices", None), ("show me chargers", None), ("اعرض لي الشواحن", None),
                       ("T-2610-0012 any news?", "tickets"), ("help me plan my order", "plan"),
+                      # 2.2 B: the owner's own two, when no model can read them
+                      ("What should i order?", "plan"), ("How can you help me to push sale?", "advice"),
                       ("galat item aaya hai", "ticket"), ("الأكثر مبيعا", "top"),
                       ("सबसे ज्यादा कौन सा चार्जर बिकता है?", "top"), ("ഏറ്റവും കൂടുതൽ വിൽക്കുന്നത് ഏതാണ്?", "top")):
         assert ma.rule_action(msg) == want, (msg, ma.rule_action(msg))
