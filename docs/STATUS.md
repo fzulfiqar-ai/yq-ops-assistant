@@ -7,8 +7,10 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 - YQ Assist, the marketplace chat (release assist1, 29-Oct-2026; `docs/MARKETPLACE.md` § YQ Assist): the free-AI
   repair, the chat with voice, photos and lists, and the portal page. The chat is shown only once the owner switches
-  it on in Settings. The fix for voice uploads (the browser's `X-Device-Id` header was refused, `5e0279c`) is on
-  `main`; it is live once the API is deployed at that commit.
+  it on in Settings (on since 29-Oct-2026). The fix for voice uploads (`5e0279c`) went live with assist2.
+- YQ Assist v2 (release assist2, live 29-Oct-2026 at `627d1f4`; `docs/MARKETPLACE.md` § YQ Assist v2): selling in
+  stock only, problem reports with tickets, escalation, the new look and the portal's YQ Assist tabs. Tickets are
+  still off and no policy answer is written yet, so every policy question goes to the rep.
 - The marketplace polish, ship 1 (released 28-Oct-2026 on the owner's go; `docs/MARKETPLACE.md`, release log):
   smoother photos, pages, sheets and Back, honest prices when the price check is slow or down, and the QA
   harness's smoothness guards (`scripts/qa/smooth.py`). Open: ship 2, the same polish for the ops portal and the
@@ -114,12 +116,12 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 ## In progress
 
 - The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
-- YQ Assist v2 (release assist2), built 29-Oct-2026 on branch `worktree-market-ai`, not released. It covers
-  selling (in stock only), problem reports with tickets, escalation, the new look and the portal's YQ Assist tabs
-  (`docs/MARKETPLACE.md` § YQ Assist v2).
-  - Waiting for: the owner's review of the look and the back office, then his go.
-  - Release steps: `docs/RELEASE.md` § Release assist2.
-  - Scorecard: `python -m scripts.eval_assist`. Every gate passed on 29-Oct-2026.
+- YQ Assist 2.1, the salesman voice (release assist2.1), built 29-Oct-2026 on branch `worktree-assist-sales`, not
+  released. It asks before guessing, ends every answer on one next step with quick replies, pushes what shops buy
+  with an item, speaks first, and adds the bubble beside the button (`docs/MARKETPLACE.md` § YQ Assist 2.1).
+  - Waiting for: the owner's review of the screenshots and the video, then his go.
+  - Release steps: `docs/RELEASE.md` § Release assist2.1 (no migration).
+  - Scorecard: `python -m scripts.eval_assist`, with the new gates `clarify`, `next` and `context`.
 
 ## Not built (the engine prints "not built yet")
 
