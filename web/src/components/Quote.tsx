@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AnimatePresence, motion } from 'motion/react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 
 const QUOTES = [
   'Artificial intelligence is the new electricity. — Andrew Ng',
@@ -11,6 +11,7 @@ const QUOTES = [
 ]
 
 export function Quote({ className }: { className?: string }) {
+  const reduce = useReducedMotion()
   const [i, setI] = useState(0)
   useEffect(() => {
     const t = setInterval(() => setI((n) => (n + 1) % QUOTES.length), 5200)
@@ -26,12 +27,14 @@ export function Quote({ className }: { className?: string }) {
   return (
     <div className={className} style={{ minHeight: '3.5em' }}>
       <AnimatePresence mode="wait">
+        {/* transform and opacity only (ship 2): the blur(4px) it used to fade through was a filter
+            animation on the login every 5 s; reduced motion: the fade alone */}
         <motion.figure
           key={i}
-          initial={{ opacity: 0, y: 10, filter: 'blur(4px)' }}
-          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-          exit={{ opacity: 0, y: -10, filter: 'blur(4px)' }}
-          transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
+          initial={reduce ? { opacity: 0 } : { opacity: 0, y: 8 }}
+          animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          exit={reduce ? { opacity: 0 } : { opacity: 0, y: -8 }}
+          transition={{ duration: reduce ? 0.2 : 0.5, ease: [0.22, 1, 0.36, 1] }}
           className="m-0"
         >
           <blockquote className="font-display text-[15px] font-medium italic leading-relaxed text-white/90 md:text-lg [text-shadow:0_2px_24px_rgba(0,0,0,.55)]">
