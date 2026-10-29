@@ -375,11 +375,23 @@ out of the strip automatically.
 
 The marketplace opens the way the ops portal signs in: deep night, the glow horizon rising from
 below, and YQ said once. The portal's `glow-horizon.tsx` is ported to CSS (the "v3: horizon" block —
-four absolutely positioned, blurred ellipses; `motion` is banned in this bundle). Sequence: arcs rise
-(0–900 ms) → the logo tile takes one light sweep (560 ms) → "Where Bahrain restocks." (420 ms) →
-"Restock faster. Sell more." (640 ms) → under the horizon, the first three promises or "Welcome back,
-{shop}" with the "Refill my shelf" shortcut (820 ms) → the composition **rests** ~400 ms and leaves
-at 1.9 s (2.8 s with the shortcut) in a 320 ms fade with a 2 % scale.
+four absolutely positioned ellipses; `motion` is banned in this bundle). Sequence: the dawn rises from
+the very first paint (0–900 ms, in the served frame, see below) → the logo tile takes one light sweep
+(560 ms after the overlay mounts) → "Where Bahrain restocks." (420 ms) → "Restock faster. Sell more."
+(640 ms) → under the horizon, the first three promises or "Welcome back, {shop}" with the "Refill my
+shelf" shortcut (820 ms) → the composition **drifts**: a slow 2.5 % camera push while the dawn breathes
+→ at 1.9 s (2.8 s with the shortcut) the night lifts off the app in a 560 ms fade while the push
+gathers pace to 7 %.
+
+Smooth by construction (29-Oct-2026, after the owner's video of it stepping, freezing ~2 s, then cutting):
+
+| What | How |
+|---|---|
+| No live blur | The opening's glow arcs draw their blur as radial gradients that follow the blur's own edge profile (`scripts/make_opening_glow.py` writes the block in market.css). A `filter: blur()` is re-applied by the compositor on every frame its layer moves. |
+| Motion from the first pixel | The served `#yq-boot` frame carries the horizon and its veils (`.open-veil-1/2`), so the dawn rises while the app's code is parsed (a gradient paints in the first frame; an image would not). The overlay adopts that frame as its background (`data-adopted`) and lets it go with the exit. |
+| An exit that cannot be late | The hold's push and the exit are booked at mount as Web Animations on the compositor's clock (a timer used to start the exit, and the app loading underneath delayed it and starved its fade). A skip hands the current state to a 320 ms exit. |
+| Never frozen | Once risen the dawn breathes (violet and blue glows ease to 80 % and back, out of step), so a slow load or the hold never shows a still frame. |
+| Guard | `opening-motion` in `scripts/qa/smooth.py`. Frame rates are judged in real Chrome on a GPU (a trace of the frames the compositor drew): headless rendering is software and steps by nature, which is what the owner's video showed. |
 
 - **At most once per device every 7 days, and never twice in a tab** (`lib/splashGate.ts`:
   `localStorage yq-splash-at` + `sessionStorage yq-splash-session`, in try/catch — blocked storage
@@ -388,10 +400,11 @@ at 1.9 s (2.8 s with the shortcut) in a 320 ms fade with a 2 % scale.
   the rule and switches the served night frame off (`html[data-boot=off]`) on every other load. The
   30-day `yq-splash-seen` stamp only decides when a returning merchant gets the longer welcome with
   the shortcut.
-- **Instant first frame:** the served HTML carries a static `#yq-boot` node with the same night field
-  and the same logo tile in the same place (`marketHtml()`), `Shell.tsx` paints the same night as the
-  chunk's Suspense fallback, and `Splash` removes the static node as it mounts (and then does not
-  replay the tile's spring). An 8s CSS safety net hides the boot node if the chunk never arrives.
+- **Instant first frame:** the served HTML carries a `#yq-boot` node with the same night field, the
+  same logo tile in the same place and the dawn already rising (`marketHtml()`). `Splash` adopts it
+  (its tile hidden under the overlay's own, its 8 s safety fade stopped) and removes it at the end of
+  the exit; `Shell.tsx` paints a night field as the chunk's Suspense fallback only if the node is gone.
+  The 8 s CSS safety net still hides the node if the chunk never arrives.
 - Tap, click, wheel or Esc skips; the skip control takes focus and focus returns afterwards.
 - **Reduced motion:** the same finished frame, static, 600 ms, then a plain fade.
 - It is an overlay only — the catalog loads and the page renders underneath the whole time.
@@ -758,8 +771,32 @@ case file only (`tests/test_assist_v2.py`).
   markdown applied by the pricing engine (the owner has declined one so far — D3 is the answer
   without it).
 
+## Motion (the feel pass, 29-Oct-2026, branch `market-feel`)
+
+Every effect is CSS or the Web Animations API on transform and opacity (Lenis is the one library, a
+5 KB dynamic import), off under reduced motion and in lite mode, mirrored in Arabic, and each has a
+guard in `scripts/qa/smooth.py` that failed on the build before it.
+
+| Where | What the merchant sees | Guard |
+|---|---|---|
+| Scrolling, PC with a mouse | The wheel glides (Lenis 1.3.27, paused under every scroll lock; phones keep native scrolling) | `glide-scroll`, `glide-layers` |
+| Browse menu | Opens after a short rest, drops with a dim, a highlight slides between categories, a diagonal toward the products keeps the panel (menu aim) | `menu-intent`, `menu-aim`, `browse-menu` |
+| Header and strip | One plum pill glides under the link or chip the mouse is on; a soft shadow once the page moves | `hover-pill`, `header-shadow` |
+| Cards | Lift 4 px with a deeper shadow, the photo zooms slowly, a soft light follows the cursor; presses spring back | `card-hover`, `press-spring` |
+| Add | A copy of the photo flies to the visible cart (the mini-cart, the Restock button, the phone's Restock tab); the count rolls, the stepper comes in, nothing on the page moves | `add-flight` |
+| First screen, PC | The category discs pop in one after another, with their photos | `first-screen` |
+| Scrolling down, PC | Cards rise in a wave by column; section titles rise with the scroll; the top slider drifts slower than the page | `reveal-wave`, `hero-drift` |
+| Page change, PC | A 16 px glide over 320 ms | `page-glide` |
+| Promo slides | Through each dwell the discs float, the art breathes, a light sweeps the hero product | `slides-alive` |
+| The opening | See "The opening" above | `opening-motion`, `opening-logo` |
+
 ## Release log
 
+- **The feel pass (29-Oct-2026, branch `market-feel`, not released yet)** — the motion table above, the
+  Browse menu fix (released on its own on 29-Oct-2026 as `dbe8899`), a fresh design review's nine gaps
+  (Add never moves the page, a shelf's first frame draws sooner, one label style, an Orders page that
+  explains, Arabic chips and the ⌘K badge that read right, stronger hover), the opening made smooth
+  from the first pixel, and living slides. Guards are listed in `scripts/qa/README.md`.
 - **Polish, ship 1 (28-Oct-2026, branch `worktree-polish-market`, `6258a44` → `e15a774`, released on the
   owner's go)** — smoothness and honesty. The photo fade-in, Back that lands where you were, the page
   glide with page-shaped skeletons (`RouteOutlet`, `lib/lazyPage` with an idle warm-up of the main

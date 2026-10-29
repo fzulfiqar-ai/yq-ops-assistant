@@ -5,6 +5,10 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Live
 
+- The Browse menu fix (29-Oct-2026, `dbe8899`): the menu sits above the category strip, and a click keeps it open.
+- Built, not released (29-Oct-2026, branch `market-feel`; `docs/MARKETPLACE.md` § Motion and the release log): the
+  marketplace feel pass, the design review's fixes, the smooth opening and living slides. It ships on the owner's go
+  after his look on localhost.
 - YQ Assist, the marketplace chat (release assist1, 29-Oct-2026; `docs/MARKETPLACE.md` § YQ Assist): the free-AI
   repair, the chat with voice, photos and lists, and the portal page. The chat is shown only once the owner switches
   it on in Settings. The fix for voice uploads (the browser's `X-Device-Id` header was refused, `5e0279c`) is on
