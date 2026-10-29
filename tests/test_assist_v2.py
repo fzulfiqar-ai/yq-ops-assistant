@@ -543,6 +543,399 @@ def _():
         assert r["fallback"] and row["outcome"] == "error" and "39123456" not in row["message"]
 
 
+# ── 4. support: tickets ─────────────────────────────────────────────────────────────────────
+
+class _R:
+    def __init__(self, data, count=None):
+        self.data, self.count = data, count
+
+
+class _Q:
+    """One table query on the in-memory database: the chains app/market_support.py uses."""
+
+    def __init__(self, db, name):
+        self.db, self.name, self.f, self.op, self.payload = db, name, [], "select", None
+        self._order = self._limit = self._range = None
+
+    def select(self, *_a, **_k):
+        self.op = "select"
+        return self
+
+    def insert(self, row):
+        self.op, self.payload = "insert", row
+        return self
+
+    def update(self, vals):
+        self.op, self.payload = "update", vals
+        return self
+
+    def delete(self):
+        self.op = "delete"
+        return self
+
+    def eq(self, c, v):
+        self.f.append(lambda r: r.get(c) == v)
+        return self
+
+    def in_(self, c, vs):
+        vs = list(vs)
+        self.f.append(lambda r: r.get(c) in vs)
+        return self
+
+    def lt(self, c, v):
+        self.f.append(lambda r: r.get(c) is not None and str(r.get(c)) < str(v))
+        return self
+
+    def contains(self, c, v):
+        want = json.loads(v) if isinstance(v, str) else v
+        self.f.append(lambda r: all(x in (r.get(c) or []) for x in want))
+        return self
+
+    def order(self, c, desc=False):
+        self._order = (c, desc)
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def range(self, a, b):
+        self._range = (a, b)
+        return self
+
+    def execute(self):
+        rows = self.db.setdefault(self.name, [])
+        if self.op == "insert":
+            out = []
+            for it in (self.payload if isinstance(self.payload, list) else [self.payload]):
+                row = dict(it)
+                if self.name == "shop_tickets" and row.get("client_ticket_id") and any(
+                        r.get("device_id") == row.get("device_id") and r.get("client_ticket_id") == row["client_ticket_id"] for r in rows):
+                    raise RuntimeError("duplicate key value violates unique constraint shop_tickets_client_idx")
+                if self.name == "shop_ticket_events" and row.get("event") == "reminder" and any(
+                        r.get("ticket_id") == row["ticket_id"] and r.get("event") == "reminder"
+                        and (r.get("detail") or {}).get("to") == (row.get("detail") or {}).get("to") for r in rows):
+                    raise RuntimeError("duplicate key value violates unique constraint shop_ticket_events_one_reminder_idx")
+                row["id"] = len(rows) + 1
+                if self.name == "shop_tickets":
+                    row.setdefault("status", "new")
+                    row.setdefault("created_at", "2026-10-29T08:00:00+00:00")
+                    row["ref"] = f"T-2610-{row['id']:04d}"
+                rows.append(row)
+                out.append(dict(row))
+            return _R(out)
+        hit = [r for r in rows if all(f(r) for f in self.f)]
+        if self.op == "update":
+            for r in hit:
+                r.update(self.payload)
+            return _R([dict(r) for r in hit])
+        if self.op == "delete":
+            for r in hit:
+                rows.remove(r)
+            return _R([dict(r) for r in hit])
+        if self._order:
+            c, desc = self._order
+            hit = sorted(hit, key=lambda r: str(r.get(c) or ""), reverse=desc)
+        total = len(hit)
+        if self._range:
+            hit = hit[self._range[0]:self._range[1] + 1]
+        if self._limit:
+            hit = hit[:self._limit]
+        return _R([dict(r) for r in hit], total)
+
+
+class _Bucket:
+    def __init__(self, store):
+        self.store = store
+
+    def upload(self, path, data, _opts=None):
+        self.store[path] = data
+
+    def create_signed_urls(self, paths, _ttl):
+        return [{"signedURL": f"https://signed.example/{p}"} for p in paths]
+
+    def remove(self, paths):
+        for p in paths:
+            self.store.pop(p, None)
+
+
+class FakeDB:
+    def __init__(self):
+        self.db: dict = {}
+        self.files: dict = {}
+        self.storage = type("S", (), {"create_bucket": lambda _s, *a, **k: None,
+                                      "from_": lambda _s, _b: _Bucket(self.files)})()
+
+    def table(self, name):
+        return _Q(self.db, name)
+
+
+def _order(status="delivered", lines=None, events=None):
+    return {"id": 41, "order_no": "YQ-2610-0007", "token": "t" * 24, "status": status, "salesman_id": 3,
+            "customer_id": 9, "customer_shop": "Test Shop", "customer_phone": "97300000000",
+            "salesman": {"id": 3, "name": "Ali Hassan", "whatsapp": "97300000001"},
+            "lines": lines if lines is not None else [
+                {"id": 501, "item_code": "UK20", "qty": 10, "qty_confirmed": 10, "qty_delivered": 10},
+                {"id": 502, "item_code": "CC1", "qty": 20, "qty_confirmed": 20, "qty_delivered": 18}],
+            "events": events or []}
+
+
+class Support:
+    """market_support's collaborators as stand-ins: the database, the settings, the order behind a token, the
+    rep, the alerts."""
+
+    def __init__(self, order=None, support="1"):
+        self.order, self.support = order, support
+        self.client = FakeDB()
+        self.alerts: list = []
+
+    def __enter__(self):
+        from app import market_assist as ma, market_support as ms, shop, shop_notify as sn
+        self._saved = [(shop, "get_client"), (shop, "context"), (shop, "get_order_by_token"), (shop, "_salesman_by_id"),
+                       (shop, "get_order"), (ma, "public_catalog"), (sn, "_telegram"), (sn, "_email"),
+                       (sn, "log_notifications")]
+        self._vals = [getattr(m, n) for m, n in self._saved]
+        shop.get_client = lambda: self.client
+        shop.context = lambda force=False: {"settings": {"shop_ai_support_enabled": self.support,
+                                                         "shop_ticket_sla_hours": "24"},
+                                            "salesmen": [{"id": 7, "referral_code": "ali"}]}
+        shop.get_order_by_token = lambda tok: self.order if self.order and tok == self.order["token"] else None
+        shop.get_order = lambda oid: self.order if self.order and oid == self.order["id"] else None
+        shop._salesman_by_id = lambda sid: {"id": sid, "name": "Ali Hassan", "whatsapp": "97300000001",
+                                            "email": "rep@example.com", "notify_email": sid == 3} if sid else None
+        ma.public_catalog = _shelf_cat
+        sn._telegram = lambda text: self.alerts.append(("telegram", text)) or {"sent": True}
+        sn._email = lambda subject, html, to: self.alerts.append(("email", to, subject)) or {"sent": True}
+        sn.log_notifications = lambda rows, client=None: self.alerts.append(("logged", [r["kind"] for r in rows])) or True
+        return self
+
+    def __exit__(self, *_exc):
+        for (m, n), v in zip(self._saved, self._vals):
+            setattr(m, n, v)
+
+    def tickets(self):
+        return self.client.db.get("shop_tickets", [])
+
+
+def _ticket(**kw):
+    body = {"kind": "damaged", "order_token": "t" * 24, "lines": [{"index": 0, "item_code": "UK20", "qty": 2}],
+            "note": "two came cracked, call 39123456", "photos": [], "client_ticket_id": "c-1", "device_id": "dev-1",
+            "session_id": "s-1", "lang": "en"}
+    body.update(kw)
+    from app import market_support
+    return market_support.create_ticket(body, ip="10.0.0.1")
+
+
+def _refused(fn, words: str) -> None:
+    from app.shop import ShopError
+    try:
+        fn()
+    except ShopError as e:
+        assert words.lower() in str(e).lower(), str(e)
+        return
+    raise AssertionError(f"accepted (expected: {words})")
+
+
+@test("ticket: on a held, delivered order: stored with its rep and shop, masked note, the merchant told the next step")
+def _():
+    with Support(order=_order()) as s:
+        r = _ticket()
+        t = s.tickets()[0]
+        assert r == {"ok": True, "ref": "T-2610-0001", "kind": "damaged", "status": "new",
+                     "rep": {"name": "Ali", "whatsapp_url": r["rep"]["whatsapp_url"]}}
+        assert t["order_id"] == 41 and t["salesman_id"] == 3 and t["customer_id"] == 9
+        assert t["lines"] == [{"line_id": 501, "item_code": "UK20", "qty": 2}] and "39123456" not in t["note"]
+        ev = s.client.db["shop_ticket_events"][0]
+        assert ev["event"] == "created" and ev["actor"] == "merchant" and ev["to_status"] == "new"
+        assert ("telegram",) == s.alerts[0][:1] and "T-2610-0001: Damaged · UK20 x2 · order YQ-2610-0007" in s.alerts[0][1]
+        assert ("email", "rep@example.com", "YQ Assist T-2610-0001") in s.alerts
+        assert "39123456" not in json.dumps(s.alerts)
+
+
+@test("ticket: someone else's order, a line that moved, too many pieces, the wrong stage, tickets off: all refused")
+def _():
+    with Support(order=_order()) as _s:
+        _refused(lambda: _ticket(order_token="x" * 24), "not on this phone")
+        _refused(lambda: _ticket(lines=[{"index": 1, "item_code": "UK20", "qty": 1}]), "changed a moment ago")
+        _refused(lambda: _ticket(lines=[{"index": 1, "item_code": "CC1", "qty": 19}]), "at most 18")    # 18 delivered
+        _refused(lambda: _ticket(kind="refund"), "pick what went wrong")
+        _refused(lambda: _ticket(lines=[]), "pick the item")
+        _refused(lambda: _ticket(device_id=""), "on your phone")
+    with Support(order=_order(status="confirmed")) as _s:
+        _refused(lambda: _ticket(), "once the order is delivered")
+        assert _ticket(kind="delivery", lines=[], client_ticket_id="c-2")["ok"]                         # late delivery: fine
+    with Support(order=_order(), support="0") as _s:
+        _refused(lambda: _ticket(), "not open yet")
+
+
+@test("ticket: quantities count what was returned and what is already reported; a retried tap is one ticket")
+def _():
+    returned = [{"event": "returned", "detail": {"lines": [{"line_id": 502, "qty": 5}]}}]
+    with Support(order=_order(events=returned)) as s:
+        _refused(lambda: _ticket(lines=[{"index": 1, "item_code": "CC1", "qty": 14}]), "at most 13")   # 18 - 5
+        _ticket(lines=[{"index": 1, "item_code": "CC1", "qty": 10}], client_ticket_id="a")
+        _refused(lambda: _ticket(lines=[{"index": 1, "item_code": "CC1", "qty": 4}], client_ticket_id="b"), "at most 3")
+        again = _ticket(lines=[{"index": 1, "item_code": "CC1", "qty": 10}], client_ticket_id="a")
+        assert again["repeat"] and again["ref"] == "T-2610-0001" and len(s.tickets()) == 1
+
+
+@test("ticket without an order (bought on a visit): catalogue items only, the shop's rep, else the link's rep")
+def _():
+    with Support() as s:
+        s.client.db["shop_customers"] = [{"id": 12, "salesman_id": 5, "sticky_salesman_id": None, "device_ids": ["dev-1"]}]
+        r = _ticket(order_token=None, lines=[{"item_code": "uk20", "qty": 3}])
+        assert r["ok"] and s.tickets()[0]["salesman_id"] == 5 and s.tickets()[0]["customer_id"] == 12
+        assert s.tickets()[0]["lines"] == [{"line_id": None, "item_code": "UK20", "qty": 3}]
+        _refused(lambda: _ticket(order_token=None, lines=[{"item_code": "HDMI9", "qty": 1}], client_ticket_id="z"),
+                 "not in the catalogue")
+    with Support() as s:
+        _ticket(order_token=None, device_id="dev-9", referral_code="ali", kind="callback", lines=[])
+        assert s.tickets()[0]["salesman_id"] == 7                                                     # the link's rep
+        assert s.alerts[0][0] == "telegram" and "call-back request" in s.alerts[0][1]
+
+
+@test("photos: re-encoded (no location or camera data survives) into the private bucket; staff get signed links")
+def _():
+    from PIL import Image
+    import base64 as b64
+    import io as _io
+    img = Image.new("RGB", (40, 30), (200, 10, 10))
+    exif = Image.Exif()
+    exif[0x010F] = "PhoneMaker"                                                                  # camera make
+    gps = exif.get_ifd(0x8825)                                                                   # GPSInfo
+    gps[1], gps[2] = "N", (26.0, 13.0, 0.0)
+    buf = _io.BytesIO()
+    img.save(buf, "JPEG", exif=exif)
+    url = "data:image/jpeg;base64," + b64.b64encode(buf.getvalue()).decode()
+    from app import market_support as ms
+    out = ms.reencode(url)
+    again = Image.open(_io.BytesIO(out))
+    assert not again.getexif() and b"PhoneMaker" not in out
+    _refused(lambda: ms.reencode("data:image/gif;base64,R0lGOD"), "jpeg, png or webp")
+    with Support(order=_order()) as s:
+        _ticket(photos=[url, url])
+        assert s.tickets()[0]["photos"] == ["1/1.jpg", "1/2.jpg"] and set(s.client.files) == {"1/1.jpg", "1/2.jpg"}
+        t = ms.get_ticket(1, "owner@example.com")
+        assert t["photo_urls"] == ["https://signed.example/1/1.jpg", "https://signed.example/1/2.jpg"]
+        assert t["first_seen_at"] and t["order"]["order_no"] == "YQ-2610-0007" and "ip_hash" not in t
+
+
+@test("staff: resolving needs a resolution; every change is on the timeline; reassigning checks the rep")
+def _():
+    from app import market_support as ms
+    with Support(order=_order()) as s:
+        _ticket()
+        _refused(lambda: ms.update_ticket(1, {"status": "resolved"}, "owner@example.com"), "how it was resolved")
+        _refused(lambda: ms.update_ticket(1, {"status": "closed"}, "owner@example.com"), "unknown status")
+        t = ms.update_ticket(1, {"status": "resolved", "resolution": "replaced", "note": "swapped on Thursday"}, "owner@example.com")
+        assert t["status"] == "resolved" and t["resolution"] == "replaced" and t["resolved_at"]
+        kinds = [e["event"] for e in s.client.db["shop_ticket_events"]]
+        assert kinds == ["created", "resolve", "note"], kinds
+        ms.update_ticket(1, {"salesman_id": 8}, "owner@example.com")
+        assert s.tickets()[0]["salesman_id"] == 8 and s.client.db["shop_ticket_events"][-1]["event"] == "assign"
+
+
+@test("the chat links its turn to the ticket; 'my complaint?' lists this device's tickets only")
+def _():
+    from app import market_assist as ma
+    with Support(order=_order()) as s:
+        s.client.db["shop_ask_turns"] = [{"id": 1, "device_id": "dev-1", "outcome": "answered"},
+                                         {"id": 2, "device_id": "dev-2", "outcome": "answered"}]
+        _ticket(turn_id=1)
+        _ticket(turn_id=2, client_ticket_id="c-9", lines=[{"index": 0, "item_code": "UK20", "qty": 1}])
+        s.tickets()[1]["created_at"] = "2026-10-29T09:00:00+00:00"
+        turns = s.client.db["shop_ask_turns"]
+        assert turns[0]["ticket_id"] == 1 and turns[0]["outcome"] == "ticket" and "ticket_id" not in turns[1]
+        rows = ma.device_tickets("dev-1")
+        assert [r["ref"] for r in rows] == ["T-2610-0002", "T-2610-0001"] and ma.device_tickets("dev-x") == []
+
+
+@test("SLA: an unopened ticket reminds its rep after 24 working hours, the owner after 48; each only once")
+def _():
+    from datetime import datetime, timezone
+    from app import market_support as ms
+    with Support(order=_order()) as s:
+        _ticket()
+        s.tickets()[0]["created_at"] = "2026-10-25T05:00:00+00:00"        # Sunday 08:00 Bahrain
+        thu = datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc)          # Thursday 18:00: ~55 working hours
+        assert ms.sla_sweep(thu) == {"rep": 1, "owner": 1}
+        assert ms.sla_sweep(thu) == {"rep": 0, "owner": 0}                # claimed: never twice
+        sent = [a for a in s.alerts if a[0] in ("email", "telegram")]
+        assert ("email", "rep@example.com", "YQ Assist reminder T-2610-0001") in sent
+        assert any(a[0] == "telegram" and "not opened after" in a[1] for a in sent)
+        fri = ms._working_hours_between(datetime(2026, 10, 30, 5, tzinfo=timezone.utc),
+                                        datetime(2026, 10, 31, 20, tzinfo=timezone.utc))
+        assert fri == 0                                                    # Friday and Saturday never count
+
+
+@test("retention: turns past 180 days and tickets closed 730 days ago go, photos with them; open ones stay")
+def _():
+    from datetime import datetime, timezone
+    from app import market_support as ms
+    with Support() as s:
+        s.client.db["shop_ask_turns"] = [{"id": 1, "ts": "2026-03-01T00:00:00+00:00"}, {"id": 2, "ts": "2026-10-01T00:00:00+00:00"}]
+        s.client.db["shop_tickets"] = [
+            {"id": 1, "status": "resolved", "resolved_at": "2024-09-01T00:00:00+00:00", "photos": ["1/1.jpg"]},
+            {"id": 2, "status": "resolved", "resolved_at": "2026-09-01T00:00:00+00:00", "photos": []},
+            {"id": 3, "status": "new", "resolved_at": None, "photos": ["3/1.jpg"]}]
+        s.client.files.update({"1/1.jpg": b"x", "3/1.jpg": b"y"})
+        out = ms.retention_purge(datetime(2026, 10, 29, tzinfo=timezone.utc))
+        assert out == {"turns": 1, "tickets": 1, "photos": 1}
+        assert [t["id"] for t in s.tickets()] == [2, 3] and set(s.client.files) == {"3/1.jpg"}
+
+
+@test("routes: the ticket route is public and rate limited; staff and rep routes gated; jobs registered")
+def _():
+    src = (ROOT / "app" / "shop_api.py").read_text(encoding="utf-8")
+    assert '@app.post("/public/market/ticket")' in src and '"/shop/me/tickets/{ticket_id}"' in src
+    from app import shop_jobs
+    names = [n for n, _ in shop_jobs.JOBS]
+    assert names[-2:] == ["assist_ticket_sla", "assist_retention"]
+    from datetime import datetime, timezone
+    saved = shop_jobs._now
+    try:
+        shop_jobs._now = lambda: datetime(2026, 10, 30, 9, 0, tzinfo=timezone.utc)      # a Friday
+        assert shop_jobs.assist_ticket_sla() == {"skipped": "outside the send window"}
+        shop_jobs._now = lambda: datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+        assert shop_jobs.assist_retention() == {"skipped": "runs at 03:00 Bahrain"}
+    finally:
+        shop_jobs._now = saved
+
+
+@test("the rep's Today: his open chat tickets with the shop's WhatsApp, never the device or the photos")
+def _():
+    from app import followups
+    with Support(order=_order()) as s:
+        _ticket()
+        rows = followups._chat_tickets(3)
+        assert rows[0]["ref"] == "T-2610-0001" and rows[0]["label"] == "Damaged" and rows[0]["shop"] == "Test Shop"
+        assert rows[0]["wa_url"].startswith("https://wa.me/97300000000") and "device_id" not in rows[0]
+        assert followups._chat_tickets(99) == []
+    src = (ROOT / "web" / "src" / "pages" / "sales" / "Today.tsx").read_text(encoding="utf-8")
+    assert "<ChatTickets tickets={t.chat || []} />" in src
+
+
+@test("Command Centre: open chat tickets by T-reference (never a shop), red past the SLA; hidden from management")
+def _():
+    from datetime import datetime, timezone
+    from app import command_api, metrics
+    rows = [{"ref": "T-2610-0001", "kind": "damaged", "status": "new", "created_at": "2026-10-25T05:00:00+00:00",
+             "first_seen_at": None},
+            {"ref": "T-2610-0002", "kind": "callback", "status": "in_progress", "created_at": "2026-10-29T06:00:00+00:00",
+             "first_seen_at": "2026-10-29T07:00:00+00:00"}]
+    r = metrics.Reader(q=lambda sql: rows if "v_assist_open_tickets" in sql else [], qp=lambda s, p: [],
+                       salesmen_fn=lambda: [], now=datetime(2026, 10, 29, 12, tzinfo=timezone.utc))
+    ctx = type("C", (), {"r": r})()
+    (item,) = metrics.chat_tickets_item(ctx)
+    assert item["key"] == "chat_tickets" and item["tone"] == "alert" and item["count"] == 2
+    assert [x["label"] for x in item["rows"]] == ["T-2610-0001", "T-2610-0002"] and "Shop" not in json.dumps(item)
+    assert command_api.scope_items([item], frozenset()) == []                   # management: no Shop Admin
+    assert command_api.scope_items([item], frozenset({"Shop Admin"})) == [item]
+    none = metrics.Reader(q=lambda sql: (_ for _ in ()).throw(RuntimeError("relation does not exist")), qp=lambda s, p: [],
+                          salesmen_fn=lambda: [])
+    assert metrics.chat_tickets_item(type("C", (), {"r": none})()) == []        # before the migration: nothing
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

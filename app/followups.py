@@ -1096,6 +1096,24 @@ def _part(errors: dict, name: str, fn, default=None):
         return default
 
 
+def _chat_tickets(salesman_id: int | None) -> list[dict]:
+    """The open chat tickets for the Today card: reference, kind, items, the order number and the shop with its
+    WhatsApp link (what the rep needs to call back); never the device or the photos."""
+    from app import market_support, shop as _shop
+    from app.shop_notify import wa_url
+    from app.customer_contacts import wa_digits
+    out = []
+    for t in market_support.rep_tickets(salesman_id):
+        o = _shop.get_order(t["order_id"]) if t.get("order_id") else None
+        digits = wa_digits(o.get("customer_phone")) if o and o.get("customer_phone") else None
+        out.append({"id": t["id"], "ref": t["ref"], "kind": t["kind"], "status": t["status"],
+                    "label": market_support.KIND_LABEL.get(t["kind"], t["kind"]), "lines": t.get("lines") or [],
+                    "note": t.get("note"), "created_at": t.get("created_at"),
+                    "order_no": (o or {}).get("order_no"), "shop": (o or {}).get("customer_shop"),
+                    "wa_url": wa_url(digits, f"Hello, this is YQ about your report {t['ref']}.") if digits else None})
+    return out
+
+
 def today(sm: dict | None, email: str, *, is_admin: bool = False, force: bool = False,
           now: datetime | None = None) -> dict:
     """GET /shop/me/today. The heavy half (the rep card and money strip, due top 5, baskets not
@@ -1108,7 +1126,7 @@ def today(sm: dict | None, email: str, *, is_admin: bool = False, force: bool = 
     if not sm and not is_admin:
         return {"hint": _shop.UNLINKED_HINT, "me": None, "money": None, "waiting": [], "waiting_count": 0,
                 "in_progress": 0, "due": [], "due_count": 0, "due_counts": {}, "baskets": None, "link_week": None,
-                "restock": [],
+                "restock": [], "chat": [],
                 "errors": {}, "sla_min": None}
     sid = sm.get("id") if sm else None
     key = ("today", str(sid) if sm else "*")
@@ -1150,6 +1168,9 @@ def today(sm: dict | None, email: str, *, is_admin: bool = False, force: bool = 
     live_errors: dict = {}
     sla = _i(_part(live_errors, "settings", lambda: _shop.shop_settings().get("shop_confirm_sla_min"), 120), 120)
     waiting, waiting_n, in_progress = _part(live_errors, "waiting", lambda: _waiting(sid, now, sla), ([], 0, None))
-    return {**heavy, "errors": {**heavy.get("errors", {}), **live_errors},
+    # YQ Assist v2: the problems and call-back requests his shops raised in the chat, read on every call so a
+    # new one shows at once (owner 29-Oct-2026: the order's rep owns the ticket); the office sees them all
+    chat = _part(live_errors, "chat", lambda: _chat_tickets(sid if sm else None), []) or []
+    return {**heavy, "errors": {**heavy.get("errors", {}), **live_errors}, "chat": chat,
             "waiting": waiting, "waiting_count": waiting_n, "in_progress": in_progress, "sla_min": sla,
             "generated_at": now.isoformat(), "hint": None}

@@ -46,6 +46,11 @@ Jobs (in run order):
     sightings, filed under the slot's Sunday. The app_settings marker 'market_demand_rolled_at' is
     written only after a roll-up that ran; one sighting per term / SKU per slot, so a second run of the
     same slot writes nothing.
+  * assist_ticket_sla (YQ Assist v2, 29-Oct-2026) — a chat ticket nobody opened within
+    shop_ticket_sla_hours working hours: one reminder to its rep, a second SLA later one to the owner;
+    a nudge, so inside the send window only. One claim per ticket and recipient in the database.
+  * assist_retention (YQ Assist v2) — on the tick between 03:00 and 03:15 Bahrain: chat turns past
+    shop_ai_retention_days (180) and closed tickets with their photos past shop_ticket_keep_days (730).
 
 Nudges (unassigned, unconfirmed, digest, stale data) go out only between SEND_FROM_H and SEND_UNTIL_H
 Bahrain and never on the Bahrain weekend (Friday, Saturday); outside those hours the jobs answer
@@ -819,11 +824,50 @@ def market_safety_sweep(now: datetime | None = None) -> dict:
     return market_quality.sweep_safety(now or _now())
 
 
+def _no_ticket_table(e: Exception) -> bool:
+    t = str(e).lower()
+    return "shop_tickets" in t and ("does not exist" in t or "pgrst205" in t or "schema cache" in t)
+
+
+def assist_ticket_sla() -> dict:
+    """YQ Assist v2: a chat ticket nobody opened within shop_ticket_sla_hours working hours reminds its rep,
+    then the owner (app/market_support.sla_sweep; one claim per ticket and recipient). A nudge: only inside
+    the send window, never on the weekend. Quiet until market_assist_v2_migration.sql adds the table."""
+    now = _now()
+    if not in_send_window(now) or is_weekend(now):
+        return {"skipped": "outside the send window"}
+    from app import market_support
+    try:
+        return market_support.sla_sweep(now)
+    except Exception as e:  # noqa: BLE001
+        if _no_ticket_table(e):
+            return {"skipped": "no tickets table yet"}
+        raise
+
+
+def assist_retention() -> dict:
+    """YQ Assist v2 (Bahrain PDPL, owner 29-Oct-2026): chat turns past 180 days, closed tickets and their
+    photos past 730 days (app/market_support.retention_purge). One tick a day, the one that lands between
+    03:00 and 03:15 Bahrain; a missed day is caught up the next."""
+    now = _now()
+    bh = now.astimezone(_BAHRAIN)
+    if not (bh.hour == 3 and bh.minute < 15):
+        return {"skipped": "runs at 03:00 Bahrain"}
+    from app import market_support
+    try:
+        return market_support.retention_purge(now)
+    except Exception as e:  # noqa: BLE001
+        if _no_ticket_table(e):
+            return {"skipped": "no tickets table yet"}
+        raise
+
+
 JOBS = (("notify_retry", notify_retry), ("unassigned_reminder", unassigned_reminder),
         ("unconfirmed_reminder", unconfirmed_reminder), ("cleanup", cleanup),
         ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless),
         ("badge_log", badge_log), ("market_safety_sweep", market_safety_sweep),
-        ("market_demand_rollup", market_demand_rollup))
+        ("market_demand_rollup", market_demand_rollup),
+        ("assist_ticket_sla", assist_ticket_sla), ("assist_retention", assist_retention))
 
 
 def run_shop_jobs() -> dict:

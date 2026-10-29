@@ -313,6 +313,32 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     class RestockResolve(BaseModel):
         ids: list[int] = Field(max_length=200)
 
+    # YQ Assist v2 tickets (app/market_support.py): the ticket card's one request, and the staff's changes
+    class TicketLine(BaseModel):
+        index: int | None = Field(default=None, ge=0, le=500)     # the line's position in the order (with a token)
+        item_code: str = Field(max_length=64)
+        qty: int = Field(ge=1, le=9999)
+
+    class TicketRequest(BaseModel):
+        kind: str = Field(max_length=16)
+        order_token: str | None = Field(default=None, max_length=64)
+        lines: list[TicketLine] = Field(default_factory=list, max_length=10)
+        note: str | None = Field(default=None, max_length=500)
+        photos: list[str] = Field(default_factory=list, max_length=3)    # data URLs, each checked and re-encoded
+        client_ticket_id: str | None = Field(default=None, max_length=64)
+        device_id: str | None = Field(default=None, max_length=64)
+        session_id: str | None = Field(default=None, max_length=64)
+        turn_id: int | None = None
+        referral_code: str | None = Field(default=None, max_length=32)
+        lang: str | None = Field(default=None, max_length=8)
+
+    class TicketChange(BaseModel):
+        status: str | None = Field(default=None, max_length=16)
+        resolution: str | None = Field(default=None, max_length=16)
+        salesman_id: int | None = None
+        unassign: bool = False
+        note: str | None = Field(default=None, max_length=1000)
+
     # ── helpers ───────────────────────────────────────────────────────────────
     def _check_token(token: str) -> None:
         good = share_token(create=False)
@@ -692,6 +718,73 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise HTTPException(status_code=404, detail="The marketplace is not open.")
         from app import market_assist
         return {"ok": market_assist.save_feedback(body.model_dump(), ip=_ip(request))}
+
+    @app.post("/public/market/ticket")
+    @limiter.limit("10/minute")                              # per address
+    @limiter.limit("3/minute", key_func=device_key)          # per address + device
+    @limiter.limit("10/day", key_func=device_key)
+    def market_ticket(request: Request, body: TicketRequest) -> dict:
+        """YQ Assist v2: a damaged, wrong or missing item, a delivery problem, a return, a call back or an
+        account request, from the chat's ticket card. An order is named by the token this device holds;
+        its lines are checked against it (app/market_support.py). Off until shop_ai_support_enabled."""
+        _assist_open()
+        from app import market_support
+        if not market_support.enabled():
+            raise HTTPException(status_code=404, detail="Problem reports are not open yet.")
+        try:
+            return market_support.create_ticket(body.model_dump(), ip=_ip(request))
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # ── portal: chat tickets (Shop Admin), and a rep's own (Shop Orders) ────────
+    @app.get("/shop/tickets")
+    def shop_tickets_list(status: str | None = None, salesman_id: int | None = None, kind: str | None = None,
+                          limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0, le=100_000),
+                          _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_support
+        return market_support.list_tickets(status, salesman_id, kind, limit, offset)
+
+    @app.get("/shop/tickets/{ticket_id}")
+    def shop_ticket_get(ticket_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_support
+        t = market_support.get_ticket(ticket_id, user.email)
+        if not t:
+            raise HTTPException(status_code=404, detail="Ticket not found.")
+        return t
+
+    @app.patch("/shop/tickets/{ticket_id}")
+    def shop_ticket_update(ticket_id: int, body: TicketChange,
+                           user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_support
+        changes = body.model_dump(exclude_none=True)
+        if body.unassign:
+            changes["salesman_id"] = None
+        changes.pop("unassign", None)
+        try:
+            t = market_support.update_ticket(ticket_id, changes, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.ticket_update", detail={"id": ticket_id, **{k: v for k, v in changes.items() if k != "note"}})
+        return t
+
+    @app.patch("/shop/me/tickets/{ticket_id}")
+    def shop_my_ticket_update(ticket_id: int, body: TicketChange,
+                              user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """A rep moves only his own tickets (in progress, waiting for the shop, resolved) and adds a note; he
+        cannot hand one to another rep. An admin may move any."""
+        from app import market_support
+        if user.role != "admin":
+            sm = shop.salesman_for_user(user.email)
+            own = market_support.list_tickets(None, (sm or {}).get("id") or -1, None, 200, 0)["rows"]
+            if not sm or ticket_id not in {t["id"] for t in own}:
+                raise HTTPException(status_code=404, detail="Ticket not found.")
+        changes = body.model_dump(exclude_none=True, exclude={"salesman_id", "unassign"})
+        try:
+            t = market_support.update_ticket(ticket_id, changes, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.my_ticket_update", detail={"id": ticket_id, "status": changes.get("status")})
+        return t
 
     # ── portal: what merchants ask and suggest (Shop Admin) ──────────────────
     @app.get("/shop/assist/turns")

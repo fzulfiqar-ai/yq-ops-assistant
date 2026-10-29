@@ -194,6 +194,11 @@ EXPECTED_GATES = {
     ("GET", "/shop/assist/turns"): ["feature:Shop Admin"],
     ("GET", "/shop/feedback"): ["feature:Shop Admin"],
     ("PATCH", "/shop/feedback/{feedback_id}"): ["feature:Shop Admin"],
+    # YQ Assist v2 tickets (29-Oct-2026): the office's queue; a rep's own tickets on his Today screen
+    ("GET", "/shop/tickets"): ["feature:Shop Admin"],
+    ("GET", "/shop/tickets/{ticket_id}"): ["feature:Shop Admin"],
+    ("PATCH", "/shop/tickets/{ticket_id}"): ["feature:Shop Admin"],
+    ("PATCH", "/shop/me/tickets/{ticket_id}"): ["feature:Shop Orders"],
 }
 
 

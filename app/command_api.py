@@ -32,7 +32,8 @@ log = logging.getLogger(__name__)
 # 'Margins'. The receivables book (balances by account): admins and logins holding 'Receivables'.
 MODULE_FEATURE: dict[str, str] = {"profitability": "Margins", "receivables": "Receivables"}
 TILE_FEATURE: dict[str, str] = {"products.stock_shape": "Margins"}          # stock valued at cost
-ATTENTION_FEATURE: dict[str, str] = {"below_cost": "Margins", "unowned_ar": "Receivables"}
+# the chat tickets item (YQ Assist v2) links to the Shop Admin page, which management does not hold
+ATTENTION_FEATURE: dict[str, str] = {"below_cost": "Margins", "unowned_ar": "Receivables", "chat_tickets": "Shop Admin"}
 GUARDED_FEATURES = frozenset(MODULE_FEATURE.values()) | frozenset(TILE_FEATURE.values()) |     frozenset(ATTENTION_FEATURE.values())
 
 
