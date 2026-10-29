@@ -299,6 +299,9 @@ jobs:
         run: node scripts/admin_tables_test.mjs
       - name: Office motion, once per session (node, no browser)
         run: node scripts/admin_motion_test.mjs
+      # ship 2: toasts sit above every sheet (portalled to <body>), one reload per build in both entries
+      - name: Portal layers (node, no browser)
+        run: node scripts/portal_layers_test.mjs
       # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
       # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
       # does not. Type errors fail it too: tsc -b runs inside `npm run build`.
