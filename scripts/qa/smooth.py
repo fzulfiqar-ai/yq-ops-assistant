@@ -840,6 +840,107 @@ def menu_aim(page: Page) -> list[Finding]:
     return out or [("note", "menu-aim", f"the diagonal keeps \"{first}\"; resting on a row switches to \"{rested}\"", vals)]
 
 
+# ── K3 cards that respond, K5 press feel (29-Oct-2026) ────────────────────────────────────────────
+CARD_STATE = r"""
+(code) => {
+  const art = document.querySelector('[data-qa-card="' + code + '"]');
+  if (!art) return null;
+  const ty = new DOMMatrixReadOnly(getComputedStyle(art).transform === 'none' ? undefined : getComputedStyle(art).transform).m42;
+  const img = art.querySelector('.m-photo-img');
+  const t = img && getComputedStyle(img).transform;
+  const scale = t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1;
+  return { lift: Math.round(ty * 10) / 10, scale: Math.round(scale * 1000) / 1000 };
+}
+"""
+
+
+def _first_grid_card(page: Page):
+    """the first visible grid card with a photo, marked for the probes (data-qa-card)"""
+    return page.evaluate(r"""() => {
+      const cards = [...document.querySelectorAll('main article[data-stock]')].filter((a) => {
+        const r = a.getBoundingClientRect(); return r.width > 150 && r.top > 90 && r.bottom < innerHeight - 20 && a.querySelector('.m-photo-img');
+      });
+      const a = cards[0]; if (!a) return null;
+      a.dataset.qaCard = 'probe';
+      const r = a.getBoundingClientRect();
+      return { code: 'probe', x: r.left + r.width / 2, y: r.top + r.height * 0.35 };
+    }""")
+
+
+def card_hover(page: Page) -> list[Finding]:
+    """K3, a mouse: a card under the pointer lifts (~4 px) and its photo zooms slowly (~1.06)."""
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    c = _first_grid_card(page)
+    if not c:
+        return [("warn", "card-hover", "K3: no grid card on screen, not measured", None)]
+    page.mouse.move(c["x"], c["y"], steps=4)
+    page.wait_for_timeout(900)
+    s = page.evaluate(CARD_STATE, c["code"])
+    page.mouse.move(4, 4)
+    if not s:
+        return [("warn", "card-hover", "K3: the probed card went away, not measured", None)]
+    out: list[Finding] = []
+    if s["lift"] > -3.5:
+        out.append(("fail", "card-hover", f"K3: a hovered card lifts {abs(s['lift'])}px (it should rise about 4 px)", s))
+    if s["scale"] < 1.05:
+        out.append(("fail", "card-hover", f"K3: a hovered card's photo zooms to {s['scale']} (it should settle near 1.06)", s))
+    return out or [("note", "card-hover", f"K3: a hovered card lifts {abs(s['lift'])}px and its photo zooms to {s['scale']}", s)]
+
+
+PRESS_TRACK = r"""
+(ms) => {
+  const b = document.querySelector('[data-qa-press]');
+  window.__qaPress = [];
+  const t0 = performance.now();
+  const loop = () => {
+    const t = getComputedStyle(b).transform;
+    window.__qaPress.push(t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1);
+    if (performance.now() - t0 < ms) requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+"""
+
+
+def press_spring(page: Page) -> list[Finding]:
+    """K5: a pressed button gives (scales down), and on release springs back past its size for a
+    moment before it settles, the way a physical key does."""
+    page.evaluate("() => window.scrollTo(0, Math.round(innerHeight * 0.9))")
+    page.wait_for_timeout(1500)
+    box = page.evaluate(r"""() => {
+      const btns = [...document.querySelectorAll('main article[data-stock] button[aria-label]')].filter((b) => {
+        const r = b.getBoundingClientRect(); const s = getComputedStyle(b);
+        return r.width >= 36 && r.top > 90 && r.bottom < innerHeight - 20 && /^(Add|\+)/.test((b.getAttribute('aria-label') || '') + '') && s.visibility !== 'hidden';
+      });
+      const b = btns[0]; if (!b) return null;
+      b.dataset.qaPress = '1';
+      const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }""")
+    if not box:
+        return [("warn", "press-spring", "K5: no Add button on screen, not measured", None)]
+    page.mouse.move(box["x"], box["y"])
+    page.wait_for_timeout(300)
+    page.mouse.down()
+    page.wait_for_timeout(220)
+    pressed = page.evaluate("() => { const t = getComputedStyle(document.querySelector('[data-qa-press]')).transform; return t && t !== 'none' ? new DOMMatrixReadOnly(t).a : 1 }")
+    page.evaluate(PRESS_TRACK, 700)
+    # release without a click landing on the card: move off first, then let go
+    page.mouse.move(4, 4)
+    page.mouse.up()
+    page.wait_for_timeout(800)
+    trace = page.evaluate("() => window.__qaPress || []")
+    peak = max(trace) if trace else 1
+    vals = {"pressed_scale": round(pressed, 3), "release_peak": round(peak, 4), "frames": len(trace)}
+    page.keyboard.press("Escape")
+    out: list[Finding] = []
+    if pressed > 0.985:
+        out.append(("fail", "press-spring", f"K5: a pressed Add button barely gives (scale {pressed:.3f})", vals))
+    if peak <= 1.0005:
+        out.append(("fail", "press-spring", "K5: on release the button eases back without a spring (it never passes its own size)", vals))
+    return out or [("note", "press-spring", f"K5: a press gives to {pressed:.3f} and springs back past 1 (peak {peak:.4f})", vals)]
+
+
 # ── F1 glide scrolling (29-Oct-2026) ───────────────────────────────────────────────────────────
 GLIDE_TRACK = r"""
 (ms) => {

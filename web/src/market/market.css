@@ -149,6 +149,9 @@
     --m-ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* enter: arrives fast, settles */
     --m-ease-in: cubic-bezier(0.4, 0, 1, 1); /* exit */
     --m-ease-sheet: cubic-bezier(0.32, 0.72, 0, 1); /* sheets: settle without a bounce */
+    /* press release (K5, 29-Oct-2026): a damped spring (zeta 0.5) — it passes its size by 16% of the
+     * travel and settles, the way a physical key comes back. Unsupported: the transition eases. */
+    --m-ease-press: linear(0, 0.053 4.2%, 0.184 8.3%, 0.359 12.5%, 0.547 16.7%, 0.725 20.8%, 0.878 25%, 0.999 29.2%, 1.085 33.3%, 1.137 37.5%, 1.16 41.7%, 1.161 45.8%, 1.145 50%, 1.12 54.2%, 1.09 58.3%, 1.059 62.5%, 1.032 66.7%, 1.01 70.8%, 0.993 75%, 0.981 79.2%, 0.975 83.3%, 0.973 87.5%, 0.975 91.7%, 0.978 95.8%, 1);
     --m-d-1: 120ms;
     --m-d-2: 200ms;
     --m-d-3: 320ms;
@@ -319,10 +322,24 @@
    * same specificity) set transition-property to transform alone: card photos popped in over the
    * tint instead of fading (final review, 28-Oct-2026). Two classes outrank any one utility; the
    * transform keeps the zoom's own duration (duration-3). */
+  /* K3 (29-Oct-2026): the hover zoom is slow on purpose (700 ms, the enter curve): a photo that
+   * leans in reads as considered; a 320 ms snap read as a twitch */
   .m-photo .m-photo-img {
     transition-property: opacity, transform;
-    transition-duration: var(--m-d-2), var(--m-d-3);
-    transition-timing-function: var(--m-ease), var(--m-ease);
+    transition-duration: var(--m-d-2), 700ms;
+    transition-timing-function: var(--m-ease), var(--m-ease-out);
+  }
+  /* press feel (K5): a press gives at once (90 ms); the release springs back past its size and
+   * settles (--m-ease-press). Two classes of specificity: the element's own `transition` utility
+   * would otherwise replace this list. */
+  .m-press.m-press {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+    transition-duration: 120ms, 120ms, 120ms, 120ms, 120ms, 460ms;
+    transition-timing-function: var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease-press);
+  }
+  .m-press.m-press:active {
+    transition-duration: 120ms, 120ms, 120ms, 120ms, 120ms, 90ms;
+    transition-timing-function: var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease), var(--m-ease-out);
   }
   .m-photo[data-state='wait'] .m-photo-img {
     opacity: 0;

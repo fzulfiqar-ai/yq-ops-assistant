@@ -1651,6 +1651,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("palette-layers", lambda pg: smooth.palette_layers(pg, "cable", STR["card.quickView"])))
             jobs.append(("glide", lambda pg: smooth.glide_scroll(pg)))
             jobs.append(("glide-layers", lambda pg: smooth.glide_layers(pg)))
+            jobs.append(("card-hover", lambda pg: smooth.card_hover(pg) + smooth.press_spring(pg)))
     for name, job in jobs:
         pg = fresh(load=name not in ("lazy", "back-entry"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
