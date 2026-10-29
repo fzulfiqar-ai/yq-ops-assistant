@@ -8,11 +8,13 @@ import { useMarket, useMarketSearch } from '../MarketContext'
 import { locale } from '../strings'
 import {
   pageTemplate,
+  postAsk,
   postAskStream,
   postFeedback,
   postPhoto,
   postTicket,
   type AskAction,
+  type AskNext,
   type AskResponse,
   type AskStage,
   type FeedbackKind,
@@ -31,6 +33,9 @@ import { load, MAX_MSGS, newId, save, type ErrorKind, type Msg, type Row, type S
  * cancels a question: the answer lands here and the launcher shows a dot (announceReady). The module is part of
  * the lazily loaded chat chunk, so nothing of it reaches the first download. A turn streams its stages and its
  * cards (postAskStream); the tiles send an `action`; the history the server reads is named by turn ids.
+ *
+ * 2.1: every answer may carry quick replies (`next`); the chat speaks first with an opening line (`hello`, from
+ * data, never a turn), fetched once per session and product.
  */
 
 export const MAX_LEN = 500
@@ -71,13 +76,16 @@ interface Snap {
   busy: boolean
   stage: AskStage | null
   slow: boolean
+  /** 2.1: the opening line for this session and product (null until it arrives, or when it could not) */
+  hello: AskResponse | null
 }
 
-const session: { snap: Snap; inflight: AbortController | null; mounted: number; listeners: Set<() => void> } = {
-  snap: { state: load(), busy: false, stage: null, slow: false },
+const session: { snap: Snap; inflight: AbortController | null; mounted: number; listeners: Set<() => void>; helloKey: string } = {
+  snap: { state: load(), busy: false, stage: null, slow: false, hello: null },
   inflight: null,
   mounted: 0,
   listeners: new Set(),
+  helloKey: '',
 }
 
 function publish(p: Partial<Snap>): void {
@@ -132,8 +140,17 @@ function answerMsg(res: AskResponse, question: string, ctx: CatalogCtx, extra: P
     callback: Boolean(res.callback),
     escalated: Boolean(res.escalated),
     miss: Boolean(res.miss),
+    next: cleanNext(res.next, ctx),
     ...extra,
   }
+}
+
+/** The quick replies the page can act on: a label, then words to send or a known action (a card the catalogue has). */
+export function cleanNext(next: AskNext[] | undefined, ctx: Pick<CatalogCtx, 'itemsByCode'>): AskNext[] {
+  return (next || [])
+    .filter((n) => n && typeof n.label === 'string' && n.label.trim() && (n.say || n.action))
+    .filter((n) => n.action !== 'show' || ctx.itemsByCode.has(String(n.q || '')))
+    .slice(0, 4)
 }
 
 interface Run {
@@ -258,6 +275,26 @@ export function useAssistChat(itemCodeProp: string | null) {
     if (itemCodeProp && itemCodeProp !== session.snap.state.itemCode) update((s) => ({ ...s, itemCode: itemCodeProp }))
   }, [itemCodeProp])
 
+  // 2.1: an empty chat speaks first, once per session and product (from data on the server, never a turn)
+  const empty = snap.state.msgs.length === 0
+  const subject = snap.state.itemCode
+  useEffect(() => {
+    if (!empty) return
+    const key = `${session.snap.state.sid}|${subject || ''}|${locale.lang}`
+    if (session.helloKey === key) return
+    session.helloKey = key
+    publish({ hello: null })
+    postAsk({ ...askBase(session.snap.state.sid), message: 'hello', action: 'hello' })
+      .then((res) => {
+        if (session.helloKey === key && res && typeof res.reply === 'string' && res.reply) {
+          publish({ hello: { ...res, next: cleanNext(res.next, ctxRef.current) } })
+        }
+      })
+      .catch(() => {
+        /* the static welcome line stays */
+      })
+  }, [empty, subject])
+
   const send = useCallback((raw: string, retryOf?: string) => {
     const text = raw.trim().slice(0, MAX_LEN)
     if (!text || session.inflight) return
@@ -276,7 +313,7 @@ export function useAssistChat(itemCodeProp: string | null) {
   }, [])
 
   /** A tile: its label is the message the merchant sees, its action is what the server answers (no model). */
-  const sendAction = useCallback((action: AskAction, label: string) => {
+  const sendAction = useCallback((action: AskAction, label: string, q?: string) => {
     if (session.inflight) return
     void run(
       {
@@ -284,11 +321,21 @@ export function useAssistChat(itemCodeProp: string | null) {
         photo: false,
         retry: { text: label },
         user: { id: newId(), role: 'user', text: label },
-        call: (signal, { sid, onStage, onCards }) => postAskStream({ ...askBase(sid), message: label, action }, { onStage, onCards }, signal),
+        call: (signal, { sid, onStage, onCards }) =>
+          postAskStream({ ...askBase(sid), message: label, action, ...(q ? { q: q.slice(0, 60) } : {}), history_ids: historyIds() }, { onStage, onCards }, signal),
       },
       ctxRef.current,
     )
   }, [])
+
+  /** 2.1: a quick reply: words go as the merchant's own message, an action is answered from data. */
+  const sendNext = useCallback(
+    (n: AskNext) => {
+      if (n.action) sendAction(n.action, n.label, n.q)
+      else if (n.say) send(n.say)
+    },
+    [send, sendAction],
+  )
 
   /** A photo (already downscaled): kept in memory for the bubble and a retry, a placeholder is what is stored. */
   const sendPhoto = useCallback((dataUrl: string, retry?: { errorId: string; userId: string }) => {
@@ -320,7 +367,7 @@ export function useAssistChat(itemCodeProp: string | null) {
     session.inflight?.abort()
     session.inflight = null
     forgetPhotos()
-    publish({ busy: false, stage: null, slow: false })
+    publish({ busy: false, stage: null, slow: false, hello: null })
     update(() => ({ sid: newId(), msgs: [], itemCode: null }))
   }, [])
 
@@ -375,8 +422,10 @@ export function useAssistChat(itemCodeProp: string | null) {
     busy: snap.busy,
     stage: snap.stage,
     slow: snap.slow,
+    hello: snap.hello,
     send,
     sendAction,
+    sendNext,
     sendPhoto,
     retryPhoto,
     reset,

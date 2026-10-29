@@ -211,7 +211,7 @@ class State:
     classes: tuple[str, ...] = ALL_CLASSES
     reduced: bool = False
     lead_only: bool = False  # only the lead phone + lead desktop
-    assist: str | None = None  # YQ Assistant: 'launcher' (button only) | 'panel' (opened, one question asked) | 'list' (a pasted order list, reviewed)
+    assist: str | None = None  # YQ Assistant: 'launcher' (button only) | 'panel' (opened, one question asked) | 'list' (a pasted order list, reviewed) | 'hello' (opened: it speaks first, 2.1)
 
 
 def states(slug: str | None) -> list[State]:
@@ -279,6 +279,7 @@ def states(slug: str | None) -> list[State]:
         State("assist_launcher", "/", "YQ Assistant · the Ask YQ button (settings.ai_enabled mocked on)", ready="main", assist="launcher"),
         State("assist_panel", "/", "YQ Assistant · panel open, one question answered with cards", ready="main", assist="panel"),
         State("assist_list", "/", "YQ Assistant · a pasted order list: matched / pick / missing review", ready="main", assist="list"),
+        State("assist_hello", "/", "YQ Assistant 2.1 · opened: it speaks first, an opening line with quick replies", ready="main", assist="hello"),
     ]
     if slug:
         out.insert(1, State("storefront", "/" + slug, "Rep storefront /" + slug, ready="main"))
@@ -800,12 +801,30 @@ def install_assist(page: Page, variant: str = 'panel') -> None:
         if route.request.method == "OPTIONS":
             route.fulfill(status=204, headers=dict(CORS), body="")
             return
+        try:
+            asked = route.request.post_data_json or {}
+        except Exception:  # noqa: BLE001
+            asked = {}
+        ar = LANG == "ar"
+        if asked.get("action") == "hello":
+            # 2.1: the chat speaks first (from data on the server, never a turn), with quick replies
+            first = " و".join(codes[:2]) if ar else " and ".join(codes[:2])
+            json_route(route, {
+                "intent": "hello", "turn_id": None, "items": [], "add": [], "orders": [], "handoff": None,
+                "fallback": False, "miss": False,
+                "reply": (f"المحلات تطلب {first} أكثر من غيرها هذا الأسبوع، وهي متوفرة الآن. ما الذي تبيعه أكثر في محلك؟" if ar
+                          else f"Shops are ordering {first} the most this week, in stock now. What do you sell most?"),
+                "next": [{"label": "الكيابل" if ar else "Cables", "action": "top", "q": "cat:CABLE"},
+                         {"label": "الشواحن" if ar else "Chargers", "action": "top", "q": "cat:CHARGER"},
+                         {"label": "شواحن السيارة" if ar else "Car chargers", "action": "top", "q": "cat:CAR CHARGER"}],
+            })
+            return
         if variant == "list":
             json_route(route, list_answer())
             return
         reply = (
             "وجدت لك ثلاثة خيارات تناسب طلبك. أضفتها هنا لتختار منها."
-            if LANG == "ar"
+            if ar
             else "I found three options that match what you asked for. Pick one, or add them all."
         )
         json_route(
@@ -820,6 +839,10 @@ def install_assist(page: Page, variant: str = 'panel') -> None:
                 "fallback": False,
                 "miss": False,
                 "turn_id": 1,
+                # 2.1: the quick replies under the newest answer
+                "next": ([{"label": (f"اعرض {codes[3]}" if ar else f"Show {codes[3]}"), "action": "show", "q": codes[3]}]
+                         if len(codes) > 3 else [])
+                + [{"label": "الأكثر مبيعًا" if ar else "What's selling", "action": "top"}],
             },
         )
 
@@ -1815,6 +1838,13 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
                 finding(run, "fail", "assist-launcher-missing", "settings.ai_enabled is mocked true but the Ask YQ button did not render")
         if st.assist in ("panel", "list"):
             assist_open_and_ask(page, st.assist)
+        if st.assist == "hello":
+            page.click("[data-assist-launcher]", timeout=8000)
+            try:
+                page.wait_for_selector("[data-assist-panel] [role=group] button", timeout=8000)
+            except PWError:
+                finding(run, "fail", "assist-hello-missing", "the chat opened without its opening line's quick replies")
+            page.wait_for_timeout(600)
 
         p = probe_scan(page, vp, st.needles)
         common_checks(run, page, vp, st, net, p)

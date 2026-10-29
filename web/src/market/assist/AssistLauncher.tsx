@@ -1,12 +1,25 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation } from 'react-router-dom'
-import { MessageCircle } from 'lucide-react'
+import { MessageCircle, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAssistEnabled } from './enabled'
-import { OPEN_EVENT, READY_EVENT, rememberOpen, wasOpen, type OpenOptions } from './open'
+import { useMarket } from '../MarketContext'
+import type { AskAction } from './assistApi'
+import { enabledDevForced, useAssistEnabled } from './enabled'
+import { OPEN_EVENT, peekAllowed, peekDismissed, peekSpent, READY_EVENT, rememberOpen, wasOpen, type OpenOptions } from './open'
 import { L } from './launcherStrings'
 import { Orb } from './Orb'
+
+// 2.1 (owner, 29-Oct-2026: "proactive", on from release): the line beside the button, once per visit, after a
+// while on a page that sells; never on the cart, checkout, orders or the chat's own page
+const PEEK_AFTER_MS = 15000
+const PEEK_FOR_MS = 12000
+
+function peekPage(pathname: string): 'item' | 'shop' | null {
+  if (pathname.startsWith('/p/')) return 'item'
+  if (pathname === '/' || pathname === '/shop' || pathname === '/search' || pathname.startsWith('/t/') || pathname.startsWith('/brands/')) return 'shop'
+  return null
+}
 
 const loadPanel = () => import('./AssistPanel')
 const AssistPanel = lazy(loadPanel)
@@ -44,20 +57,25 @@ function useStackHidden(): boolean {
  */
 export function AssistLauncher() {
   const enabled = useAssistEnabled()
+  const { settings } = useMarket()
+  const nudgeOn = settings.ai_nudge === true || enabledDevForced()
   const { pathname } = useLocation()
   const [open, setOpen] = useState(wasOpen)
   const [itemCode, setItemCode] = useState<string | null>(null)
-  const [first, setFirst] = useState<{ id: number; text: string } | null>(null)
+  const [first, setFirst] = useState<{ id: number; text: string; action?: AskAction } | null>(null)
   const stackHidden = useStackHidden()
   // v2: an answer that landed while the chat was closed (the chat keeps running), and the drop's rings on a tap
   const [ready, setReady] = useState(false)
   const [drop, setDrop] = useState(0)
+  // 2.1: the line beside the button (the product's code when it shows on a product page)
+  const [peek, setPeek] = useState<{ kind: 'item' | 'shop'; code: string | null } | null>(null)
   useEffect(() => {
     const on = () => setReady(true)
     window.addEventListener(READY_EVENT, on)
     return () => window.removeEventListener(READY_EVENT, on)
   }, [])
   if (open && ready) setReady(false)
+  if (open && peek) setPeek(null)
 
   useEffect(() => {
     if (!enabled) return
@@ -73,17 +91,54 @@ export function AssistLauncher() {
 
   useEffect(() => {
     rememberOpen(open)
+    if (open) peekSpent() // the chat was opened this visit: the line has done its job
   }, [open])
+
+  // 2.1: after a while on a page that sells, once per visit (a dismiss rests it for a day)
+  useEffect(() => {
+    const kind = peekPage(pathname)
+    if (!enabled || !nudgeOn || open || !kind || !peekAllowed()) return
+    const t = window.setTimeout(() => {
+      if (!peekAllowed()) return
+      // a sheet over a shop page (filters, the cart) hides the button: wait for the next page rather than speak unseen
+      if (kind === 'shop' && document.querySelector('[role="dialog"][aria-modal="true"]')) return
+      peekSpent()
+      let code: string | null
+      try {
+        code = kind === 'item' ? decodeURIComponent(pathname.split('/')[2] || '') || null : null
+      } catch {
+        code = null
+      }
+      setPeek({ kind, code })
+    }, PEEK_AFTER_MS)
+    return () => window.clearTimeout(t)
+  }, [pathname, enabled, nudgeOn, open])
+  useEffect(() => {
+    if (!peek) return
+    const t = window.setTimeout(() => setPeek(null), PEEK_FOR_MS)
+    return () => window.clearTimeout(t)
+  }, [peek])
 
   // a phone chat is a full screen: following a link out of it (cart, an order) leaves it.
   // Every close also forgets the opening question, so reopening later never sends it again.
   const [pathSeen, setPathSeen] = useState(pathname)
   if (pathSeen !== pathname) {
     setPathSeen(pathname)
+    setPeek(null)
     if (open && typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
       setOpen(false)
       setFirst(null)
     }
+  }
+
+  // a tap on the line is a yes: the chat opens on the answer it offered (from data, no model)
+  const takePeek = () => {
+    if (!peek) return
+    setItemCode(peek.code)
+    setFirst(peek.kind === 'item' && peek.code ? { id: Date.now(), text: L.firstItem, action: 'fit' } : { id: Date.now(), text: L.firstShop, action: 'top' })
+    setPeek(null)
+    setDrop((n) => n + 1)
+    setOpen(true)
   }
 
   const close = useCallback(() => {
@@ -93,6 +148,7 @@ export function AssistLauncher() {
 
   const hiddenHere = pathname === '/checkout' || pathname === '/ask' || pathname.startsWith('/o/')
   if (!enabled || hiddenHere) return null
+  const bottom = stackHidden ? 'var(--m-safe-b, 0px)' : 'var(--m-bottom-stack, 0px)'
 
   return createPortal(
     <>
@@ -100,6 +156,39 @@ export function AssistLauncher() {
         <Suspense fallback={null}>
           <AssistPanel itemCode={itemCode} first={first} onClose={close} />
         </Suspense>
+      ) : null}
+      {peek && !open ? (
+        <div
+          role="status"
+          data-assist-peek=""
+          style={{ bottom: `calc(${bottom} + 76px)` }}
+          className={cn(
+            'assist-in fixed end-3 flex max-w-[min(18rem,calc(100vw-1.5rem))] items-center gap-0.5 rounded-2xl rounded-ee-md bg-surface p-1 shadow-3 ring-1 ring-line md:end-5',
+            // a product opens as a sheet over the shop (z-sheet 50, which covers the button): the line rides above it
+            peek.kind === 'item' ? 'z-[55]' : 'z-[44]',
+          )}
+        >
+          <button
+            type="button"
+            onClick={takePeek}
+            onPointerEnter={() => void loadPanel()}
+            className="min-h-12 flex-1 rounded-xl px-3 py-2 text-start text-sm font-semibold leading-snug text-ink hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
+          >
+            {peek.kind === 'item' && peek.code ? L.peekItem : L.peekShop}
+          </button>
+          <button
+            type="button"
+            aria-label={L.peekClose}
+            title={L.peekClose}
+            onClick={() => {
+              peekDismissed()
+              setPeek(null)
+            }}
+            className="grid h-12 w-12 shrink-0 place-items-center rounded-full text-ink-3 hover:bg-plum-wash hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
       ) : null}
       <button
         type="button"

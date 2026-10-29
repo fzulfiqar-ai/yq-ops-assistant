@@ -48,3 +48,39 @@ export function announceReady(): void {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new Event(READY_EVENT))
 }
+
+/* ───────────────────────── 2.1: the line beside the button, once per visit ───────────────────────── */
+
+const PEEK_KEY = 'yq-assist-peek' // this tab: shown already, or the chat was opened
+const PEEK_OFF = 'yq-assist-peek-off' // this browser: dismissed at (ms)
+const PEEK_REST_MS = 24 * 3600 * 1000
+
+/** Whether the line may show: not yet this visit, not dismissed in the last day. Blocked storage = never. */
+export function peekAllowed(): boolean {
+  try {
+    if (sessionStorage.getItem(PEEK_KEY) === '1') return false
+    const off = Number(localStorage.getItem(PEEK_OFF) || 0)
+    return !(off > 0 && Date.now() - off < PEEK_REST_MS)
+  } catch {
+    return false
+  }
+}
+
+/** Shown once, or the chat was opened: not again this visit. */
+export function peekSpent(): void {
+  try {
+    sessionStorage.setItem(PEEK_KEY, '1')
+  } catch {
+    /* ignore */
+  }
+}
+
+/** "Not now": not for a day. */
+export function peekDismissed(): void {
+  peekSpent()
+  try {
+    localStorage.setItem(PEEK_OFF, String(Date.now()))
+  } catch {
+    /* ignore */
+  }
+}
