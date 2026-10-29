@@ -1656,6 +1656,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("first-screen", lambda pg: smooth.first_screen(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
+            jobs.append(("hover-pill", lambda pg: smooth.hover_pill(pg)))
             jobs.append(("page-glide", lambda pg: smooth.page_glide(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:

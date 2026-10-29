@@ -10,6 +10,7 @@ import { dealSets } from '../lib/home'
 import { NAV_ICONS } from '../lib/icons'
 import { useCartAddTick, useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
+import { HoverPill } from '../ui/HoverPill'
 import { MegaNav } from './MegaNav'
 import { useShell } from './ShellContext'
 
@@ -151,7 +152,7 @@ export function StickyHeader() {
 
   // `hit`: 40px drawn, a 44px tap area on touch screens (market.css) — the look is unchanged
   const linkBase = 'hit relative inline-flex h-10 items-center gap-1.5 rounded-sm px-3 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
-  const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:bg-plum-wash hover:text-ink')
+  const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:text-ink')
 
   return (
     <header ref={headerRef} className="header-lift sticky top-0 z-header">
@@ -232,7 +233,8 @@ export function StickyHeader() {
               "Search “20W charger”". Labelling all four would cost ~100px more and squeeze the
               trigger under 140px, so Orders (receipt) and My YQ (person/rep photo) — conventional
               icons — keep title + aria-label until 1280, where everything is labelled. */}
-          <nav aria-label={S.nav.shortcuts} className="ms-auto hidden shrink-0 items-center gap-0.5 md:flex">
+          <nav aria-label={S.nav.shortcuts} className="relative ms-auto hidden shrink-0 items-center gap-0.5 md:flex">
+            <HoverPill className="rounded-sm" />
             {hasDeals && (
               <Link to="/shop?f=deals" aria-current={dealsActive ? 'page' : undefined} className={linkCls({ isActive: dealsActive })}>
                 <span aria-hidden="true" className="grid h-5 w-5 place-items-center rounded-full bg-deal-soft text-deal-ink">
@@ -298,7 +300,8 @@ export function StickyHeader() {
 
       {showStrip && categories.length > 0 && (
         <div className="glass border-b border-line">
-          <div className="container-m no-scrollbar flex h-11 items-center gap-1.5 overflow-x-auto">
+          <div className="container-m no-scrollbar relative flex h-11 items-center gap-1.5 overflow-x-auto">
+            <HoverPill className="rounded-full" />
             {categories.map((c) => {
               const to = `/t/${categorySlug(c)}`
               const active = pathname === to
@@ -308,7 +311,7 @@ export function StickyHeader() {
                   to={to}
                   className={cn(
                     'hit relative shrink-0 rounded-full px-3.5 py-1.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
-                    active ? 'bg-ink text-white' : 'text-ink-2 hover:bg-plum-wash hover:text-ink',
+                    active ? 'bg-ink text-white' : 'text-ink-2 hover:text-ink',
                   )}
                 >
                   {niceCategory(c)}

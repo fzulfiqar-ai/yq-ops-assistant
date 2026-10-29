@@ -1004,6 +1004,51 @@ def reveal_wave(page: Page) -> list[Finding]:
     return out or [("note", "reveal-wave", f"F4: a row rises in reading order ({by_reading} ms) from {r['ty']:.0f}px; titles rise with the scroll", r)]
 
 
+# ── K2 hover glide (29-Oct-2026) ───────────────────────────────────────────────────────────────
+PILL = r"""
+(sel) => {
+  const items = [...document.querySelectorAll(sel)].filter((a) => a.getBoundingClientRect().width > 0);
+  if (items.length < 2) return null;
+  return items.slice(0, 2).map((a) => { const r = a.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, w: r.width }; });
+}
+"""
+PILL_STATE = r"""
+(sel) => {
+  const a = document.querySelector(sel);
+  const box = a && a.parentElement;
+  const pills = box ? [...box.querySelectorAll(':scope > [data-hover-pill]')] : [];
+  if (!pills.length) return { pills: 0 };
+  const p = pills[0]; const r = p.getBoundingClientRect();
+  return { pills: pills.length, on: p.dataset.on || null, left: r.left, w: r.width, el: p.dataset.qaSeen || (p.dataset.qaSeen = 'x' + Math.random().toString(36).slice(2)) };
+}
+"""
+
+
+def hover_pill(page: Page) -> list[Finding]:
+    """K2, a mouse: one soft pill slides under whichever category chip in the header strip the mouse
+    is on — the same element moving from chip to chip, not each chip lighting up on its own."""
+    sel = "header a[href^='/t/']"
+    pos = page.evaluate(PILL, sel)
+    if not pos:
+        return [("warn", "hover-pill", "K2: fewer than two chips in the header strip, not measured", None)]
+    page.mouse.move(pos[0]["x"], pos[0]["y"], steps=3)
+    page.wait_for_timeout(400)
+    a = page.evaluate(PILL_STATE, sel)
+    page.mouse.move(pos[1]["x"], pos[1]["y"], steps=3)
+    page.wait_for_timeout(400)
+    b = page.evaluate(PILL_STATE, sel)
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    vals = {"first": a, "second": b, "chips": pos}
+    if not a.get("pills"):
+        return [("fail", "hover-pill", "K2: no hover pill in the header strip (each chip lights up on its own)", vals)]
+    out: list[Finding] = []
+    if a.get("el") != b.get("el") or b.get("pills") != 1:
+        out.append(("fail", "hover-pill", "K2: the hover pill is not one element moving between chips", vals))
+    if abs(b["left"] - pos[1]["left"]) > 3 or abs(b["w"] - pos[1]["w"]) > 3 or b.get("on") != "1":
+        out.append(("fail", "hover-pill", "K2: the pill did not settle under the second chip", vals))
+    return out or [("note", "hover-pill", "K2: one pill slides from chip to chip under the mouse", vals)]
+
+
 # ── K7 page glide, F2 hero drift, F3 header shadow (29-Oct-2026) ──────────────────────────────────
 def page_glide(page: Page) -> list[Finding]:
     """K7, a PC: an in-app page change glides in with presence (a 16 px rise over about 320 ms)."""
