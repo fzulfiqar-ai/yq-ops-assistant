@@ -3,20 +3,33 @@ import { Navigate, useLocation } from 'react-router-dom'
 import { Lock, Loader2, CloudOff, RefreshCw, ServerCrash } from 'lucide-react'
 import { isManagement, useAuth, type Role } from '@/lib/auth'
 import { managementMayOpen } from '@/lib/nav'
-import { Logo } from './Logo'
+import { BootScreen } from '@/boot/BootFrame'
+import { hasStoredSession, shellKind, useReleaseBoot } from '@/boot/handoff'
 import { Button } from './ui/button'
 import { AppShell } from './AppShell'
 import { SalesmanShell } from './SalesmanShell'
 
-function Splash() {
-  return (
-    <div className="grid h-screen place-items-center bg-background">
-      <div className="flex flex-col items-center gap-4 text-muted-foreground">
-        <Logo float className="h-14 w-14 rounded-2xl" />
-        <Loader2 className="animate-spin" size={20} />
-      </div>
-    </div>
-  )
+/**
+ * How long a signed-in page waits for its user's first /me on the shell's own outline before the
+ * honest connecting screen replaces it. A normal sign-in answers well inside this (the 28-Oct audit:
+ * every sign-in flashed "Connecting… taking longer than usual" for the few hundred ms /me took).
+ */
+const CONNECTING_AFTER_MS = 4000
+
+/**
+ * The first /me has not answered — a sign-in, or a returning user with no remembered /me. The shell's
+ * outline (the served first frame's, boot/frames.ts: the office's, or the field app's for a remembered
+ * salesman) for up to 4 s, then the connecting screen, which says what failed and retries. One instance
+ * covers the boot and the wait after it (ProtectedRoute returns it at the same place), so the 4 s are
+ * counted once.
+ */
+function Waiting() {
+  const [late, setLate] = useState(false)
+  useEffect(() => {
+    const t = window.setTimeout(() => setLate(true), CONNECTING_AFTER_MS)
+    return () => window.clearTimeout(t)
+  }, [])
+  return late ? <Connecting /> : <BootScreen kind={shellKind()} />
 }
 
 /** Server said 401/403 — a REAL permissions problem. */
@@ -72,8 +85,8 @@ function ApiOffline() {
 }
 
 /**
- * No `me` yet and /me has not answered (first sign-in on this device — a returning user opens
- * straight into the app from the last good /me). It used to say "Waking the server… ~30 seconds"
+ * No `me` yet and /me has not answered for 4 s (Waiting above shows the shell's outline until then; a
+ * returning user opens straight into the app from the last good /me). It used to say "Waking the server… ~30 seconds"
  * for EVERY failure, including a 500 from a server that was wide awake (29-Sep-2026); the copy now
  * says what actually happened. After ~2 minutes of failed polls it escalates to "can't reach",
  * so nobody stares at a spinner believing it's about to recover.
@@ -122,12 +135,17 @@ function Connecting() {
 
 export function ProtectedRoute() {
   const { session, me, meState, loading } = useAuth()
-  if (loading) return <Splash />
-  if (!session) return <Navigate to="/login" replace />
+  // whatever this paints takes over from the served first frame (#yq-boot), which showed the same
+  // picture: the night for no stored session, the shell's outline for one (src/boot/portal-boot.js)
+  useReleaseBoot()
+  if (loading) return hasStoredSession() ? <Waiting /> : <BootScreen kind="night" />
+  // <Navigate> paints nothing until its effect runs, and a browser can paint in between: the night
+  // stays under it, so the way to the login (which paints the same night) never shows a blank frame
+  if (!session) return <><BootScreen kind="night" /><Navigate to="/login" replace /></>
   if (!me) {
     if (meState === 'denied') return <NoAccess />
     if (meState === 'offline') return <ApiOffline />
-    return <Connecting />
+    return <Waiting />
   }
   // A salesman works from a phone in a shop — two tabs, no office sidebar.
   if (me.role === 'salesman') return <SalesmanShell />
