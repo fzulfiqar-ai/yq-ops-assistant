@@ -287,6 +287,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         referral_code: str | None = Field(default=None, max_length=32)
         # v2: a tile or chip (market_assist.ACTIONS), answered from data with no model call; `message` is its label
         action: str | None = Field(default=None, max_length=16)
+        # v2: the ids of the turns on screen; the server reads the chat so far from its own log (`history` is
+        # still accepted from older pages and ignored: a page could forge an "assistant" line)
+        history_ids: list[int] = Field(default_factory=list, max_length=6)
 
     class FeedbackRequest(BaseModel):
         kind: str = Field(max_length=16)
@@ -635,12 +638,20 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @limiter.limit("30/minute")                              # per address: the net
     @limiter.limit("6/minute", key_func=device_key)          # per address + device
     @limiter.limit("60/day", key_func=device_key)
-    def market_ask(request: Request, body: AskRequest) -> dict:
+    def market_ask(request: Request, body: AskRequest):
         """One chat turn: what the merchant wants, answered from the public catalog and the
-        device's own orders only. Never places an order; `add` lines wait for the merchant's tap."""
+        device's own orders only. Never places an order; `add` lines wait for the merchant's tap.
+        `Accept: text/event-stream` (v2): the same turn streamed (its stages, the cards before the
+        sentence, then the result); text/event-stream because GZipMiddleware leaves that type alone,
+        so each event leaves at once. Validation, the switch and the limits answer before the stream."""
         _assist_open()
         from app import market_assist
-        return market_assist.ask(body.model_dump(), ip=_ip(request))
+        if "text/event-stream" in (request.headers.get("accept") or ""):
+            from fastapi.responses import StreamingResponse
+            return StreamingResponse(market_assist.ask_events(body.model_dump(), ip=_ip(request)),
+                                     media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
+        return market_assist.ask_safe(body.model_dump(), ip=_ip(request))
 
     @app.post("/public/market/voice")
     @limiter.limit("20/minute")                              # per address: the net

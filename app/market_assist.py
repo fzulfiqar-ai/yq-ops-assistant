@@ -53,6 +53,10 @@ MAX_HISTORY = 6
 MAX_CARDS = 6
 MAX_USUAL = 8
 DEFAULT_DAILY_CAP = 800
+# speed (v2): the chat's model calls fail over fast, and a provider that timed out on a chat turn sits out 30 s,
+# not the router's 300 s, so a merchant's tight deadline never benches a model the owner's reports need
+_BENCH = 30.0
+_ANSWER_BY = 5.0          # seconds into the turn after which the sentence is the template's (the cards are ready)
 _LANG_NAMES = {"en": "English", "ar": "Arabic", "ur": "Urdu", "hi": "Hindi", "ml": "Malayalam"}
 _STOCK_WORDS = {"in_stock": "in stock", "low_stock": "only a few left", "out_of_stock": "sold out"}
 
@@ -87,6 +91,113 @@ def mask(text: str | None) -> str:
 
 def _clean_text(s, limit: int) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip()[:limit]
+
+
+# ── names: a shop or customer name the merchant types never reaches a provider (docs/CLAUDE.md) ───────────
+# The names are the Focus customers (read as yq_readonly, as app/mcp_server.py does) and the marketplace's
+# shops; built off the request path once an hour, the last good copy kept. A turn looks up windows of 4 words
+# down to 1 in sets: microseconds. Photos and recordings cannot be redacted (they go to a model as they are).
+
+_AR_FOLD = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ة": "ه", "ى": "ي", "ـ": None})
+_AR_MARKS = re.compile("[ً-ْ]")
+_WORD = re.compile(r"[0-9A-Za-z؀-ۿ]+")
+_NAME_SUFFIX = re.compile(r"(?i)\b(?:w\.?\s?l\.?\s?l|co|company|trading|est|establishment|spc|bsc|ltd)\b\.?|شركة|مؤسسة")
+# a one-word "name" that is also an everyday word stays: masking it would blind the model, not protect anyone
+_NAME_COMMON = frozenset({"mobile", "mobiles", "phone", "phones", "shop", "store", "center", "centre", "electronics",
+                          "accessories", "al", "new", "star", "city", "world", "bahrain", "manama", "riffa", "gold",
+                          "best", "smart", "tech", "telecom", "digital", "home", "cash", "customer", "yq", "vfan"})
+_names_lock = threading.Lock()
+_names: dict = {"at": 0.0, "busy": False, "index": {}}
+NAMES_TTL = 3600.0
+
+
+def _fold(word: str) -> str:
+    return _AR_MARKS.sub("", word.lower().translate(_AR_FOLD))
+
+
+def _build_names() -> dict[int, set[str]]:
+    raw: set[str] = set()
+    try:
+        from app.ai import exec_sql
+        for sql in ("SELECT DISTINCT customer_name AS n FROM v_sales WHERE customer_name IS NOT NULL LIMIT 4000",
+                    "SELECT DISTINCT account AS n FROM v_receivables LIMIT 4000"):
+            raw.update(str(r.get("n") or "") for r in (exec_sql(sql) or []))
+    except Exception as e:  # noqa: BLE001
+        log.debug("assist: Focus names unavailable: %s", e)
+    try:
+        for r in shop.get_client().table("shop_customers").select("name,shop").limit(5000).execute().data or []:
+            raw.update(str(r.get(k) or "") for k in ("name", "shop"))
+    except Exception as e:  # noqa: BLE001
+        log.debug("assist: shop names unavailable: %s", e)
+    shelf = set()
+    for it in _cat.get("items") or []:
+        text = " ".join(str(it.get(k) or "") for k in ("display_name", "brand", "category"))
+        shelf.update(_fold(w) for w in _WORD.findall(text))
+    index: dict[int, set[str]] = {}
+    for name in raw:
+        if "cash customer" in name.lower():
+            continue
+        words = [_fold(w) for w in _WORD.findall(_NAME_SUFFIX.sub(" ", name))]
+        if not words or len(words) > 4 or sum(len(w) for w in words) < 4:
+            continue
+        if len(words) == 1 and (words[0] in _NAME_COMMON or words[0] in shelf or words[0].isdigit()):
+            continue
+        index.setdefault(len(words), set()).add(" ".join(words))
+    return index
+
+
+def _refresh_names() -> None:
+    try:
+        index = _build_names()
+        if index:
+            _names["index"] = index
+    finally:
+        _names.update(at=time.time(), busy=False)
+
+
+def redact_names(text: str) -> str:
+    """Known shop and customer names out of the text (each becomes [shop]); the list is (re)built in the
+    background when it is older than an hour, so no turn waits for it."""
+    with _names_lock:
+        if not _names["busy"] and time.time() - _names["at"] > NAMES_TTL:
+            _names["busy"] = True
+            threading.Thread(target=_refresh_names, name="assist-names", daemon=True).start()
+    index = _names["index"]
+    if not text or not index:
+        return text
+    spans = [(m.start(), m.end(), _fold(m.group(0))) for m in _WORD.finditer(text)]
+    out, i, last = [], 0, 0
+    while i < len(spans):
+        for n in (4, 3, 2, 1):
+            if n in index and i + n <= len(spans) and " ".join(w for _s, _e, w in spans[i:i + n]) in index[n]:
+                out.append(text[last:spans[i][0]] + "[shop]")
+                last, i = spans[i + n - 1][1], i + n
+                break
+        else:
+            i += 1
+    return "".join(out) + text[last:]
+
+
+def server_history(ids, session_id: str | None, device_id: str | None) -> list[dict]:
+    """The chat so far, from our own log, not the browser's copy (a page could forge an "assistant" line): the
+    turns whose ids the page holds, of this session AND device, oldest first, with the cards each one showed."""
+    ids = [int(i) for i in (ids or []) if str(i).isdigit()][-3:]
+    if not ids or not session_id or not device_id:
+        return []
+    try:
+        rows = (shop.get_client().table("shop_ask_turns").select("id,message,reply,item_codes")
+                .in_("id", ids).eq("session_id", session_id).eq("device_id", device_id).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.debug("assist: history read failed: %s", e)
+        return []
+    out = []
+    for r in sorted(rows, key=lambda r: r.get("id") or 0):
+        out.append({"role": "user", "text": _clean_text(r.get("message"), MAX_MESSAGE)})
+        codes = ", ".join(str(c) for c in (r.get("item_codes") or [])[:6])
+        reply = _clean_text(r.get("reply"), 300) + (f" [cards: {codes}]" if codes else "")
+        if reply.strip():
+            out.append({"role": "assistant", "text": reply.strip()})
+    return out[-MAX_HISTORY:]
 
 
 # ── the public catalog, parsed once per refresh ────────────────────────────────────────────────
@@ -231,7 +342,7 @@ def understand(message: str, history: list[dict], item: dict | None) -> tuple[di
     msgs = [{"role": "system", "content": _UNDERSTAND + "\n" + FENCE_RULE},
             {"role": "user", "content": "\n\n".join(parts)}]
     data, prov = chat_json(msgs, validate=_valid_understanding, tier=1, task="assist", max_tokens=260,
-                           request_timeout=7.0, max_providers=3)
+                           request_timeout=4.0, max_providers=2, timeout_bench=_BENCH)
     lang = str(data.get("lang") or "").strip().lower()
     topic = str(data.get("topic") or "").strip().lower()
     issue = str(data.get("issue") or "").strip().lower()
@@ -433,7 +544,8 @@ def read_list(lines: list[dict]) -> tuple[list[dict], str]:
     msgs = [{"role": "system", "content": _READ_LIST + "\n" + FENCE_RULE},
             {"role": "user", "content": fence(numbered, "order list", 4000)}]
     data, prov = chat_json(msgs, validate=lambda d: isinstance(d.get("lines"), list), tier=1, task="assist",
-                           max_tokens=60 + 45 * len(lines), request_timeout=8.0, max_providers=3)
+                           max_tokens=60 + 45 * len(lines), request_timeout=6.0, max_providers=2,
+                           timeout_bench=_BENCH)
     by_n = {}
     for x in data["lines"]:
         if isinstance(x, dict):
@@ -720,8 +832,8 @@ def answer(message: str, lang: str, facts: str, allowed: set[str] | None = None)
     msgs = [{"role": "system", "content": _ANSWER.format(language=language) + "\n" + FENCE_RULE},
             {"role": "user", "content": fence(facts, "catalog", 4000) + "\n\nThe merchant wrote:\n"
              + fence(message, "message", 800)}]
-    text = chat(msgs, tier=2, task="assist", temperature=0.3, max_tokens=220, request_timeout=8,
-                max_429_retries=0, max_providers=3)
+    text = chat(msgs, tier=2, task="assist", temperature=0.3, max_tokens=220, request_timeout=3.5,
+                max_429_retries=0, max_providers=2, timeout_bench=_BENCH)
     return clean_reply(text or "", allowed), last_provider()
 
 
@@ -870,14 +982,17 @@ def _act(action: str, cat: dict, tokens: list[str], ref: str | None, T: dict, de
     return _h_handoff(tokens, ref, T)
 
 
-def ask(body: dict, ip: str | None = None) -> dict:
-    """One chat turn. `body` is the validated request (see app/shop_api.py AskRequest)."""
+def _no_emit(_kind: str, _data: dict) -> None:
+    return None
+
+
+def ask(body: dict, ip: str | None = None, emit=_no_emit) -> dict:
+    """One chat turn. `body` is the validated request (see app/shop_api.py AskRequest). `emit(kind, data)`
+    hears the turn's progress for the streamed reply (ask_events): a "stage", and the "cards" before the
+    model writes its sentence."""
     t0 = time.monotonic()
     message = mask(_clean_text(body.get("message"), MAX_MESSAGE))
     ui_lang = "ar" if body.get("lang") == "ar" else "en"
-    history = [{"role": "assistant" if h.get("role") == "assistant" else "user",
-                "text": mask(_clean_text(h.get("text"), MAX_MESSAGE))}
-               for h in (body.get("history") or [])[-MAX_HISTORY:] if isinstance(h, dict)]
     tokens = [str(t) for t in (body.get("order_tokens") or []) if isinstance(t, str)][:20]
     ref = _clean_text(body.get("referral_code"), 32).lower() or None
     cat = public_catalog()
@@ -903,7 +1018,8 @@ def ask(body: dict, ip: str | None = None) -> dict:
 
     if pasted:
         try:
-            lines, prov = read_list(pasted)
+            lines, prov = read_list([dict(ln, text=redact_names(ln["text"])) for ln in pasted])
+            lines = [dict(ln, text=raw["text"]) for ln, raw in zip(lines, pasted)]
         except AllProvidersFailed as e:
             log.info("assist: no model read the list, matching it as written: %s", e)
             lines, prov = pasted, ""
@@ -912,13 +1028,16 @@ def ask(body: dict, ip: str | None = None) -> dict:
         return _finish(res, log_row, "miss" if res["miss"] else "answered", prov,
                        "; ".join(ln["query"] for ln in lines)[:300], t0, ms_understand=_ms(t0))
 
+    history = [dict(h, text=redact_names(h["text"]))
+               for h in server_history(body.get("history_ids"), log_row["session_id"], log_row["device_id"])]
     try:
-        understood, prov1 = understand(message, history, item)
+        understood, prov1 = understand(redact_names(message), history, item)
     except AllProvidersFailed as e:
         log.info("assist: no model understood the message: %s", e)
         res = _result("find", "", fallback=True)
         return _finish(res, log_row, "fallback", "", "", t0)
     ms_u = _ms(t0)
+    emit("stage", {"key": "checking"})
 
     intent = understood["intent"]
     tl = _lang_for_templates(understood["lang"], ui_lang)
@@ -972,9 +1091,10 @@ def ask(body: dict, ip: str | None = None) -> dict:
     if intent == "chat":
         facts, amounts = _facts_policy(cat["settings"])
         text, prov2, t1 = "", "", time.monotonic()
-        if t1 - t0 < 10:
+        if t1 - t0 < _ANSWER_BY:
+            emit("stage", {"key": "writing"})
             try:
-                text, prov2 = answer(message, understood["lang"] or ui_lang, facts, amounts)
+                text, prov2 = answer(redact_names(message), understood["lang"] or ui_lang, facts, amounts)
             except AllProvidersFailed:
                 text, prov2 = "", ""
         return done(_result("chat", text or T["help"]), "answered", prov2, _ms(t1))
@@ -1005,9 +1125,11 @@ def ask(body: dict, ip: str | None = None) -> dict:
                "alternative" if it["item_code"] in instead else "match"} for it in found]
              + [{"code": c, "why": "alternative"} for c in shown[len(found):]])
     text, prov2, t1 = "", "", time.monotonic()
-    if t1 - t0 < 10:
+    if t1 - t0 < _ANSWER_BY:
+        emit("cards", _result(intent, "", items=shown, add=add, cards=cards, alts=alts))
+        emit("stage", {"key": "writing"})
         try:
-            text, prov2 = answer(message, understood["lang"] or ui_lang, _facts_products(found, alts))
+            text, prov2 = answer(redact_names(message), understood["lang"] or ui_lang, _facts_products(found, alts))
         except AllProvidersFailed:
             text = ""
     fallback_line = (T["sold_out_alts"].format(code=found[0]["item_code"]) if found[0]["item_code"] in alts
@@ -1018,6 +1140,50 @@ def ask(body: dict, ip: str | None = None) -> dict:
 
 def _ms(since: float) -> int:
     return int((time.monotonic() - since) * 1000)
+
+
+def ask_safe(body: dict, ip: str | None = None, emit=_no_emit) -> dict:
+    """ask(), but a server error (a database hiccup, a bug) still logs the turn as 'error' and answers with the
+    page's own search (fallback) instead of a 500 with no trace."""
+    try:
+        return ask(body, ip, emit)
+    except Exception as e:  # noqa: BLE001
+        log.warning("assist: turn failed: %s", e, exc_info=True)
+        row = {"session_id": _clean_text(body.get("session_id"), 64) or None,
+               "device_id": _clean_text(body.get("device_id"), 64) or None,
+               "lang": "ar" if body.get("lang") == "ar" else "en",
+               "message": mask(_clean_text(body.get("message"), MAX_MESSAGE)) or "[error]", "ip": ip}
+        return _finish(_result("find", "", fallback=True), row, "error", "", "", time.monotonic())
+
+
+def _sse(kind: str, data: dict) -> str:
+    return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def ask_events(body: dict, ip: str | None = None):
+    """The streamed turn (Accept: text/event-stream): "stage" events while the turn runs, "cards" as soon as the
+    products are known, then "result" (the whole answer, its turn id included). The turn runs in its own thread,
+    so a phone that drops the connection still has its turn finished and logged."""
+    import queue
+    q: queue.Queue = queue.Queue()
+
+    def run() -> None:
+        try:
+            q.put(("result", ask_safe(body, ip, emit=lambda k, d: q.put((k, d)))))
+        finally:
+            q.put(None)
+
+    threading.Thread(target=run, name="assist-turn", daemon=True).start()
+    yield _sse("stage", {"key": "reading"})
+    while True:
+        try:
+            item = q.get(timeout=20)
+        except queue.Empty:
+            yield ": still working\n\n"           # a comment line keeps proxies from closing a quiet stream
+            continue
+        if item is None:
+            return
+        yield _sse(*item)
 
 
 # ── photos: a product or a box to the nearest items, a written list to lines ───────────────────
@@ -1064,7 +1230,7 @@ def photo(body: dict, ip: str | None = None) -> dict:
         {"type": "image_url", "image_url": {"url": f"data:image/{m.group(1)};base64,{m.group(2).strip()}"}}]}]
     try:
         data, prov = chat_json(msgs, validate=_valid_photo, tier=1, task="assist", max_tokens=500,
-                               request_timeout=15.0, max_providers=3, vision=True)
+                               request_timeout=10.0, max_providers=2, vision=True, timeout_bench=_BENCH)
     except AllProvidersFailed as e:
         log.info("assist: no model read the photo: %s", e)
         return _finish(_result("photo", T["photo_busy"], fallback=True), log_row, "fallback", "", "", t0)
