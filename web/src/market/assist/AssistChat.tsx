@@ -582,7 +582,7 @@ export function AssistChat({ itemCode, first, onClose, titleId }: { itemCode: st
                 }}
                 onKeyDown={onKey}
                 enterKeyHint="send"
-                className="max-h-[120px] min-h-11 flex-1 resize-none rounded-xl border border-line bg-surface px-3.5 py-2.5 text-[16px] leading-snug text-ink placeholder:text-ink-3 focus-visible:border-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/40 disabled:opacity-60"
+                className="max-h-[120px] min-h-11 min-w-0 flex-1 resize-none rounded-xl border border-line bg-surface px-3.5 py-2.5 text-[16px] leading-snug text-ink placeholder:text-ink-3 focus-visible:border-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/40 disabled:opacity-60"
               />
               <button
                 type="submit"
