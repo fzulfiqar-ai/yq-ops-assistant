@@ -94,6 +94,8 @@ export default function Home() {
   const { viewport } = useShell()
   const { data, status, items, itemsByCode, categories, rep, recognized, campaigns } = m
   const lines = useCartLines()
+  // the cart this visit to Home opened with: an Add made here never drops a card in above the hand
+  const [cartAtStart] = useState(lines.length > 0)
   usePageTitle(null, false, rep ? `${rep.first_name || rep.name} · ${S.brand}` : `${S.brand} · ${S.company}`)
   useSearchBand()
 
@@ -194,7 +196,7 @@ export default function Home() {
   // the Order again card (cart empty, last order known — or still loading) already offers the
   // reorder: no second button above it
   const againCard = lines.length === 0 && recognized && (againLines.length > 0 || reorder.sold.length > 0 || pendingOrders)
-  const continueTop = lines.length > 0 || recognized
+  const continueTop = cartAtStart || recognized
   // With nothing to continue the card is the paste card, and it keeps its mid-page slot (HomeBelow)
   // — the phone's one paste moment besides the closing band, which is why the phone deck drops
   // 'd:quick'. Desktop already makes that offer twice (the hero/aside and the band), so there the

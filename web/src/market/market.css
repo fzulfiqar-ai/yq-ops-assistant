@@ -796,23 +796,15 @@
   }
 }
 /* PC edition (F4, 29-Oct-2026): on a desktop a card rises further and settles (24 px, from .97 scale)
- * over 560 ms, in a wave across its row (--i is the column: 60 ms a step, at most 6), and its photo
- * comes into focus as it arrives (a soft blur clearing; a mouse PC only — the blur is a GPU job). A
- * flick or a jump still shows everything at once (.is-instant), and a photo decoded mid-scroll keeps
- * its instant show ([data-instant]). */
+ * over 560 ms, in a wave across its row (--i is the column: 60 ms a step, at most 6). A flick or a jump
+ * still shows everything at once (.is-instant). The photo-focus blur that came with it was measured in
+ * real Chrome by the design review and dropped: 8-12 frames over 50 ms per flick with it, 4-5 without
+ * (the plan made it conditional on that budget). */
 @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
   html[data-reveal]:not([data-lite]) .reveal {
     transform: translate3d(0, 24px, 0) scale(0.97);
     transition: opacity 560ms var(--m-ease-out), transform 560ms var(--m-ease-out);
     transition-delay: calc(min(var(--i, 0), 6) * 60ms);
-  }
-}
-@media (prefers-reduced-motion: no-preference) and (min-width: 1024px) and (hover: hover) and (pointer: fine) {
-  html[data-reveal]:not([data-lite]) .reveal:not(.is-in) .m-photo {
-    filter: blur(8px);
-  }
-  html[data-reveal]:not([data-lite]) .reveal:not(.is-instant) .m-photo:not([data-instant]) {
-    transition: filter 640ms var(--m-ease-out) calc(min(var(--i, 0), 6) * 60ms + 80ms);
   }
 }
 /* Section titles rise out of a mask as they come up the screen (F4). A scroll-driven animation: no
@@ -856,6 +848,9 @@
   html[data-intro] .intro-disc {
     animation: m-intro 520ms var(--m-ease-out) both;
     animation-delay: calc(var(--k, 0) * 60ms + 120ms);
+  }
+  html[data-intro] .intro-wait .intro-disc {
+    animation-play-state: paused;
   }
   html[data-intro] .intro-steps > * {
     animation: m-intro 560ms var(--m-ease-out) both;

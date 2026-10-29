@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowRight, Boxes, CheckCheck, ClipboardList, PackageOpen, RotateCcw, SquarePen } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -49,7 +49,10 @@ export function ContinueRestock({
 }) {
   const { recognized } = useMarket()
   const lines = useCartLines()
-  if (lines.length) return <ResumeCard lines={lines} className={className} />
+  // only a cart the merchant came back with: a line added on this visit must not swap the card in
+  // under the hand (the page jumped ~388 px); it shows on the next visit
+  const [cartAtStart] = useState(lines.length > 0)
+  if (lines.length && cartAtStart) return <ResumeCard lines={lines} className={className} />
   if (recognized && (lastLines.length || soldLines.length)) return <AgainCard lines={lastLines} sold={soldLines} placedAt={placedAt} className={className} />
   if (pending) return <AgainSkeleton className={className} />
   return paste ? <PasteCard className={className} /> : null

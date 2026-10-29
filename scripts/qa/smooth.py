@@ -993,6 +993,7 @@ def first_screen_slow(page: Page, base: str, delay_ms: int = 2500) -> list[Findi
       return { intro: document.documentElement.hasAttribute('data-intro'), running: discs.filter((li) => li.getAnimations().some((a) => a.animationName === 'm-intro')).length, discs: discs.length };
     }""")
     page.wait_for_timeout(3000)
+    page.unroute_all(behavior="ignoreErrors")
     r["intro_after_3s"] = page.evaluate("() => document.documentElement.hasAttribute('data-intro')")
     if not r["intro"] or r["running"] < 3:
         return [("fail", "first-screen", f"F5: with the catalogue {delay_ms} ms late the discs got no entrance ({r['running']} of {r['discs']} animating)", r)]
@@ -1027,6 +1028,67 @@ def calm(page: Page, base: str) -> list[Finding]:
     return out or [("note", "calm", "reduced motion: no glide, no entrance, no drift, nothing hidden", r)]
 
 
+def opening_logo(page: Page, base: str, delay_ms: int = 1200) -> list[Finding]:
+    """F5 / the opening (design review, 29-Oct-2026): while the opening's code is still arriving, the
+    logo tile of the first frame stays on screen - a plain night field used to cover it for ~1 s."""
+    page.add_init_script("try { sessionStorage.removeItem('yq-splash-session'); localStorage.removeItem('yq-splash-at') } catch (e) {}")
+    def slow(route):
+        page.wait_for_timeout(delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/assets/Splash-[^/]+\.js$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    page.wait_for_timeout(250)
+    seen = page.evaluate(r"""(ms) => new Promise((done) => {
+      const out = []; const t0 = performance.now();
+      const look = () => {
+        const tile = document.querySelector('#yq-boot img');
+        let state = 'no boot frame';
+        if (tile) { const r = tile.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); state = hit && (hit === tile || tile.contains(hit) || hit.closest('#yq-boot')) ? 'logo' : 'covered'; }
+        else if (document.querySelector('[data-splash]')) state = 'opening';
+        out.push(state);
+        if (performance.now() - t0 < ms) requestAnimationFrame(look); else done(out);
+      };
+      look();
+    })""", delay_ms)
+    page.unroute_all(behavior="ignoreErrors")
+    covered = seen.count("covered")
+    vals = {"frames": len(seen), "covered": covered, "states": sorted(set(seen))}
+    if covered:
+        return [("fail", "opening-logo", f"the logo of the first frame was covered for {covered} frames while the opening loaded", vals)]
+    return [("note", "opening-logo", "the logo stays on screen until the opening takes over", vals)]
+
+
+def discs_with_photos(page: Page, base: str, photo_delay_ms: int = 500) -> list[Finding]:
+    """F5 (design review): the category discs come in with their photos, not as empty circles that
+    fill in later - their entrance waits for the photos (a little, never long)."""
+    def slow(route):
+        page.wait_for_timeout(photo_delay_ms)
+        route.fallback()
+    page.route(re.compile(r".*/thumbs/.*\.(webp|png|jpg)(\?.*)?$"), slow)
+    page.goto(base + "/", wait_until="commit", timeout=40000)
+    try:
+        page.wait_for_selector("main ul li.intro-disc", timeout=20000)
+    except PWError:
+        return [("warn", "first-screen", "F5: no category discs on Home, not measured", None)]
+    r = page.evaluate(r"""() => new Promise((done) => {
+      const t0 = performance.now();
+      const look = () => {
+        const discs = [...document.querySelectorAll('main ul li.intro-disc')].slice(0, 8);
+        const started = discs.filter((li) => { const a = li.getAnimations().find((x) => x.animationName === 'm-intro'); return a && a.playState === 'running' && a.currentTime > 0 && parseFloat(getComputedStyle(li).opacity) > 0.05; });
+        if (started.length || performance.now() - t0 > 3000) {
+          const empty = started.filter((li) => { const i = li.querySelector('img'); return !i || !i.complete || !i.naturalWidth; }).length;
+          return done({ started: started.length, empty });
+        }
+        requestAnimationFrame(look);
+      };
+      look();
+    })""")
+    page.unroute_all(behavior="ignoreErrors")
+    if r["started"] and r["empty"]:
+        return [("fail", "first-screen", f"F5: {r['empty']} of {r['started']} discs came in before their photos (empty circles)", r)]
+    return [("note", "first-screen", "F5: the discs come in with their photos", r)]
+
+
 def reveal_wave(page: Page) -> list[Finding]:
     """F4, a PC: the cards of a grid row rise left to right (right to left in Arabic), from further
     down (about 24 px), and a section title below the fold rises with the scroll."""
@@ -1058,8 +1120,8 @@ def reveal_wave(page: Page) -> list[Finding]:
         out.append(("fail", "reveal-wave", f"F4: a card waits only {r['ty']:.0f}px below its place (a PC rise is about 24 px)", r))
     if r["titleAnim"] is None:
         out.append(("fail", "reveal-wave", "F4: a section title below the fold does not rise with the scroll", r))
-    if r.get("imgBlur") or r.get("tileBlur") is False:
-        out.append(("fail", "reveal-wave", "F4: the arriving photo's blur is on the image (a sold-out photo's own filter cannot ease with it), not on its tile", r))
+    if r.get("imgBlur") or r.get("tileBlur"):
+        out.append(("fail", "reveal-wave", "F4: an arriving photo is blurred (the focus effect was dropped: it cost 8-12 long frames per flick)", r))
     return out or [("note", "reveal-wave", f"F4: a row rises in reading order ({by_reading} ms) from {r['ty']:.0f}px; titles rise with the scroll", r)]
 
 
@@ -1237,7 +1299,7 @@ def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Findin
         const r = el.getBoundingClientRect(); const img = el.closest('article').querySelector('.m-photo-img');
         return /^Add · /.test(el.getAttribute('aria-label') || '') && r.top > 90 && r.bottom < innerHeight - 90 && r.left >= 0 && r.right <= innerWidth && img && img.complete && img.naturalWidth > 0;
       });
-      if (!b) return null; b.closest('article').dataset.qaAdd = '1'; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      if (!b) return null; b.closest('article').dataset.qaAdd = '1'; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, top: Math.round(b.closest('article').getBoundingClientRect().top) };
     }""")
     if not box:
         return [("warn", "add-flight", "K4: no direct Add button (Add · N) with its photo on screen, not measured", None)]
@@ -1245,14 +1307,19 @@ def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Findin
     page.evaluate(ADD_TRACK, 1300)
     page.mouse.click(box["x"], box["y"])
     page.wait_for_timeout(350)
+    moved = page.evaluate("(t) => { const a = document.querySelector('article[data-qa-add]'); return a ? Math.round(a.getBoundingClientRect().top) - t : null }", box["top"])
     # K8: on a wide PC the new line slides into the mini-cart column (the cart was empty: it is the only line)
     slid = page.evaluate("() => { const li = document.querySelector('aside section li'); return li ? li.getAnimations().some((a) => a.animationName === 'm-rise') : null }")
     page.wait_for_timeout(1050)
     s = page.evaluate("() => window.__qaAdd")
     page.evaluate("(k) => { try { localStorage.removeItem(k); localStorage.removeItem('yq-qty') } catch (e) {} }", cart_key)
-    vals = {"target": target, "flight": s}
+    after = page.evaluate(CART_TARGET)
+    vals = {"target": target, "target_after": after, "flight": s}
     if not s["seen"]:
         return [("fail", "add-flight", "K4: Add sent nothing to the cart (no flying photo)", vals)]
+    if not target and not after:
+        return [("fail", "add-flight", "K4: the photo flew to nowhere: no Restock target was on screen, and none came into view", vals)]
+    target = target or after
     out: list[Finding] = []
     if s["max"] > 1:
         out.append(("fail", "add-flight", f"K4: one Add made {s['max']} flying photos", vals))
@@ -1261,6 +1328,10 @@ def add_flight(page: Page, cart_key: str = "yq-shop-cart:market") -> list[Findin
     if target and s["last"] and (abs(s["last"]["x"] - target["x"]) > 48 or abs(s["last"]["y"] - target["y"]) > 48):
         out.append(("fail", "add-flight", f"K4: the photo landed {round(s['last']['x'] - target['x'])}/{round(s['last']['y'] - target['y'])} px from the cart ({target['kind']})", vals))
     vals["line_slid_in"] = slid
+    page.wait_for_timeout(10)
+    vals["card_moved_px"] = moved
+    if moved is not None and abs(moved) > 8:
+        out.append(("fail", "add-flight", f"K4: Add moved the page under the hand: the card jumped {moved}px (something was inserted above it)", vals))
     if s.get("hasCount") and not s.get("countRolled"):
         out.append(("fail", "add-flight", "K8: the Restock count changed without rolling to its new number", vals))
     if s.get("stepperSeen") and not s.get("stepperIn"):

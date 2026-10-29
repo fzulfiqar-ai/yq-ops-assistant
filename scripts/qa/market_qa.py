@@ -1776,6 +1776,8 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("first-screen", lambda pg: smooth.first_screen(pg, base)))
             jobs.append(("first-screen-slow", lambda pg: smooth.first_screen_slow(pg, base)))
             jobs.append(("calm", lambda pg: smooth.calm(pg, base)))
+            jobs.append(("opening-logo", lambda pg: smooth.opening_logo(pg, base)))
+            jobs.append(("discs-photos", lambda pg: smooth.discs_with_photos(pg, base)))
             jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("drift+shadow", lambda pg: smooth.hero_drift(pg) + smooth.header_shadow(pg)))
             jobs.append(("hover-pill", lambda pg: smooth.hover_pill(pg)))
@@ -1784,7 +1786,7 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("page-glide", lambda pg: smooth.page_glide(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:
-        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm"), init=smooth.LOW_MEMORY if name == "lite" else "")
+        pg = fresh(load=name not in ("lazy", "back-entry", "first-screen", "first-screen-slow", "calm", "opening-logo", "discs-photos"), init=smooth.LOW_MEMORY if name == "lite" else "")
         try:
             record(job(pg))
         except PWError as exc:

@@ -44,7 +44,8 @@ export function startGlide(): void {
   starting = true
   import('lenis')
     .then(({ default: Lenis }) => {
-      const g = new Lenis({ autoRaf: true, lerp: 0.1, allowNestedScroll: true, stopInertiaOnNavigate: true })
+      // lerp .12 (Lenis' default is .1): the same glide with a shorter tail after the last notch
+      const g = new Lenis({ autoRaf: true, lerp: 0.12, allowNestedScroll: true, stopInertiaOnNavigate: true })
       glide = g
       if (scrollLocked()) g.stop()
       onScrollLock((locked) => (locked ? g.stop() : g.start()))

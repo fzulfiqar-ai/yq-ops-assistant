@@ -171,11 +171,33 @@ function launchToCart(img: HTMLImageElement): void {
   const box = contentBox(img)
   if (box.width < 24 || box.top + box.height < 0 || box.top > window.innerHeight) return
   const target = cartTarget()
+  if (!target.el) {
+    // a phone's bar hides while scrolling down: call it back (MobileShell) and land on its Restock tab
+    // where it will rest - its transform is the bar's slide still to come
+    const tab = document.querySelector<HTMLElement>('[data-cart-target="3"]')
+    if (tab) {
+      window.dispatchEvent(new Event('yq:cart-flight'))
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const r = tab.getBoundingClientRect()
+          const stack = tab.closest<HTMLElement>('[data-bottom-stack]')
+          const t = stack ? getComputedStyle(stack).transform : 'none'
+          const dy = t && t !== 'none' ? new DOMMatrixReadOnly(t).m42 : 0
+          flyTile(img, box, { x: r.left + r.width / 2, y: r.top + r.height / 2 - dy, el: tab })
+        }),
+      )
+      return
+    }
+  }
   // a cart something else covers (a toast, a dim) is no place to land: no flight
   if (target.el) {
     const hit = document.elementFromPoint(target.x, target.y)
     if (hit && !target.el.contains(hit) && !hit.contains(target.el)) return
   }
+  flyTile(img, box, target)
+}
+
+function flyTile(img: HTMLImageElement, box: Box, target: { x: number; y: number; el: HTMLElement | null }): void {
   // a square tile of the photo, centred on it, at most 140 px: that is what flies
   const side = Math.min(box.width, box.height, 140)
   const x0 = box.left + box.width / 2
