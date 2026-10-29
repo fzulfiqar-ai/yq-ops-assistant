@@ -803,7 +803,11 @@ guard in `scripts/qa/smooth.py` that failed on the build before it.
   Browse menu fix (released on its own on 29-Oct-2026 as `dbe8899`), a fresh design review's nine gaps
   (Add never moves the page, a shelf's first frame draws sooner, one label style, an Orders page that
   explains, Arabic chips and the ⌘K badge that read right, stronger hover), the opening made smooth
-  from the first pixel, and living slides. Guards are listed in `scripts/qa/README.md`.
+  from the first pixel, and living slides. Guards are listed in `scripts/qa/README.md`. Round 2 (the
+  owner's laptop, desktop only): a product opens with the page still (`dcecaf4`), solid surfaces
+  (`cecb744`), the opening cheap on integrated graphics (`4930dd8`), the banner reel and the typed
+  search (`dd07157`), calm but alive and a pause that holds the banner (`d4580d9`); the Lenis glide
+  kept on measurement (native scrolling stalled 236-297 ms on his busy laptop, the glide 51-59 ms).
 - **Polish, ship 1 (28-Oct-2026, branch `worktree-polish-market`, `6258a44` → `e15a774`, released on the
   owner's go)** — smoothness and honesty. The photo fade-in, Back that lands where you were, the page
   glide with page-shaped skeletons (`RouteOutlet`, `lib/lazyPage` with an idle warm-up of the main

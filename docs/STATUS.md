@@ -7,8 +7,12 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 - The Browse menu fix (29-Oct-2026, `dbe8899`): the menu sits above the category strip, and a click keeps it open.
 - Built, not released (29-Oct-2026, branch `market-feel`; `docs/MARKETPLACE.md` § Motion and the release log): the
-  marketplace feel pass, the design review's fixes, the smooth opening and living slides. It ships on the owner's go
-  after his look on localhost.
+  marketplace feel pass, the design review's fixes, the smooth opening and living slides; then round 2 for the
+  owner's laptop (desktop only, the phone unchanged): a product opens with the page still, solid surfaces instead of
+  frosted glass, the opening cheap on integrated graphics, the banner reel with the count and the light, the typed
+  search, and "calm but alive" for computers that ask for reduced motion (his Windows had animations off, so the
+  site stood still; switched on for him). The Lenis glide stays (measured against native scrolling on his laptop).
+  It ships on the owner's go after his look on localhost.
 - YQ Assist, the marketplace chat (release assist1, 29-Oct-2026; `docs/MARKETPLACE.md` § YQ Assist): the free-AI
   repair, the chat with voice, photos and lists, and the portal page. The chat is shown only once the owner switches
   it on in Settings. The fix for voice uploads (the browser's `X-Device-Id` header was refused, `5e0279c`) is on
