@@ -1004,6 +1004,78 @@ def reveal_wave(page: Page) -> list[Finding]:
     return out or [("note", "reveal-wave", f"F4: a row rises in reading order ({by_reading} ms) from {r['ty']:.0f}px; titles rise with the scroll", r)]
 
 
+# ── K7 page glide, F2 hero drift, F3 header shadow (29-Oct-2026) ──────────────────────────────────
+def page_glide(page: Page) -> list[Finding]:
+    """K7, a PC: an in-app page change glides in with presence (a 16 px rise over about 320 ms)."""
+    link = page.locator("header a[href^='/t/']").first
+    if link.count() == 0:
+        return [("warn", "page-glide", "K7: no category link in the header strip, not measured", None)]
+    link.click()
+    # the glide starts when the new page commits (its code may still be arriving): watch for it
+    r = page.evaluate(r"""() => new Promise((done) => {
+      const t0 = performance.now();
+      const look = () => {
+        const a = document.getAnimations().find((x) => (x.animationName || '').startsWith('m-page-in') && x.playState === 'running');
+        if (a || performance.now() - t0 > 2500) return done(a || null);
+        requestAnimationFrame(look);
+      };
+      look();
+    }).then((a) => {
+      if (!a) return null;
+      const k = a.effect.getKeyframes()[0];
+      const m = k && k.transform ? k.transform.match(/translateY\((\d+(?:\.\d+)?)px\)/) || k.transform.match(/translate3d\(0(?:px)?, (\d+(?:\.\d+)?)px/) : null;
+      return { ms: Math.round(a.effect.getTiming().duration), rise: m ? parseFloat(m[1]) : null };
+    })""")
+    if not r:
+        return [("warn", "page-glide", "K7: the new page played no glide (a warm page with the same key?), not measured", None)]
+    out: list[Finding] = []
+    if r["ms"] < 300 or (r["rise"] or 0) < 14:
+        out.append(("fail", "page-glide", f"K7: the page glides {r['rise']}px over {r['ms']} ms (a PC page change rises about 16 px over 320 ms)", r))
+    return out or [("note", "page-glide", f"K7: the page glides {r['rise']}px over {r['ms']} ms", r)]
+
+
+def hero_drift(page: Page) -> list[Finding]:
+    """F2, a PC: scrolling away from the top slider, it drifts (moves down against the page, so it
+    scrolls slower) and dims a little — where the browser has scroll timelines."""
+    if not page.evaluate("() => CSS.supports('animation-timeline: view()')"):
+        return [("note", "hero-drift", "F2: no scroll timelines in this browser: the slider stands still (by design)", None)]
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(500)
+    page.evaluate("() => window.scrollTo(0, 320)")
+    page.wait_for_timeout(500)
+    r = page.evaluate(r"""() => {
+      const h = document.querySelector('.hero-drift');
+      if (!h) return null;
+      const t = getComputedStyle(h).transform;
+      return { ty: t && t !== 'none' ? Math.round(new DOMMatrixReadOnly(t).m42) : 0, opacity: parseFloat(getComputedStyle(h).opacity) };
+    }""")
+    page.evaluate("() => window.scrollTo(0, 0)")
+    if not r:
+        return [("fail", "hero-drift", "F2: the top slider has no drift (no .hero-drift)", None)]
+    if r["ty"] < 8 or r["opacity"] > 0.97:
+        return [("fail", "hero-drift", f"F2: 320 px down the slider drifted {r['ty']}px and dimmed to {r['opacity']:.2f}", r)]
+    return [("note", "hero-drift", f"F2: 320 px down the slider drifts {r['ty']}px and dims to {r['opacity']:.2f}", r)]
+
+
+def header_shadow(page: Page) -> list[Finding]:
+    """F3, a PC: the sticky header is flat at the top of the page and gains a soft shadow once the page
+    moves under it (a scroll-driven animation; without scroll timelines it stays flat)."""
+    if not page.evaluate("() => CSS.supports('animation-timeline: scroll()')"):
+        return [("note", "header-shadow", "F3: no scroll timelines in this browser: the header stays flat (by design)", None)]
+    read = "() => { const s = getComputedStyle(document.querySelector('header'), '::after'); return { content: s.content, opacity: parseFloat(s.opacity) } }"
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(400)
+    top = page.evaluate(read)
+    page.evaluate("() => window.scrollTo(0, 400)")
+    page.wait_for_timeout(400)
+    down = page.evaluate(read)
+    page.evaluate("() => window.scrollTo(0, 0)")
+    vals = {"at_top": top, "scrolled": down}
+    if top["content"] in ("none", "normal") or top["opacity"] > 0.1 or down["opacity"] < 0.9:
+        return [("fail", "header-shadow", "F3: the header does not gain its shadow as the page moves under it", vals)]
+    return [("note", "header-shadow", "F3: the header is flat at the top and gains its shadow as the page moves", vals)]
+
+
 # ── K4 add-to-restock flight (29-Oct-2026) ─────────────────────────────────────────────────────
 ADD_TRACK = r"""
 (ms) => {

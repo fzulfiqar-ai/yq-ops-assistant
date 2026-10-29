@@ -216,7 +216,7 @@ export default function Home() {
             // With one tile the stage keeps a little less of the row, so the single tile lands
             // landscape (~3:2) instead of a cramped square — the tile's own layout is copy beside
             // art, and that needs width.
-            <div className={cn('grid gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-cols-[minmax(0,1.95fr)_minmax(0,1fr)]' : stage.tiles.length === 1 && 'grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]')}>
+            <div className={cn('hero-drift grid gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-cols-[minmax(0,1.95fr)_minmax(0,1fr)]' : stage.tiles.length === 1 && 'grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]')}>
               <PromoSlider slides={stage.hero} layout="desktop" className="min-w-0" />
               {stage.tiles.length > 0 && (
                 <ul className={cn('grid min-w-0 gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-rows-2' : 'grid-rows-1')}>

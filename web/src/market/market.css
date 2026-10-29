@@ -416,6 +416,62 @@
 .m-page-in {
   animation: m-page-in var(--m-d-2) var(--m-ease-out) both;
 }
+/* K7 (29-Oct-2026): on a PC the next page glides in with presence, 16 px over 320 ms; a phone keeps
+ * the quick 8 px / 200 ms (its pages change under a thumb, many times a minute) */
+@keyframes m-page-in-pc {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (min-width: 1024px) {
+  .m-page-in {
+    animation: m-page-in-pc 320ms var(--m-ease-out) both;
+  }
+}
+/* F2: the top slider drifts and dims as the page leaves it (it scrolls a little slower than the
+ * page, receding); F3: the sticky header is flat at the top of the page and gains a soft shadow
+ * once the page moves under it. Scroll-driven: no listener; without scroll timelines both stand still. */
+@keyframes m-hero-drift {
+  to {
+    transform: translate3d(0, 6%, 0) scale(0.96);
+    opacity: 0.5;
+  }
+}
+@keyframes m-header-lift {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+    html:not([data-lite]) .hero-drift {
+      transform-origin: 50% 0;
+      animation: m-hero-drift linear both;
+      animation-timeline: view();
+      animation-range: exit 0% exit 100%;
+    }
+    .header-lift::after {
+      content: '';
+      position: absolute;
+      inset-inline: 0;
+      top: 100%;
+      height: 14px;
+      pointer-events: none;
+      background: linear-gradient(to bottom, hsl(var(--m-ink) / 0.08), transparent);
+      animation: m-header-lift linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 120px;
+    }
+  }
+}
 @keyframes m-fade-in {
   from {
     opacity: 0;

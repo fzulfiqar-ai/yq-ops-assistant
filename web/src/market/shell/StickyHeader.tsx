@@ -154,7 +154,7 @@ export function StickyHeader() {
   const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:bg-plum-wash hover:text-ink')
 
   return (
-    <header ref={headerRef} className="sticky top-0 z-header">
+    <header ref={headerRef} className="header-lift sticky top-0 z-header">
       {/* `relative z-[1]`: with a mouse each frosted layer is its own stacking context (the blur),
           so the strip below, painted later, covered the mega-nav's first row and took its clicks
           (29-Oct-2026). The row now paints above the strip, and the menu it holds with it. */}
