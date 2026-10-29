@@ -664,3 +664,101 @@ def sheet_drag(page: Page, quick_view: str, close: str) -> list[Finding]:
         x_btn.first.evaluate("(el) => el.click()")
         page.wait_for_timeout(500)
     return out
+
+
+# ── Browse menu (29-Oct-2026) ──────────────────────────────────────────────────────────────────
+# The owner's report: with a mouse, the category strip painted over the menu's first 45 px (each
+# frosted layer was its own stacking context), so a click on the menu's first row opened the strip
+# chip under it; and a click on Browse closed the menu that hovering had just opened.
+MENU_STATE = r"""
+() => {
+  const btn = document.querySelector('header button[aria-haspopup]');
+  const menu = document.querySelector('header [role="menu"]');
+  const out = { expanded: btn ? btn.getAttribute('aria-expanded') === 'true' : null, menu: !!menu };
+  const first = menu && menu.querySelector('[role="menuitem"]');
+  if (!first) return out;
+  const r = first.getBoundingClientRect();
+  const x = r.left + Math.min(24, r.width / 2);
+  const y = r.top + r.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  return { ...out, first: (first.textContent || '').trim(), href: first.getAttribute('href'), x, y,
+           onTop: !!(hit && menu.contains(hit)), hit: hit ? (hit.textContent || '').trim().slice(0, 40) : null };
+}
+"""
+
+
+def _menu_open(state: dict) -> bool:
+    return bool(state.get("expanded") and state.get("menu"))
+
+
+def browse_menu(page: Page) -> list[Finding]:
+    """With a mouse: (a) hovering Browse opens the menu with its first row on top, (b) a click on Browse
+    while hovering keeps it open, (c) a click on the menu's first row opens that row's page."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "browse-menu", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    page.wait_for_timeout(200)
+    btn.hover()
+    page.wait_for_timeout(700)
+    a = page.evaluate(MENU_STATE)
+    if not _menu_open(a):
+        return [("fail", "browse-menu", "hovering Browse did not open the menu", a)]
+    out: list[Finding] = []
+    if not a.get("onTop"):
+        out.append(("fail", "browse-menu", f"the menu's first row \"{a.get('first')}\" is covered: a click there lands on \"{a.get('hit')}\"", a))
+    page.mouse.down()
+    page.mouse.up()
+    page.wait_for_timeout(600)
+    b = page.evaluate(MENU_STATE)
+    if not _menu_open(b):
+        out.append(("fail", "browse-menu", "a click on Browse while hovering it closed the menu", b))
+        page.mouse.move(4, page.viewport_size["height"] - 4)
+        page.wait_for_timeout(500)
+        btn.hover()
+        page.wait_for_timeout(700)
+        b = page.evaluate(MENU_STATE)
+        if not _menu_open(b):
+            return out + [("fail", "browse-menu", "the menu did not open again on hover", b)]
+    # a real click at the first row's spot, reached the way a slow hand does: straight down from
+    # Browse, resting 250 ms over the space between the button and the menu (a gap there let the
+    # menu's 160 ms close timer win, and the click landed on the strip under it)
+    # (from Browse's centre, so the path is the same in Arabic, where the menu hangs from its right)
+    box = btn.bounding_box()
+    x = box["x"] + box["width"] / 2 if box else b["x"]
+    gap_y = box["y"] + box["height"] + 2 if box else b["y"]
+    page.mouse.move(x, gap_y, steps=4)
+    page.wait_for_timeout(250)
+    page.mouse.move(x, b["y"], steps=4)
+    page.wait_for_timeout(150)
+    page.mouse.click(x, b["y"])
+    try:
+        page.wait_for_url(lambda u: urlparse(u).path != "/", timeout=4000)
+    except PWError:
+        pass
+    page.wait_for_timeout(300)
+    landed = urlparse(page.url).path
+    vals = {"row": b.get("first"), "href": b.get("href"), "landed": landed}
+    if landed != b.get("href"):
+        out.append(("fail", "browse-menu", f"a click on the menu's first row \"{b.get('first')}\" opened {landed}, not {b.get('href')}", vals))
+    if not out:
+        out.append(("note", "browse-menu", f"hover opens the menu on top, a click keeps it open, its first row opens {landed}", vals))
+    return out
+
+
+def browse_menu_touch(page: Page) -> list[Finding]:
+    """A touch screen with the desktop header (1024x768): a tap on Browse opens the menu, a second tap
+    closes it (there is no hover to leave by)."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "browse-menu", "no Browse menu button in the header, not measured", None)]
+    btn.tap()
+    page.wait_for_timeout(600)
+    first = page.evaluate(MENU_STATE)
+    btn.tap()
+    page.wait_for_timeout(600)
+    second = page.evaluate(MENU_STATE)
+    vals = {"after_tap": _menu_open(first), "after_second_tap": _menu_open(second)}
+    if _menu_open(first) and not _menu_open(second):
+        return [("note", "browse-menu", "a tap opens the menu and a second tap closes it", vals)]
+    return [("fail", "browse-menu", "a tap on Browse should open the menu and a second tap close it", vals)]
