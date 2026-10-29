@@ -1650,7 +1650,7 @@ def kbd_badge(page: Page) -> list[Finding]:
 # ── the opening, smooth from the first pixel (the owner's video, 29-Oct-2026) ───────────────────────
 OPENING_WATCH = r"""
 (holdMs) => new Promise((done) => {
-  const out = { bootMoving: null, carried: null, restarted: false, exitBooked: null, filters: [], hold: [] };
+  const out = { bootMoving: null, carried: null, restarted: false, exitBooked: null, filters: [], hold: [], heavy: [] };
   const t0 = performance.now();
   // an animation in its active phase (a delay still running, or a finished one, does not count);
   // the first frame's 8 s safety fade is not motion
@@ -1698,7 +1698,20 @@ OPENING_WATCH = r"""
         const a = carried.getAnimations()[0];
         if (!a || (carriedT != null && a.currentTime < carriedT)) out.restarted = true;
       }
-      if (since > 1600 && since < holdMs - 100) out.hold.push(moving(s) + moving(document.getElementById('yq-boot')));
+      // the rest: after the last entrance settles (820 + 680 ms) and before the booked exit (holdMs)
+      if (since > 1500 && since < holdMs) {
+        out.hold.push(moving(s) + moving(document.getElementById('yq-boot')));
+        // the night frame itself (screen-sized layers) holds still: nothing in it scales or loops
+        const b = document.getElementById('yq-boot');
+        if (b) for (const a of b.getAnimations({ subtree: true }).filter(active)) {
+          const k = a.effect.getKeyframes();
+          const moves = k.some((f) => 'transform' in f || 'scale' in f || 'translate' in f);
+          if (moves || a.effect.getComputedTiming().iterations === Infinity) {
+            const tag = (a.animationName || 'waapi') + (moves ? ' (moves)' : ' (loops)');
+            if (!out.heavy.includes(tag)) out.heavy.push(tag);
+          }
+        }
+      }
     }
     if ((!s && mountAt !== null) || now > 10000) return done({ ...out, mountAt: mountAt == null ? null : Math.round(mountAt) });
     requestAnimationFrame(look);
@@ -1737,6 +1750,8 @@ def opening_motion(page: Page, base: str, delay_ms: int = 900, hold_ms: int = 19
         out.append(("fail", "opening-motion", "the opening's exit is not booked when it mounts (a timer starts it, so a busy page delays it or cuts it)", r))
     if not r["hold"] or min(r["hold"]) == 0:
         out.append(("fail", "opening-motion", "nothing moves in the hold before the exit (the frame stands frozen)", r))
+    if r.get("heavy"):
+        out.append(("fail", "opening-motion", "the night frame's screen-sized layers keep working through the hold: " + ", ".join(r["heavy"][:4]), r))
     return out or [("note", "opening-motion", "the dawn moves from the first paint and carries on, no live filter, exit booked, the hold keeps moving", r)]
 
 

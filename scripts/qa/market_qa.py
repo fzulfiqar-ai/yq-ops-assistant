@@ -1984,16 +1984,24 @@ def run_opening(browser, vp: Viewport, base: str, out: Path, report: Report) -> 
             t0 = time.time()
             page.goto(base + "/", wait_until="commit", timeout=40000)
             seen = []
-            for ms in (150, 400, 700, 1300):
-                left = ms / 1000 - (time.time() - t0)
-                if left > 0:
-                    page.wait_for_timeout(int(left * 1000))
+            # Sampled from the moment it appears, not at fixed times from the navigation: on a busy
+            # machine the opening mounts 1.4 s in (the app's code first), and a reduced one is up for
+            # under a second, so fixed samples up to 1.3 s missed it (round 2, 29-Oct-2026)
+            try:
+                page.wait_for_selector("[data-splash]", state="attached", timeout=8000)
+                seen.append({"ms": round((time.time() - t0) * 1000), "splash": "appeared"})
+            except PWError:
+                pass
+            for after in (0, 300, 600):
+                if after:
+                    page.wait_for_timeout(300)
                 state = page.evaluate("() => { const s = document.querySelector('[data-splash]'); return s ? s.getAttribute('data-splash') : null; }")
-                seen.append({"ms": ms, "splash": state})
-                if ms in (150, 700, 1300):
-                    shot(run, page, out, str(ms) + "ms")
+                seen.append({"ms": round((time.time() - t0) * 1000), "splash": state})
+                if after in (0, 600):
+                    shot(run, page, out, ("appeared" if not after else f"appeared+{after}ms"))
+            seen = [x for x in seen if x["splash"] != "appeared"] + [x for x in seen if x["splash"] == "appeared"]
             run.notes.append("splash samples: " + json.dumps(seen))
-            values = [s["splash"] for s in seen]
+            values = [s["splash"] for s in seen if s["splash"] != "appeared"]
             if not any(values):
                 finding(run, "fail", "opening-plays", "the opening never appeared on a fresh session", seen)
             if mode == "reduced":

@@ -119,6 +119,8 @@ export function Splash() {
     return !!boot && getComputedStyle(boot).opacity === '1'
   })
   const rootRef = useRef<HTMLDivElement>(null)
+  // the logo and the lines: what the camera moves (round 2) - the night frame stands still once risen
+  const fgRef = useRef<HTMLDivElement>(null)
   const skipRef = useRef<HTMLButtonElement>(null)
   const returnFocus = useRef<HTMLElement | null>(null)
   const leaveRef = useRef<() => void>(() => {})
@@ -139,7 +141,11 @@ export function Splash() {
     }
     if (adopted && boot) boot.dataset.adopted = ''
     else boot?.remove()
-    const layers = [rootRef.current, adopted ? boot : null].filter((el): el is HTMLElement => !!el && typeof el.animate === 'function')
+    // the night (this overlay and the adopted first frame) fades; only the foreground is pushed: a
+    // screen-sized layer scaled on every frame of the hold was what an integrated GPU could not carry
+    const usable = <T extends HTMLElement>(el: T | null | undefined): el is T => !!el && typeof el.animate === 'function'
+    const fading = [rootRef.current, adopted ? boot : null].filter(usable)
+    const pushed = still ? [] : [fgRef.current].filter(usable)
     const hold = plan.refill ? HOLD_WELCOME_MS : still ? HOLD_STILL_MS : HOLD_MS
     const total = hold + (still ? EXIT_STILL_MS : EXIT_MS)
     const at = hold / total
@@ -159,10 +165,8 @@ export function Splash() {
       window.clearTimeout(safety)
       safety = window.setTimeout(finish, ms)
     }
-    for (const el of layers) {
-      anims.push(el.animate([{ opacity: 1 }, { opacity: 1, offset: at, easing: FADE_EASE }, { opacity: 0 }], { duration: total, fill: 'forwards' }))
-      if (!still) anims.push(el.animate([{ transform: 'scale(1)' }, { transform: `scale(${PUSH})`, offset: at, easing: PUSH_EASE }, { transform: `scale(${PUSH_OUT})` }], { duration: total, fill: 'forwards' }))
-    }
+    for (const el of fading) anims.push(el.animate([{ opacity: 1 }, { opacity: 1, offset: at, easing: FADE_EASE }, { opacity: 0 }], { duration: total, fill: 'forwards' }))
+    for (const el of pushed) anims.push(el.animate([{ transform: 'scale(1)' }, { transform: `scale(${PUSH})`, offset: at, easing: PUSH_EASE }, { transform: `scale(${PUSH_OUT})` }], { duration: total, fill: 'forwards' }))
     if (anims[0]) anims[0].onfinish = finish
     arm(anims.length ? total + 400 : hold)
     // A skip (tap, click, wheel, Esc) leaves from wherever the camera is: the booked timeline hands its
@@ -181,8 +185,8 @@ export function Splash() {
         }
         a.cancel()
       }
-      const end: Keyframe = still ? { opacity: 0 } : { opacity: 0, transform: `scale(${PUSH_OUT})` }
-      anims = layers.map((el) => el.animate([{}, end], { duration: still ? EXIT_STILL_MS : SKIP_MS, easing: FADE_EASE, fill: 'forwards' }))
+      const opts = { duration: still ? EXIT_STILL_MS : SKIP_MS, easing: FADE_EASE, fill: 'forwards' } as const
+      anims = [...fading.map((el) => el.animate([{}, { opacity: 0 }], opts)), ...pushed.map((el) => el.animate([{}, { transform: `scale(${PUSH_OUT})` }], opts))]
       anims[0].onfinish = finish
       arm((still ? EXIT_STILL_MS : SKIP_MS) + 400)
     }
@@ -264,104 +268,108 @@ export function Splash() {
         <>
           <div className="horizon is-opening is-rising" aria-hidden="true">
             <i />
-            <i />
-            <i />
-            <i />
+            <div className="open-glow">
+              <i />
+              <i />
+              <i />
+            </div>
           </div>
-          <div className="open-veil-1" aria-hidden="true" />
-          <div className="open-veil-2" aria-hidden="true" />
+          <div className="open-veils" aria-hidden="true" />
         </>
       )}
 
-      {/* above the horizon: mark, idea, promise of the brand */}
-      <div className="absolute inset-x-0 top-0 bottom-[40%] flex flex-col items-center justify-end px-6 text-center" style={{ paddingTop: 'calc(var(--m-safe-t) + 16px)' }}>
-        <div className={`relative [@media(max-height:520px)]:hidden${adopted ? '' : ' open-pop'}`} style={adopted ? undefined : at(AT.logo)} aria-hidden="true">
-          <span className="absolute -inset-7 rounded-full bg-arc-3/30 blur-2xl" />
-          <span
-            className="sweep block h-[84px] w-[84px] rounded-[22px] shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_22px_48px_-18px_rgba(165,88,251,0.85),0_8px_20px_-8px_rgba(8,4,20,0.6)] lg:h-24 lg:w-24"
-            style={{ ['--sweep-delay' as string]: `${AT.sweep}ms` }}
-          >
-            <img src="/yq-logo-160.webp" alt="" width={96} height={96} decoding="async" draggable={false} className="h-full w-full" />
-          </span>
+      {/* the foreground, which the camera moves (fgRef): the night and the dawn stand still once risen */}
+      <div ref={fgRef} className="absolute inset-0">
+        {/* above the horizon: mark, idea, promise of the brand */}
+        <div className="absolute inset-x-0 top-0 bottom-[40%] flex flex-col items-center justify-end px-6 text-center" style={{ paddingTop: 'calc(var(--m-safe-t) + 16px)' }}>
+          <div className={`relative [@media(max-height:520px)]:hidden${adopted ? '' : ' open-pop'}`} style={adopted ? undefined : at(AT.logo)} aria-hidden="true">
+            <span className="open-halo absolute -inset-16 rounded-full" />
+            <span
+              className="sweep block h-[84px] w-[84px] rounded-[22px] shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_22px_48px_-18px_rgba(165,88,251,0.85),0_8px_20px_-8px_rgba(8,4,20,0.6)] lg:h-24 lg:w-24"
+              style={{ ['--sweep-delay' as string]: `${AT.sweep}ms` }}
+            >
+              <img src="/yq-logo-160.webp" alt="" width={96} height={96} decoding="async" draggable={false} className="h-full w-full" />
+            </span>
+          </div>
+          <div id={textId} aria-live="polite">
+            <p
+              className="open-rise mt-7 text-balance font-display text-[28px] font-bold leading-[1.08] tracking-[-0.03em] sm:text-[34px] lg:mt-8 lg:text-[40px] [@media(max-height:520px)]:mt-0"
+              style={at(AT.kicker)}
+            >
+              {S.splash.kicker}
+            </p>
+            <p className="open-rise mt-3 text-[15px] font-medium leading-snug text-white/75 lg:text-lg" style={at(AT.brand)}>
+              {S.splash.brand}
+            </p>
+          </div>
         </div>
-        <div id={textId} aria-live="polite">
-          <p
-            className="open-rise mt-7 text-balance font-display text-[28px] font-bold leading-[1.08] tracking-[-0.03em] sm:text-[34px] lg:mt-8 lg:text-[40px] [@media(max-height:520px)]:mt-0"
-            style={at(AT.kicker)}
-          >
-            {S.splash.kicker}
-          </p>
-          <p className="open-rise mt-3 text-[15px] font-medium leading-snug text-white/75 lg:text-lg" style={at(AT.brand)}>
-            {S.splash.brand}
-          </p>
-        </div>
-      </div>
 
-      {/* Below the horizon: the merchant's line, then the skip control. The white rim crests at ~66%
-       * of the height and the glow is still bright at 76%, so the line starts at 80% (82% on the
-       * roomier desktop frame) where the veil above has taken the field back to deep purple. The
-       * refill layout — a line plus a 48px pill — keeps more room and gets its contrast from the
-       * veil. Move these with .horizon.is-opening in market.css. */}
-      <div
-        className={`absolute inset-x-0 bottom-0 ${plan.refill ? 'top-[74%]' : 'top-[80%] lg:top-[82%]'} flex flex-col items-center px-6 text-center`}
-        style={{ paddingBottom: 'var(--m-safe-b)' }}
-      >
-        {plan.refill ? (
-          <>
-            {welcome && (
-              <p className="open-rise max-w-[22rem] text-balance text-base font-semibold text-white [@media(max-height:520px)]:hidden" style={at(AT.below)}>
-                {welcome}
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                dismiss()
-                navigate('/quick?load=regular')
-              }}
-              className="open-rise mt-4 inline-flex h-12 shrink-0 items-center gap-2 rounded-full bg-white px-6 text-base font-semibold text-plum-ink shadow-[0_16px_36px_-14px_rgba(165,88,251,0.9)] focus-visible:outline-white/80 [@media(max-height:520px)]:mt-0"
-              style={at(welcome ? AT.action : AT.below)}
-            >
-              {S.splash.refill} <ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />
-            </button>
-          </>
-        ) : welcome ? (
-          <p className="open-rise max-w-[22rem] text-balance text-base font-semibold text-white/90" style={at(AT.below)}>
-            {welcome}
-          </p>
-        ) : (
-          /* Three promises never fit one phone line: below 420px the third stands down and the rest
-           * stack, icons on one edge so the block reads as a list; from md they read as one row.
-           * Anything in between wraps 1+2, which looks accidental rather than composed. */
-          promises.length > 0 && (
-            <ul
-              className="open-rise flex max-w-md flex-col items-start gap-2.5 text-sm font-medium text-white/85 md:max-w-none md:flex-row md:flex-wrap md:items-center md:justify-center md:gap-x-7 md:gap-y-2 lg:text-base [@media(max-height:520px)]:hidden"
-              style={at(AT.below)}
-            >
-              {promises.map((p, i) => {
-                const Icon = PROMISE_ICONS[(p.icon || '').trim().toLowerCase()] || PROMISE_ICON_FALLBACK
-                return (
-                  <li key={p.key} className={`inline-flex items-center gap-1.5${i === 2 ? ' [@media(max-width:419px)]:hidden' : ''}`}>
-                    <Icon size={14} strokeWidth={2} aria-hidden="true" className="text-arc-3" />
-                    {promiseText(p)}
-                  </li>
-                )
-              })}
-            </ul>
-          )
-        )}
-        {/* The opening leaves on its own at 1.9 s, so this is an escape hatch, not an instruction:
-         * one quiet word, no hairline rules framing it as a dialog button. It still takes focus for
-         * the keyboard, with a ring subtle enough that a cold desktop load does not end on it. */}
-        <button
-          ref={skipRef}
-          type="button"
-          aria-describedby={textId}
-          className="mb-2 mt-auto inline-flex h-11 shrink-0 items-center px-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white/45 outline-offset-4 focus-visible:outline-white/40 [@media(max-height:520px)]:mb-0"
+        {/* Below the horizon: the merchant's line, then the skip control. The white rim crests at ~66%
+         * of the height and the glow is still bright at 76%, so the line starts at 80% (82% on the
+         * roomier desktop frame) where the veil above has taken the field back to deep purple. The
+         * refill layout — a line plus a 48px pill — keeps more room and gets its contrast from the
+         * veil. Move these with .horizon.is-opening in market.css. */}
+        <div
+          className={`absolute inset-x-0 bottom-0 ${plan.refill ? 'top-[74%]' : 'top-[80%] lg:top-[82%]'} flex flex-col items-center px-6 text-center`}
+          style={{ paddingBottom: 'var(--m-safe-b)' }}
         >
-          {finePointer ? S.splash.skipClick : S.splash.skip}
-        </button>
+          {plan.refill ? (
+            <>
+              {welcome && (
+                <p className="open-rise max-w-[22rem] text-balance text-base font-semibold text-white [@media(max-height:520px)]:hidden" style={at(AT.below)}>
+                  {welcome}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  dismiss()
+                  navigate('/quick?load=regular')
+                }}
+                className="open-rise mt-4 inline-flex h-12 shrink-0 items-center gap-2 rounded-full bg-white px-6 text-base font-semibold text-plum-ink shadow-[0_16px_36px_-14px_rgba(165,88,251,0.9)] focus-visible:outline-white/80 [@media(max-height:520px)]:mt-0"
+                style={at(welcome ? AT.action : AT.below)}
+              >
+                {S.splash.refill} <ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />
+              </button>
+            </>
+          ) : welcome ? (
+            <p className="open-rise max-w-[22rem] text-balance text-base font-semibold text-white/90" style={at(AT.below)}>
+              {welcome}
+            </p>
+          ) : (
+            /* Three promises never fit one phone line: below 420px the third stands down and the rest
+             * stack, icons on one edge so the block reads as a list; from md they read as one row.
+             * Anything in between wraps 1+2, which looks accidental rather than composed. */
+            promises.length > 0 && (
+              <ul
+                className="open-rise flex max-w-md flex-col items-start gap-2.5 text-sm font-medium text-white/85 md:max-w-none md:flex-row md:flex-wrap md:items-center md:justify-center md:gap-x-7 md:gap-y-2 lg:text-base [@media(max-height:520px)]:hidden"
+                style={at(AT.below)}
+              >
+                {promises.map((p, i) => {
+                  const Icon = PROMISE_ICONS[(p.icon || '').trim().toLowerCase()] || PROMISE_ICON_FALLBACK
+                  return (
+                    <li key={p.key} className={`inline-flex items-center gap-1.5${i === 2 ? ' [@media(max-width:419px)]:hidden' : ''}`}>
+                      <Icon size={14} strokeWidth={2} aria-hidden="true" className="text-arc-3" />
+                      {promiseText(p)}
+                    </li>
+                  )
+                })}
+              </ul>
+            )
+          )}
+          {/* The opening leaves on its own at 1.9 s, so this is an escape hatch, not an instruction:
+           * one quiet word, no hairline rules framing it as a dialog button. It still takes focus for
+           * the keyboard, with a ring subtle enough that a cold desktop load does not end on it. */}
+          <button
+            ref={skipRef}
+            type="button"
+            aria-describedby={textId}
+            className="mb-2 mt-auto inline-flex h-11 shrink-0 items-center px-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white/45 outline-offset-4 focus-visible:outline-white/40 [@media(max-height:520px)]:mb-0"
+          >
+            {finePointer ? S.splash.skipClick : S.splash.skip}
+          </button>
+        </div>
       </div>
     </div>
   )

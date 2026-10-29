@@ -9,6 +9,8 @@ a cold GPU. An image would fix that but not paint in the first frame (the boot f
 20-Sep-2026, does not reach the screen before the app mounts). A gradient is drawn with the first
 paint, needs no file, and moves as a texture like any layer.
 
+The three arcs sit in one .open-glow wrapper (round 2): they rise together as one layer.
+
 How a gradient stands in for the blur: the glow is the arc's ::before, its own box grown by k all
 round (inset -50% * k), so its closest-side ellipse is the arc's ellipse scaled by (1 + k) on both
 axes. A blur turns the ellipse's edge into the Gaussian's erf profile, alpha = erfc(d / (sigma * sqrt 2)) / 2
@@ -23,7 +25,7 @@ from __future__ import annotations
 
 import math
 
-# .horizon > i:nth-child(2..4): colour token, blur radius (sigma) in px
+# the glow's arcs (.open-glow > i:nth-child(1..3), once .horizon > i:nth-child(2..4)): colour token, blur radius (sigma) in px
 ARCS = [(2, "--m-arc-3", 31), (3, "--m-arc-2", 21), (4, "--m-arc-1", 51)]
 # reference screen and the share of its height that .horizon.is-opening > i takes (1 - top - bottom inset)
 REFS = {"portrait": (932, 1 - 0.35 + 0.25), "landscape": (864, 1 - 0.23 + 0.50)}
@@ -47,7 +49,7 @@ def main() -> None:
         rules = []
         for n, token, sigma in ARCS:
             k, g = gradient(token, sigma, b)
-            rules.append(f".horizon.is-opening > i:nth-child({n})::before {{\n  --glow-k: {k:.4f};\n  background-image: {g};\n}}")
+            rules.append(f".horizon.is-opening > .open-glow > i:nth-child({n - 1})::before {{\n  --glow-k: {k:.4f};\n  background-image: {g};\n}}")
         block = "\n".join(rules)
         if name == "landscape":
             block = "@media (min-aspect-ratio: 1/1) {\n" + "\n".join("  " + line for line in block.splitlines()) + "\n}"

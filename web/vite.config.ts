@@ -73,7 +73,7 @@ const BOOT_CSS = [
   // final review) — 30 s only covers an app that never boots.
   "html[data-boot=off] #yq-boot{background:#F9F7F3;pointer-events:none;animation-delay:30s}",
   "html[data-boot=off] #yq-boot span{display:none}",
-  "html[data-boot=off] #yq-boot .horizon,html[data-boot=off] #yq-boot .open-veil-1,html[data-boot=off] #yq-boot .open-veil-2{display:none}",
+  "html[data-boot=off] #yq-boot .horizon,html[data-boot=off] #yq-boot .open-veils{display:none}",
   "html[data-boot=off] #yq-boot b{display:block;position:absolute}",
   // phone: the plum band with the logo, two lines and the search pill; then a promo card and four discs
   "#yq-boot .h{top:0;left:0;right:0;height:calc(env(safe-area-inset-top,0px) + 136px);background:linear-gradient(135deg,#6D4091,#824FAB);border-radius:0 0 24px 24px}",
@@ -121,7 +121,7 @@ const BOOT_LOGO = (() => {
 // unless html[data-boot=off], the light frame (the b parts). The dawn rises from the first paint: the
 // market stylesheet is render-blocking, its arcs are gradients (no file to wait for) and their rise
 // runs on the compositor while the app's code is still being parsed.
-const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><div class="horizon is-opening is-rising"><i></i><i></i><i></i><i></i></div><div class="open-veil-1"></div><div class="open-veil-2"></div><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span><b class="h"><i><img src="${BOOT_LOGO}" alt="" width="44" height="44" decoding="sync" /></i><u></u><q></q><s></s></b><b class="c"></b><b class="r"><em></em><em></em><em></em><em></em></b></div>`
+const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><div class="horizon is-opening is-rising"><i></i><div class="open-glow"><i></i><i></i><i></i></div></div><div class="open-veils"></div><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span><b class="h"><i><img src="${BOOT_LOGO}" alt="" width="44" height="44" decoding="sync" /></i><u></u><q></q><s></s></b><b class="c"></b><b class="r"><em></em><em></em><em></em><em></em></b></div>`
 
 /**
  * The market build rewrites the shared index.html: its own entry (src/main.market.tsx — one
