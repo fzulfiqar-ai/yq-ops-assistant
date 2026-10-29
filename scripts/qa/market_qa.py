@@ -1653,6 +1653,8 @@ def smooth_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
             jobs.append(("glide", lambda pg: smooth.glide_scroll(pg)))
             jobs.append(("glide-layers", lambda pg: smooth.glide_layers(pg)))
             jobs.append(("card-hover", lambda pg: smooth.card_hover(pg) + smooth.press_spring(pg)))
+            jobs.append(("first-screen", lambda pg: smooth.first_screen(pg, base)))
+            jobs.append(("reveal-wave", lambda pg: smooth.reveal_wave(pg)))
             jobs.append(("add-flight", lambda pg: smooth.add_flight(pg, CART_KEY)))
     for name, job in jobs:
         pg = fresh(load=name not in ("lazy", "back-entry", "first-screen"), init=smooth.LOW_MEMORY if name == "lite" else "")
