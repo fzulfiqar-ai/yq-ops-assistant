@@ -3,8 +3,10 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import tailwindcss from 'tailwindcss'
 import autoprefixer from 'autoprefixer'
+import { BOOT_CSS_ID, PORTAL_BOOT_CSS, bootHtml } from './src/boot/frames'
 
 /**
  * One codebase, two builds (16-Sep-2026):
@@ -169,6 +171,65 @@ function marketHtml(): Plugin {
   }
 }
 
+/** The ops portal's own colours (ship 2): the logo plum for the browser bar and the manifest. */
+const PORTAL = { theme: '#6D4091', night: '#140F24' }
+
+/**
+ * The PORTAL build's head and first frame (ship 2, item 14) — the market's boot-frame pattern above,
+ * for the ops portal. Registered for the portal build only, so the market's served HTML (marketHtml()
+ * on the same index.html) and its files are byte-identical with or without it; index.html itself is
+ * not edited, for the same reason (marketHtml matches its lines exactly). It rewrites:
+ *   - the viewport to cover the whole screen (viewport-fit=cover: without it every safe-area inset is
+ *     0, so the salesman's tab bar and the sheets' footers sit under the iPhone's home bar) and the
+ *     browser bar to the logo plum;
+ *   - the first frame: src/boot/frames.ts — its <style> in the head (React's copies of the frame use the
+ *     same rules all session) and its #yq-boot node ahead of #root;
+ *   - src/boot/portal-boot.js — which frame, the saved theme — as the FIRST script: a hashed, immutable
+ *     /assets file in a build (the CSP forbids inline scripts), served at /portal-boot.js by the dev server.
+ * Every rewrite must land: a changed index.html fails the build instead of shipping without the frame.
+ */
+function portalHtml(): Plugin {
+  const file = fileURLToPath(new URL('./src/boot/portal-boot.js', import.meta.url))
+  let src = '/portal-boot.js'
+  let build = false
+  const swap = (html: string, from: string, to: string) => {
+    if (!html.includes(from)) throw new Error(`portalHtml(): index.html no longer contains ${from}`)
+    return html.replace(from, to)
+  }
+  return {
+    name: 'yq-portal-html',
+    configResolved(c) {
+      build = c.command === 'build'
+    },
+    buildStart() {
+      if (!build) return
+      const code = readFileSync(file, 'utf8')
+      const fileName = `assets/portal-boot-${createHash('sha256').update(code).digest('hex').slice(0, 10)}.js`
+      this.emitFile({ type: 'asset', fileName, source: code })
+      src = `/${fileName}`
+    },
+    configureServer(server) {
+      server.middlewares.use('/portal-boot.js', (_req, res) => {
+        res.setHeader('content-type', 'text/javascript; charset=utf-8')
+        res.end(readFileSync(file, 'utf8'))
+      })
+    },
+    // 'post': on the finished HTML, so Vite's own pass never sees the classic script (it would warn
+    // that it cannot bundle it); the script goes right after the title, ahead of catalog-prefetch.js
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        let out = swap(html, '<meta name="viewport" content="width=device-width, initial-scale=1.0" />', '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />')
+        out = swap(out, '<meta name="theme-color" content="#6d28d9" />', `<meta name="theme-color" content="${PORTAL.theme}" />`)
+        if (out.indexOf('</title>') > out.indexOf('<script src="/catalog-prefetch.js"')) throw new Error('portalHtml(): the title no longer comes before catalog-prefetch.js')
+        out = swap(out, '</title>', `</title>\n    <script src="${src}"></script>`)
+        out = swap(out, '</head>', `<style id="${BOOT_CSS_ID}">${PORTAL_BOOT_CSS}</style>\n  </head>`)
+        return swap(out, '<div id="root"></div>', `${bootHtml()}\n    <div id="root"></div>`)
+      },
+    },
+  }
+}
+
 /** `/version.json` — what the running app compares itself against (market/lib/sw.ts). Emitted at
  *  build time so it always names the deployment that is live; VITE_SW_KILL=1 makes every client
  *  unregister its worker and clear its caches on the next check. */
@@ -292,6 +353,7 @@ export default defineConfig(({ mode }) => {
       ...(isMarket
         ? [marketHtml(), marketPwa(env.VITE_API_URL || ''), versionJson(buildId, env.VITE_SW_KILL === '1')]
         : [
+            portalHtml(),
             VitePWA({
               // SELF-DESTRUCT. The API host changed (Railway -> Render) and the API URL is
               // baked into the bundle at build time, so every client still holding a cached
@@ -312,8 +374,8 @@ export default defineConfig(({ mode }) => {
                 name: 'YQ Bahrain · AI Portal',
                 short_name: 'YQ Portal',
                 description: 'Run your whole business from one place.',
-                theme_color: '#6d28d9',
-                background_color: '#140f24',
+                theme_color: PORTAL.theme,
+                background_color: PORTAL.night,
                 display: 'standalone',
                 start_url: '/',
                 icons: [
