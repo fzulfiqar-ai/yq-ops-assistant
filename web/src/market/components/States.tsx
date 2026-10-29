@@ -120,7 +120,7 @@ export function Footer({ prices, stock, rep, className }: { prices?: string | nu
     { to: '/about#privacy', label: S.footer.privacy },
   ]
   const dates = [prices ? S.states.pricesAsOf(prices) : null, stock ? S.states.stockAsOf(stock) : null].filter((d): d is string => Boolean(d))
-  const heading = 'text-2xs font-semibold uppercase tracking-[0.12em] text-ink-3'
+  const heading = 'text-xs font-semibold text-ink-3'
   const link = 'inline-flex min-h-11 items-center rounded-xs text-sm font-medium text-ink underline-offset-4 transition-colors duration-1 ease-m hover:text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 lg:min-h-8'
   return (
     <footer className={cn('border-t border-line pb-4 pt-8 text-ink-2 lg:pb-8 lg:pt-12', className)}>

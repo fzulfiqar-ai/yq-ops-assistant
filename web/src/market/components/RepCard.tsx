@@ -21,7 +21,7 @@ export function RepCard({ rep, compact, mini, className }: { rep: Rep; compact?:
         </span>
       )}
       <div className="min-w-0 flex-1">
-        {!mini && <div className="text-2xs font-semibold uppercase tracking-[0.08em] text-plum">{S.rep.yours}</div>}
+        {!mini && <div className="text-xs font-semibold text-plum">{S.rep.yours}</div>}
         <div className="truncate font-display text-sm font-bold leading-tight text-ink">{rep.name}</div>
         {(!compact || mini) && <div className="truncate text-xs text-ink-2">{rep.title || S.rep.default}</div>}
       </div>

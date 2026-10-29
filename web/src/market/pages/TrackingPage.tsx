@@ -218,7 +218,7 @@ export default function TrackingPage() {
               </p>
               {isSmall && !placed.duplicate && placed.assigned && repLine && <p className="mt-1 text-xs font-medium text-plum-ink">{repLine}</p>}
               <div className="mt-5 rounded-md bg-plum-soft px-4 py-3">
-                <div className="text-2xs font-semibold uppercase tracking-[0.1em] text-plum">{S.placed.number}</div>
+                <div className="text-xs font-semibold text-plum">{S.placed.number}</div>
                 <div className="mt-0.5 font-display text-2xl font-extrabold tnum text-ink">
                   <Ltr>{placed.order_no}</Ltr>
                 </div>
@@ -264,7 +264,7 @@ export default function TrackingPage() {
                 <div>
                   {!placed && (
                     <>
-                      <div className="text-2xs font-semibold uppercase tracking-wide text-ink-2">{S.placed.number}</div>
+                      <div className="text-xs font-semibold text-ink-2">{S.placed.number}</div>
                       <h2 className="font-display text-xl font-extrabold tnum text-ink">
                         <Ltr>{data.order_no}</Ltr>
                       </h2>

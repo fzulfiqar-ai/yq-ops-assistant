@@ -148,7 +148,7 @@ function WholesalePending() {
     <div aria-busy="true">
       {/* a flex row, like the state's own kicker: an inline chip would sit on a taller line box */}
       <div className="flex items-center gap-2">
-        <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-plum-wash px-2.5 text-2xs font-semibold uppercase tracking-[0.1em] text-plum-ink ring-1 ring-inset ring-plum/10">
+        <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-plum-wash px-2.5 text-xs font-semibold text-plum-ink ring-1 ring-inset ring-plum/10">
           <Boxes size={12} strokeWidth={2} aria-hidden="true" />
           {S.wholesale.kicker}
         </span>
@@ -255,7 +255,7 @@ function PasteCard({ className }: { className?: string }) {
     <section aria-labelledby="home-paste" className={cn('canvas-lilac overflow-hidden rounded-xl', className)}>
       <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 p-5 lg:gap-x-10 lg:px-8 lg:py-7">
         <div className="min-w-0">
-          <p className="inline-flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-[0.12em] text-plum">
+          <p className="inline-flex items-center gap-1.5 text-xs font-semibold text-plum">
             <ClipboardList size={13} aria-hidden="true" />
             {S.home.quick}
           </p>

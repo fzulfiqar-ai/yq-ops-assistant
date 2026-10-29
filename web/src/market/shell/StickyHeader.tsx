@@ -231,7 +231,7 @@ export function StickyHeader() {
           >
             <Search size={18} strokeWidth={2} aria-hidden="true" className="shrink-0 text-plum" />
             <SearchHints hints={S.search.hints} paused={paletteOpen} className="min-w-0 flex-1" leadClassName="text-ink-3" hintClassName="text-ink-2" />
-            <kbd className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 xl:inline">{S.search.shortcut}</kbd>
+            <kbd dir="ltr" className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 xl:inline">{S.search.shortcut}</kbd>
           </button>
 
           {/* Four anonymous 15px glyphs — a tag, a lightning bolt, a receipt, a person — is what this

@@ -467,9 +467,9 @@
       position: absolute;
       inset-inline: 0;
       top: 100%;
-      height: 14px;
+      height: 16px;
       pointer-events: none;
-      background: linear-gradient(to bottom, hsl(var(--m-ink) / 0.08), transparent);
+      background: linear-gradient(to bottom, hsl(var(--m-ink) / 0.12), transparent);
       animation: m-header-lift linear both;
       animation-timeline: scroll(root);
       animation-range: 0 120px;
@@ -1175,12 +1175,11 @@ html[data-lite] .m-photo::after {
 .slide-card[data-size='aside'] .slide-scrim {
   background: linear-gradient(0deg, hsl(var(--scrim) / 0.94) 0%, hsl(var(--scrim) / 0.8) 40%, hsl(var(--scrim) / 0) 70%);
 }
+/* sentence case, like every label (design review, 29-Oct-2026: tracked caps were the template tell) */
 .slide-kicker {
-  font-size: 11px;
-  line-height: 14px;
+  font-size: 12px;
+  line-height: 16px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 .slide-title {
   font-size: 19px;

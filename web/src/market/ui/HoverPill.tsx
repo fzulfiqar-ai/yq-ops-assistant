@@ -48,7 +48,7 @@ export function HoverPill({ className }: { className?: string }) {
       aria-hidden="true"
       data-hover-pill=""
       // physical left: offsetLeft is measured from the left edge in Arabic too
-      className={cn('pointer-events-none absolute left-0 top-0 bg-plum-wash opacity-0 transition-[transform,width,opacity] duration-[220ms] [transition-timing-function:var(--m-ease-out)] data-[on="1"]:opacity-100', className)}
+      className={cn('pointer-events-none absolute left-0 top-0 bg-plum/10 opacity-0 ring-1 ring-inset ring-plum/15 transition-[transform,width,opacity] duration-[220ms] [transition-timing-function:var(--m-ease-out)] data-[on="1"]:opacity-100', className)}
     />
   )
 }

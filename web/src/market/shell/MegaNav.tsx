@@ -151,7 +151,7 @@ export function MegaNav({ onClose, onEnter, onLeave, leaving = false, onGone }: 
                     onClick={onClose}
                     className="rounded-full border border-line bg-surface px-3 py-1.5 text-xs font-medium text-ink-2 transition duration-1 ease-m hover:border-ink/25 hover:text-ink"
                   >
-                    {v.label} <span className="text-ink-3 tnum">{v.count}</span>
+                    <span className="[unicode-bidi:isolate]">{v.label}</span> <span className="text-ink-3 tnum">{v.count}</span>
                   </Link>
                 ))}
             </div>

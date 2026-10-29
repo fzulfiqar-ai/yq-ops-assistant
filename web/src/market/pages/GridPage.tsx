@@ -38,6 +38,10 @@ import { CardSkeleton } from '../ui/Skeleton'
  * its grid cards fade and rise in (hooks/useReveal), stagger by column.
  */
 const FIRST = 24
+/** the first frame of a new page or filter draws this many (a PC's first screen shows ~8), and the
+ * rest of FIRST follows a frame later: the page commits sooner after a click (design review gap 2:
+ * ~150-280 ms of the old page held while 24 cards rendered) and nothing on screen changes */
+const FIRST_PAINT = 12
 const CHUNK = 48
 
 type Sort = SortMode
@@ -87,7 +91,7 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
   const brand = (params.get('brand') || '').trim()
   const groups = useMemo(() => (category ? facetsFor(category, items) : []), [category, items])
   const sel = useMemo(() => readFacets(params, groups), [params, groups])
-  const [visible, setVisible] = useState(FIRST)
+  const [visible, setVisible] = useState(FIRST_PAINT)
   const [view, setView] = useState<'grid' | 'list'>(() => {
     try {
       return (localStorage.getItem('yq-view') as 'grid' | 'list') || 'grid'
@@ -136,8 +140,14 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
   const [sigSeen, setSigSeen] = useState(signature)
   if (sigSeen !== signature) {
     setSigSeen(signature)
-    setVisible(FIRST)
+    setVisible(FIRST_PAINT)
   }
+  // ...then the rest of the first page, once that frame is painted
+  useEffect(() => {
+    if (visible >= FIRST) return
+    const id = requestAnimationFrame(() => setVisible((v) => Math.max(v, FIRST)))
+    return () => cancelAnimationFrame(id)
+  }, [visible, signature])
   const shown = Math.min(visible, result.length)
   const sold = useMemo(() => soldOutSplit(result, result.slice(0, shown)), [result, shown])
   const active = filters.size + Object.keys(sel).length + (brand ? 1 : 0)

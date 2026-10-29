@@ -88,7 +88,7 @@ export function Spotlight({ className }: { className?: string }) {
   return (
     <section ref={rootRef} className={cn('rounded-xl border border-line bg-surface p-3 shadow-1', className)} aria-roledescription="carousel" aria-label={S.spot.title} {...c.bind}>
       <header className="flex items-center justify-between ps-1">
-        <h2 className="min-w-0 truncate text-2xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.spot.title}</h2>
+        <h2 className="min-w-0 truncate text-xs font-semibold text-ink-3">{S.spot.title}</h2>
         {n > 1 && (
           <div className="-me-1 flex items-center">
             {/* WCAG 2.2.2: the aside turns its own slides, so it must offer a way to stop them */}
@@ -174,7 +174,7 @@ export function PopularRows({ limit = 3 }: { limit?: number }) {
   if (!rows.length) return null
   return (
     <div className="border-t border-line-2 px-4 pb-4 pt-3 text-start">
-      <div className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.spot.popular}</div>
+      <div className="text-xs font-semibold text-ink-3">{S.spot.popular}</div>
       <ul className="mt-1.5 divide-y divide-line-2">
         {rows.map((it) => (
           <li key={it.item_code} className="flex items-center gap-2.5 py-2">

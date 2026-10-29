@@ -1524,3 +1524,124 @@ def browse_menu_touch(page: Page) -> list[Finding]:
     if _menu_open(first) and not _menu_open(second):
         return [("note", "browse-menu", "a tap opens the menu and a second tap closes it", vals)]
     return [("fail", "browse-menu", "a tap on Browse should open the menu and a second tap close it", vals)]
+
+
+# ── the design review's polish (29-Oct-2026): one label style, Arabic bidi ─────────────────────────
+CAPS = r"""
+async () => {
+  for (let i = 0; i < 14; i++) { window.scrollBy(0, innerHeight); await new Promise((r) => setTimeout(r, 150)); }
+  window.scrollTo(0, 0);
+  await new Promise((r) => setTimeout(r, 300));
+  const out = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+    const cs = getComputedStyle(el);
+    if (cs.textTransform !== 'uppercase' || (parseFloat(cs.letterSpacing) || 0) < 0.5) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height || cs.visibility === 'hidden') continue;
+    const text = (el.textContent || '').trim();
+    if (/[A-Za-z]/.test(text)) out.push(text.slice(0, 40));
+  }
+  return out;
+}
+"""
+
+
+def caps_labels(page: Page) -> list[Finding]:
+    """Design review gap 6: one label style - sentence case, never a tracked ALL-CAPS eyebrow (the
+    commonest template tell, 7-10 per screen before), on light or night. The opening is not on these
+    pages (its Skip keeps its caps), and the slide sticker's 0.02em is not tracking."""
+    found = page.evaluate(CAPS)
+    if found:
+        return [("fail", "caps-labels", f"{len(found)} tracked ALL-CAPS label(s): " + ", ".join(found[:6]), found)]
+    return [("note", "caps-labels", "no tracked ALL-CAPS label", None)]
+
+
+BIDI_CHIPS = r"""
+(sel) => {
+  const AR = /[؀-ۿ]/;
+  const out = [];
+  for (const chip of document.querySelectorAll(sel)) {
+    if (!chip.getBoundingClientRect().width) continue;
+    const count = [...chip.querySelectorAll('span.tnum')].pop();
+    if (!count) continue;
+    const chars = [];
+    const walk = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if (count.contains(n)) continue;
+      const t = n.textContent;
+      for (let i = 0; i < t.length; i++) {
+        if (/\s/.test(t[i])) continue;
+        const rg = document.createRange();
+        rg.setStart(n, i);
+        rg.setEnd(n, i + 1);
+        const b = rg.getBoundingClientRect();
+        if (b.width) chars.push({ c: t[i], l: b.left });
+      }
+    }
+    const label = chars.map((x) => x.c).join('');
+    if (!chars.length || !AR.test(label)) continue;
+    const c = count.getBoundingClientRect();
+    out.push({ label, count: count.textContent.trim(),
+               after: c.right <= Math.min(...chars.map((x) => x.l)) + 1,
+               rtl: chars[0].l > chars[chars.length - 1].l });
+  }
+  return out;
+}
+"""
+
+
+def _bidi_chips(page: Page, sel: str, where: str) -> list[Finding]:
+    chips = page.evaluate(BIDI_CHIPS, sel)
+    if not chips:
+        return [("warn", "bidi-chips", f"no Arabic {where} chip with a count, not measured", None)]
+    out: list[Finding] = []
+    inside = [c for c in chips if not c["after"]]
+    if inside:
+        out.append(("fail", "bidi-chips", f"{len(inside)} {where} chip count(s) sit inside the label, not after it: " + ", ".join(f"{c['label']} {c['count']}" for c in inside[:4]), inside))
+    backwards = [c for c in chips if not c["rtl"]]
+    if backwards:
+        out.append(("fail", "bidi-chips", f"{len(backwards)} {where} chip label(s) read left to right in Arabic: " + ", ".join(c["label"] for c in backwards[:4]), backwards))
+    return out or [("note", "bidi-chips", f"{len(chips)} Arabic {where} chips: each count after its label, each label right to left", None)]
+
+
+def bidi_chips(page: Page) -> list[Finding]:
+    """Design review gap 8, Arabic: a facet chip's count stays after its label (it landed inside
+    "USB إلى C"), and the label keeps reading right to left (a dir="auto" island would turn it round)."""
+    return _bidi_chips(page, "main button[aria-pressed]", "facet")
+
+
+def bidi_menu_chips(page: Page) -> list[Finding]:
+    """Gap 8 in the Browse menu (Arabic, a mouse): the first category's chips, as bidi_chips."""
+    btn = page.locator("header button[aria-haspopup]").first
+    if btn.count() == 0:
+        return [("warn", "bidi-chips", "no Browse menu button in the header, not measured", None)]
+    page.mouse.move(4, page.viewport_size["height"] - 4)
+    page.wait_for_timeout(200)
+    btn.hover()
+    page.wait_for_timeout(900)
+    if not _menu_open(page.evaluate(MENU_STATE)):
+        return [("warn", "bidi-chips", "the Browse menu did not open on hover, its chips not measured", None)]
+    return _bidi_chips(page, "header a[href^='/t/'][href*='?']", "menu")
+
+
+KBD = r"""
+() => {
+  const k = [...document.querySelectorAll('header kbd')].find((x) => x.getBoundingClientRect().width);
+  if (!k) return null;
+  const n = k.firstChild;
+  if (!n || n.nodeType !== 3 || n.textContent.length < 2) return { text: k.textContent };
+  const at = (i) => { const rg = document.createRange(); rg.setStart(n, i); rg.setEnd(n, i + 1); return rg.getBoundingClientRect().left; };
+  return { text: n.textContent, inOrder: at(0) < at(n.textContent.length - 1) };
+}
+"""
+
+
+def kbd_badge(page: Page) -> list[Finding]:
+    """Gap 8, Arabic: the search box's shortcut badge reads ⌘K, left to right (it read K⌘)."""
+    r = page.evaluate(KBD)
+    if not r or "inOrder" not in r:
+        return [("warn", "kbd-badge", "no shortcut badge in the header at this width, not measured", r)]
+    if not r["inOrder"]:
+        return [("fail", "kbd-badge", f"the shortcut badge reads backwards in Arabic ({r['text']} shown as {r['text'][::-1]})", r)]
+    return [("note", "kbd-badge", f"the shortcut badge reads {r['text']} left to right", r)]

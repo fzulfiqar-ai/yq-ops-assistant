@@ -136,7 +136,7 @@ export default function MyYQPage() {
               <RepCard rep={rep} />
             ) : (
               <div className="rounded-lg border border-dashed border-line bg-surface px-4 py-3 text-sm text-ink-2">
-                <div className="text-2xs font-semibold uppercase tracking-[0.08em] text-plum">{S.rep.yours}</div>
+                <div className="text-xs font-semibold text-plum">{S.rep.yours}</div>
                 <div className="mt-0.5">{S.rep.soon}</div>
               </div>
             )}

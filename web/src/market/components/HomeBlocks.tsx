@@ -206,7 +206,7 @@ export function TrackCard({ order, className }: { order: MyOrderSummary; classNa
         <Package size={18} aria-hidden="true" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2 tnum">
+        <span className="block text-xs font-semibold text-ink-2 tnum">
           <Ltr>{order.order_no}</Ltr>
         </span>
         <span className="block truncate font-display text-sm font-bold text-ink">

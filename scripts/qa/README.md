@@ -143,6 +143,36 @@ menu's first 45 px, so a click there opened the strip's chip), a click on Browse
 it open (it used to toggle shut what hover had opened), and a click on the first row opens that row's
 page. On the touch row: a tap opens the menu and a second tap closes it.
 
+**The feel pass (29-Oct-2026)** adds these, each written to fail on the build before it. The menu
+checks run with the Browse menu (every desktop width, both languages); the rest are on the lead
+viewports in English with the S-checks, except where the table says otherwise.
+
+| Check | Where | What passes |
+|---|---|---|
+| `menu-intent` / `menu-aim` | home, desktop | Browse opens after a short rest, so a passing mouse never flashes it; a diagonal move from the first category into its panel keeps that panel, and resting on a row switches to it |
+| `glide-scroll` | home | with a mouse, one wheel notch glides (it is still moving 250 ms in, rests within 1.5 s; its worst frame is a measured number, since headless Chrome paints on the CPU); a touch screen keeps native scrolling (no `html.lenis`) |
+| `glide-layers` | home, desktop | with the search palette open the wheel moves nothing behind it, and the page never shifts sideways |
+| `card-hover` / `press-spring` | home, desktop | a card under the mouse lifts ~4 px above its neighbours and its photo zooms to ~1.06; a pressed button gives and springs back past its size before it settles |
+| `first-screen` | home, desktop | a fresh visit: the category discs come in one after another and with their photos (held 500 ms, none is an empty circle), the hero photo is whole from the first frame, and the entrance lets go within 3 s; with the catalogue held 2.5 s it waits for the discs |
+| `calm` | home, desktop | under reduced motion: no glide, no entrance, no drift or title rise, every reveal shown |
+| `opening-logo` | home, desktop | while the opening's code is held 1.2 s, the first frame's logo tile stays on screen |
+| `reveal-wave` | home, desktop | a grid row's cards rise in reading order (right to left in Arabic) from ~24 px, never blurred, and a section title below the fold rises with the scroll |
+| `hero-drift` / `header-shadow` | home, desktop | leaving the top slider it scrolls slower and dims; the header gains a soft shadow once the page moves (both where the browser has scroll timelines) |
+| `hover-pill` | home, desktop | one pill element slides between the header strip's chips under the mouse |
+| `add-flight` | home, desktop + phone | Add sends one copy of the photo to the visible cart (the mini-cart column, the Restock button, or the phone's Restock tab, whose bar comes back for it); it is gone within a second, the card moves ≤ 8 px, the count rolls and the stepper comes in. From the keypad it flies only once the keypad has gone; from the palette it does not fly at all (the cart is under its dim) |
+| `page-glide` | home, desktop | an in-app page change rises 16 px over ~320 ms |
+
+**The design review's polish (29-Oct-2026)** runs on Home and Cable, on the lead viewports, in both
+languages, each check on a fresh page:
+
+| Check | Where | What passes |
+|---|---|---|
+| `caps-labels` | home, category | no tracked ALL-CAPS label, light or night, the whole page scrolled through (the opening's Skip is not on these pages) |
+| `bidi-chips` | category + the Browse menu, Arabic | each chip's count sits after its label, and each label reads right to left (a `dir="auto"` island turned "USB إلى C" round) |
+| `kbd-badge` | home, Arabic, ≥ 1280 px | the search box's shortcut badge reads ⌘K left to right |
+
+The empty Orders page must show its "How an order moves" steps (a needle of the `orders` state).
+
 ## How it measures
 
 - **Sweep, not one screen.** Geometry and text checks run at the top of the page and then one screen

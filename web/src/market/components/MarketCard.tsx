@@ -165,7 +165,7 @@ export function CardKicker({ item, className }: { item: Pick<ShopItem, 'brand' |
     <span dir="ltr" className={cn('flex min-w-0 items-baseline gap-1 text-2xs leading-[14px] text-ink-3 rtl:justify-end', className)}>
       {brand && (
         <>
-          <span className="shrink-0 font-semibold uppercase tracking-[0.06em]">{brand}</span>
+          <span className="shrink-0 font-semibold">{brand}</span>
           <span aria-hidden="true">·</span>
         </>
       )}
@@ -575,7 +575,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         // K3 (29-Oct-2026), a mouse only (hover variants): the card rises 4 px into a deeper shadow
         // on the enter curve, and a faint plum light follows the cursor across it (--mx/--my)
         'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition-[transform,box-shadow,border-color] duration-[280ms] [transition-timing-function:var(--m-ease-out)]',
-        "after:pointer-events-none after:absolute after:inset-0 after:opacity-0 after:transition-opacity after:duration-300 after:content-[''] after:[background:radial-gradient(240px_circle_at_var(--mx,50%)_var(--my,30%),hsl(var(--m-plum)/0.07),transparent_70%)] group-hover:after:opacity-100",
+        "after:pointer-events-none after:absolute after:inset-0 after:opacity-0 after:transition-opacity after:duration-300 after:content-[''] after:[background:radial-gradient(240px_circle_at_var(--mx,50%)_var(--my,30%),hsl(var(--m-plum)/0.12),transparent_70%)] group-hover:after:opacity-100",
         compact ? 'cv-compact w-[clamp(10rem,46vw,13rem)] shrink-0 lg:w-auto' : priority ? '' : 'cv-card',
         selected ? 'border-plum/50 shadow-[0_0_0_1px_hsl(var(--m-plum)/.18),var(--m-shadow-2)]' : 'border-line shadow-1 hover:z-[1] hover:-translate-y-1 hover:border-ink/15 hover:shadow-3',
         className,

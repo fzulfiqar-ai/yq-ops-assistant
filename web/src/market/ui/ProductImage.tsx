@@ -93,10 +93,10 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
 
   if (!src) {
     return (
-      <div className={cn('grid place-items-center bg-surface text-line', className)} style={{ aspectRatio: '1 / 1', ...style }}>
+      <div className={cn('grid place-items-center bg-surface-2 text-ink-3', className)} style={{ aspectRatio: '1 / 1', ...style }}>
         <div className="px-2 text-center">
-          <Package size={iconSize} strokeWidth={1} className="mx-auto" aria-hidden="true" />
-          {showCaption && <div className="mt-1.5 text-2xs font-medium uppercase tracking-wide text-ink-3">{S.card.photoSoon}</div>}
+          <Package size={iconSize} strokeWidth={1.5} className="mx-auto opacity-70" aria-hidden="true" />
+          {showCaption && <div className="mt-1.5 text-xs font-medium text-ink-3">{S.card.photoSoon}</div>}
         </div>
       </div>
     )

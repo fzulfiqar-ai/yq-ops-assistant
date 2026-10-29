@@ -35,7 +35,7 @@ import { SoldOutDivider } from './SoldOut'
  */
 
 const POPULAR_MAX = 6
-const LABEL = 'text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2'
+const LABEL = 'text-xs font-semibold text-ink-2'
 
 export function SearchEmpty({ onPick }: { onPick: (q: string) => void }) {
   const { items, categories } = useMarket()
@@ -190,7 +190,7 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
       ) : null}
       {tiles.length > 0 && (
         <div className="mt-6">
-          <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h3>
+          <h3 className="text-xs font-semibold text-ink-2">{S.search.categories}</h3>
           <CategoryGrid tiles={tiles} className="mt-2" />
         </div>
       )}
@@ -215,7 +215,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
     <div className={className}>
       {grouped.codes.length > 0 && (
         <section aria-label={S.search.codes}>
-          <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.codes}</h2>
+          <h2 className="text-xs font-semibold text-ink-2">{S.search.codes}</h2>
           <div className="mt-1">
             {grouped.codes.map((it, i) => (
               <Fragment key={it.item_code}>
@@ -230,7 +230,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
       )}
       {grouped.products.length > 0 && (
         <section aria-label={S.search.products} className={cn(grouped.codes.length > 0 && 'mt-5')}>
-          <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">
+          <h2 className="text-xs font-semibold text-ink-2">
             {S.search.products} <span className="tnum text-ink-3">· {grouped.products.length}</span>
           </h2>
           <div className="mt-1">
@@ -247,7 +247,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
       )}
       {grouped.categories.length > 0 && (
         <section aria-label={S.search.categories} className="mt-5">
-          <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h2>
+          <h2 className="text-xs font-semibold text-ink-2">{S.search.categories}</h2>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {grouped.categories.map((c) => (
               <Link key={c} to={`/t/${categorySlug(c)}`} className={cn(chip, 'inline-flex items-center font-semibold')}>

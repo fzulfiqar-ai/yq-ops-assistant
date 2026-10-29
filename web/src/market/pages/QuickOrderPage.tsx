@@ -392,7 +392,7 @@ export default function QuickOrderPage() {
                       )}
                       {row.suggestions.length > 0 && (
                         <>
-                          {exactOut && <p className="mb-1 mt-2.5 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.quick.alternatives}</p>}
+                          {exactOut && <p className="mb-1 mt-2.5 text-xs font-semibold text-ink-2">{S.quick.alternatives}</p>}
                           <ul className={cn('divide-y divide-line-2 overflow-hidden rounded-sm border border-line', !exactOut && 'mt-2')} role="listbox">
                             {row.suggestions.map((s) => {
                               const out = isOut(s)

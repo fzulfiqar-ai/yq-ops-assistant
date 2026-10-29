@@ -273,7 +273,7 @@ export default function ProductPanel({ code }: { code: string }) {
               <table className="w-full text-start text-sm">
                 <caption className="sr-only">{S.card.breaksCaption}</caption>
                 <thead>
-                  <tr className="bg-canvas text-2xs uppercase tracking-[0.06em] text-ink-2">
+                  <tr className="bg-canvas text-xs text-ink-2">
                     <th scope="col" className="px-3 py-2 text-start font-semibold">
                       {S.card.colQty}
                     </th>
@@ -308,7 +308,7 @@ export default function ProductPanel({ code }: { code: string }) {
 
           {detail && (
             <div className="mt-5">
-              <h3 className="text-2xs font-bold uppercase tracking-[0.08em] text-ink-2">{S.card.details}</h3>
+              <h3 className="text-xs font-bold text-ink-2">{S.card.details}</h3>
               {/* the supplier's spec, as written: English, an island in an Arabic page (no invented translation) */}
               <p className="mt-1.5 whitespace-pre-line text-sm leading-[1.6] text-ink-2">
                 <Ltr>{detail}</Ltr>

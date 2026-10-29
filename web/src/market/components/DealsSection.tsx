@@ -56,7 +56,7 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
 
   return (
     <section aria-labelledby="home-deals" className="bleed bg-deal-soft/60 pb-6 pt-5 lg:mx-0 lg:rounded-xl lg:px-7 lg:pb-7 lg:pt-6 2xl:px-8">
-      <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-deal px-2.5 text-2xs font-bold uppercase tracking-[0.08em] text-deal-ink">
+      <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-deal px-2.5 text-xs font-bold text-deal-ink">
         <Tag size={12} strokeWidth={2.2} aria-hidden="true" />
         <span className="tnum">{S.deals.count(sets.all.length)}</span>
       </span>

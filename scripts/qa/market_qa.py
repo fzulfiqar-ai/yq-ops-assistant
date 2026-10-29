@@ -90,6 +90,7 @@ STR = {
     "qty.apply": "Apply",
     "card.zoom": "Zoom photo",
     "states.back": "Back",
+    "orders.steps.title": "How an order moves",
 }
 
 # --lang ar: the same keys in Arabic, mirrored from web/src/market/i18n/ar.ts (verify_strings checks
@@ -130,6 +131,7 @@ STR_AR = {
     "qty.apply": "تطبيق",
     "card.zoom": "كبّر الصورة",
     "states.back": "رجوع",
+    "orders.steps.title": "رحلة طلبك",
     # not UI copy keys: what the harness types or clicks in Arabic
     "slides.dotPrefix": "الشريحة ",
     "area.manama": "المنامة",
@@ -259,7 +261,7 @@ def states(slug: str | None) -> list[State]:
             needles=(STR["checkout.place"],),
             ready="#yq-phone",
         ),
-        State("orders", "/orders", "My orders", ready="main"),
+        State("orders", "/orders", "My orders", ready="main", needles=(STR["orders.steps.title"],)),
         State("me", "/me", "My YQ", ready="main"),
         State("about", "/about", "About & help", ready="main"),
         State("about_trade", "/about#trade", "About · trade prices", ready="main"),
@@ -1800,6 +1802,8 @@ def menu_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
     1024x768 touch row; on fresh pages, so the page it opens reaches nothing else. With a mouse, the
     rest before it opens and the menu aim (K1) run first, on a page of their own."""
     jobs = [smooth.browse_menu_touch] if vp.touch else [lambda pg: smooth.menu_intent(pg) + smooth.menu_aim(pg), smooth.browse_menu]
+    if LANG == "ar" and not vp.touch:
+        jobs.append(smooth.bidi_menu_chips)
     for job in jobs:
         pg = ctx.new_page()
         install_mocks(pg, st.order_kind)
@@ -1813,6 +1817,32 @@ def menu_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
                     finding(run, level, check, detail, values)
         except PWError as exc:
             finding(run, "fail", "smooth-error", "browse-menu: Playwright error: " + str(exc)[:240])
+        finally:
+            pg.close()
+
+
+def polish_run(run: Run, ctx, vp: Viewport, st: State, base: str) -> None:
+    """The design review's polish (29-Oct-2026): one label style (no tracked caps in dark text), and in
+    Arabic a facet chip's count after its label and the search badge reading ⌘K; fresh pages, as
+    menu_run."""
+    jobs = [smooth.caps_labels]
+    if LANG == "ar" and st.key == "category":
+        jobs.append(smooth.bidi_chips)
+    if LANG == "ar" and st.key == "home" and vp.width >= 1280:
+        jobs.append(smooth.kbd_badge)
+    for job in jobs:
+        pg = ctx.new_page()
+        install_mocks(pg, st.order_kind)
+        try:
+            pg.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
+            settle(pg, st)
+            for level, check, detail, values in job(pg):
+                if level == "note":
+                    run.notes.append(check + ": " + detail)
+                else:
+                    finding(run, level, check, detail, values)
+        except PWError as exc:
+            finding(run, "fail", "smooth-error", "polish: Playwright error: " + str(exc)[:240])
         finally:
             pg.close()
 
@@ -1902,6 +1932,9 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
         # the Browse menu: every desktop width, both languages, motion on
         if vp.klass == "desktop" and st.key == "home" and not (st.reduced or REDUCE_ALL):
             menu_run(run, ctx, vp, st, base)
+        # the design review's polish: lead viewports, both languages, motion on
+        if lead and not (st.reduced or REDUCE_ALL) and st.key in ("home", "category"):
+            polish_run(run, ctx, vp, st, base)
 
         # last of all, on a FRESH page of the same context (same init script, same no-prod-writes
         # net): the sold-out order check presses "Show more" until the whole listing is rendered

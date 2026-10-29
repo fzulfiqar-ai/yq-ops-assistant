@@ -81,7 +81,7 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
           )}
         </SheetCloser>
         {!valid && draft !== '' && <p className="mt-1.5 text-center text-xs font-medium text-bad">{n < min ? S.card.min(min) : S.qty.tooMany}</p>}
-        <div className="mt-4 text-xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.qty.presets}</div>
+        <div className="mt-4 text-xs font-semibold text-ink-2">{S.qty.presets}</div>
         <div className="mt-2 grid grid-cols-5 gap-2">
           {presets.map((p) => (
             <button

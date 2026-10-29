@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronRight, Store, Zap } from 'lucide-react'
+import { BadgeCheck, ChevronRight, ClipboardList, Store, Truck, Zap } from 'lucide-react'
 import type { MyOrderSummary } from '@/lib/shopApi'
 import { RepCard } from '../components/RepCard'
 import { EmptyState } from '../components/States'
@@ -12,6 +12,36 @@ import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
 import { Ltr } from '../ui/Ltr'
+
+/** An empty Orders page says what happens after an order: send, your rep confirms, delivered. */
+function OrderSteps() {
+  const steps = [
+    { icon: ClipboardList, title: S.orders.steps.send, hint: S.orders.steps.sendHint },
+    { icon: BadgeCheck, title: S.orders.steps.confirm, hint: S.orders.steps.confirmHint },
+    { icon: Truck, title: S.orders.steps.deliver, hint: S.orders.steps.deliverHint },
+  ]
+  return (
+    <section aria-labelledby="order-steps" className="mt-6">
+      <h2 id="order-steps" className="font-display text-md font-bold text-ink">
+        {S.orders.steps.title}
+      </h2>
+      <ol className="mt-3 grid gap-3 sm:grid-cols-3">
+        {steps.map(({ icon: Icon, title, hint }, i) => (
+          <li key={title} className="flex gap-3 rounded-lg border border-line bg-surface p-4 sm:flex-col">
+            <span aria-hidden="true" className="relative grid h-10 w-10 shrink-0 place-items-center rounded-full bg-plum-soft text-plum">
+              <Icon size={18} strokeWidth={1.75} />
+              <span className="absolute -end-1 -top-1 grid h-5 w-5 place-items-center rounded-full bg-plum text-2xs font-bold text-white tnum">{i + 1}</span>
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-ink">{title}</span>
+              <span className="mt-0.5 block text-xs leading-snug text-ink-2">{hint}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
 
 /** /orders — every order this phone placed (tokens are the capability; nothing else is listed). */
 export default function MyOrdersPage() {
@@ -35,19 +65,22 @@ export default function MyOrdersPage() {
       <div className="mx-auto max-w-2xl lg:mx-0 lg:mt-4 lg:max-w-3xl">
         {rep && <RepCard rep={rep} compact className="mb-4" />}
         {rows.length === 0 ? (
-          <EmptyState title={S.orders.empty} hint={S.orders.emptyHint} action={
-              <div className="flex flex-wrap justify-center gap-2">
-                <Button onClick={() => navigate('/quick')} icon={<Zap size={15} aria-hidden="true" />}>
-                  {S.nav.quick}
-                </Button>
-                <Button variant="secondary" onClick={() => navigate('/shop')} icon={<Store size={15} aria-hidden="true" />}>
-                  {S.cart.browse}
-                </Button>
-              </div>
-            } />
+          <>
+            <EmptyState title={S.orders.empty} hint={S.orders.emptyHint} action={
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button onClick={() => navigate('/quick')} icon={<Zap size={15} aria-hidden="true" />}>
+                    {S.nav.quick}
+                  </Button>
+                  <Button variant="secondary" onClick={() => navigate('/shop')} icon={<Store size={15} aria-hidden="true" />}>
+                    {S.cart.browse}
+                  </Button>
+                </div>
+              } />
+            <OrderSteps />
+          </>
         ) : (
           <>
-            <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.orders.thisPhone}</h2>
+            <h2 className="text-xs font-semibold text-ink-2">{S.orders.thisPhone}</h2>
             <ul className="mt-2 overflow-hidden rounded-lg border border-line bg-surface">
               {rows.map((o) => {
                 const tone = o.status === 'cancelled' ? 'bad' : o.status === 'delivered' ? 'ok' : 'plum'
