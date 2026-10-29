@@ -586,6 +586,10 @@ class _Q:
         self.f.append(lambda r: r.get(c) is not None and str(r.get(c)) < str(v))
         return self
 
+    def gte(self, c, v):
+        self.f.append(lambda r: r.get(c) is not None and str(r.get(c)) >= str(v))
+        return self
+
     def contains(self, c, v):
         want = json.loads(v) if isinstance(v, str) else v
         self.f.append(lambda r: all(x in (r.get(c) or []) for x in want))
@@ -934,6 +938,121 @@ def _():
     none = metrics.Reader(q=lambda sql: (_ for _ in ()).throw(RuntimeError("relation does not exist")), qp=lambda s, p: [],
                           salesmen_fn=lambda: [])
     assert metrics.chat_tickets_item(type("C", (), {"r": none})()) == []        # before the migration: nothing
+
+
+# ── 5. the back office (app/assist_admin.py) ────────────────────────────────────────────────
+
+def _admin_world(s):
+    """A week of chats: s1 found and ordered within the hour, s2 asked for what we do not stock, s3 asked a policy
+    nobody approved (handed to the rep), s4 raised a ticket; a sold-out ask; one thumbs down; one open late ticket."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    ago = lambda h: (now - timedelta(hours=h)).isoformat()          # noqa: E731
+    T = lambda i, sid, dev, h, intent, outcome, **kw: dict(          # noqa: E731
+        {"id": i, "ts": ago(h), "session_id": sid, "device_id": dev, "lang": "en", "intent": intent, "message": f"m{i}",
+         "query": None, "reply": "r", "item_codes": [], "outcome": outcome, "providers": "groq:qwen3-27b", "ms": 800 + i * 100,
+         "rating": None, "action": None, "detected_lang": "en", "topic": None, "customer_id": None, "salesman_id": None,
+         "cards": None, "escalated": False, "ms_understand": 300, "ms_answer": 400, "ticket_id": None}, **kw)
+    s.client.db["shop_ask_turns"] = [
+        T(1, "s1", "d1", 5, "find", "answered", customer_id=12, salesman_id=3, cards=[{"code": "LT1", "why": "sold_out"}]),
+        T(2, "s1", "d1", 4.9, "add", "answered"),
+        T(3, "s2", "d2", 30, "find", "miss", query="hdmi projector"),
+        T(4, "s2b", "d5", 31, "find", "miss", query="HDMI projector"),
+        T(5, "s3", "d3", 20, "policy", "handoff", topic="returns", escalated=True, message="can I return it?", rating="down"),
+        T(6, "s4", "d4", 10, "ticket", "ticket", ticket_id=1),
+        T(7, "s5", "d6", 2, "top", "answered", action="top", ms=40),
+    ]
+    s.client.db["shop_orders"] = [{"id": 90, "order_no": "YQ-2610-0090", "created_at": ago(4), "total_bhd": 23.5,
+                                   "status": "new", "device_id": "d1"},
+                                  {"id": 91, "order_no": "YQ-2610-0091", "created_at": ago(1), "total_bhd": 9.0,
+                                   "status": "cancelled", "device_id": "d2"}]
+    s.client.db["shop_customers"] = [{"id": 12, "shop": "Test Shop", "name": "x"}]
+    s.client.db["salesmen"] = [{"id": 3, "name": "Ali Hassan"}]
+    s.client.db["shop_tickets"] = [{"id": 1, "ref": "T-2610-0001", "kind": "damaged", "status": "new", "created_at": ago(24 * 6),
+                                    "first_seen_at": None, "salesman_id": 3},
+                                   {"id": 2, "ref": "T-2610-0002", "kind": "callback", "status": "in_progress",
+                                    "created_at": ago(3), "first_seen_at": ago(2), "salesman_id": 3}]
+
+
+@test("back office: a conversation is its session; ordered / ticket / escalated / missed / solved; shop and rep named")
+def _():
+    from app import assist_admin as aa
+    with Support() as s:
+        _admin_world(s)
+        out = aa.sessions(7)
+        by = {r["session_id"]: r for r in out["rows"]}
+        assert by["s1"]["outcome"] == "ordered" and by["s1"]["turns"] == 2 and by["s1"]["shop"] == "Test Shop"
+        assert by["s1"]["rep"] == "Ali Hassan" and by["s1"]["intents"] == ["find", "add"]
+        assert by["s2"]["outcome"] == "missed" and by["s3"]["outcome"] == "escalated" and by["s4"]["outcome"] == "ticket"
+        assert by["s5"]["outcome"] == "solved" and out["total"] == 6 and out["counts"]["missed"] == 2
+        assert [r["session_id"] for r in aa.sessions(7, outcome="ticket")["rows"]] == ["s4"]
+        assert [r["session_id"] for r in aa.sessions(7, q="RETURN")["rows"]] == ["s3"]
+        assert [t["id"] for t in aa.session("s1")] == [1, 2] and "device_id" not in aa.session("s1")[0]
+
+
+@test("back office: Today's tiles and the do-now list (late tickets, call-backs, sold-out asks, failures)")
+def _():
+    from app import assist_admin as aa
+    with Support() as s:
+        _admin_world(s)
+        o = aa.overview(7)
+        t = o["tiles"]
+        assert t["conversations"] == 6 and t["turns"] == 7 and t["orders_after_chat"] == 1 and t["orders_after_chat_bhd"] == 23.5
+        assert t["open_tickets"] == 2 and t["callbacks_waiting"] == 1 and t["misses"] == 2 and t["escalated"] == 2
+        assert t["p50_ms"] is not None and t["thumbs_up_pct"] == 0
+        d = o["do_now"]
+        assert [x["ref"] for x in d["late_tickets"]] == ["T-2610-0001"] and d["sold_out_asks"] == [{"code": "LT1", "times": 1}]
+        assert [x["ref"] for x in d["callbacks"]] == ["T-2610-0002"]
+
+
+@test("back office: Insights - not stocked (sourcing), asked while sold out (reorder), teach, providers, thumbs down")
+def _():
+    from app import assist_admin as aa
+    with Support() as s:
+        _admin_world(s)
+        i = aa.insights(30)
+        assert i["not_stocked"][0] == {"asked": "hdmi projector", "times": 2, "last": i["not_stocked"][0]["last"]}
+        assert i["sold_out"][0]["code"] == "LT1" and i["sold_out"][0]["name"] == "USB-A to Lightning cable"
+        assert i["teach"] == [{"topic": "returns", "times": 1, "examples": ["can I return it?"]}]
+        assert i["providers"][0]["provider"] == "groq:qwen3-27b" and i["providers"][0]["turns"] == 6       # tiles not counted
+        assert i["thumbs_down"][0]["message"] == "can I return it?"
+
+
+@test("back office: before the v2 migration the reads fall back to the assist1 columns")
+def _():
+    from app import assist_admin as aa
+    with Support() as s:
+        _admin_world(s)
+        real = s.client.table
+
+        class Old(_Q):
+            def select(self, cols="", **_k):
+                if "action" in cols:
+                    raise RuntimeError('column shop_ask_turns.action does not exist')
+                return super().select(cols)
+        s.client.table = lambda name: Old(s.client.db, name) if name == "shop_ask_turns" else real(name)
+        saved = dict(aa._cols)
+        try:
+            assert len(aa.turns(7)) == 7 and aa._cols["v2"] is False
+        finally:
+            aa._cols.update(saved)
+
+
+@test("back office: approved answers - a bad one refused, a good one saved and read back")
+def _():
+    from app import assist_admin as aa, shop
+    store = {"shop_ai_policies": "[]"}
+    saved = (shop.update_shop_settings, shop.shop_settings)
+    try:
+        def upd(changes, by=""):
+            store["shop_ai_policies"] = shop.validate_policies(changes["shop_ai_policies"])
+            return dict(store)
+        shop.update_shop_settings, shop.shop_settings = upd, lambda force=False: dict(store)
+        _refused(lambda: aa.policies_put([{"topic": "refunds", "en": "x"}], "owner@example.com"), "topic must be one of")
+        out = aa.policies_put([{"topic": "payment", "en": "Cash on delivery."}], "owner@example.com")
+        assert out["answers"] == [{"topic": "payment", "en": "Cash on delivery."}] and "returns" in out["topics"]
+    finally:
+        shop.update_shop_settings, shop.shop_settings = saved
 
 
 def main() -> int:

@@ -793,6 +793,49 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         from app import market_assist
         return {"turns": market_assist.recent_turns(days, limit)}
 
+    # YQ Assist v2 back office (app/assist_admin.py): summed on the server, Shop Admin only
+    @app.get("/shop/assist/overview")
+    def shop_assist_overview(days: int = Query(7, ge=1, le=90), _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.overview(days)
+
+    @app.get("/shop/assist/sessions")
+    def shop_assist_sessions(days: int = Query(7, ge=1, le=90), outcome: str | None = Query(None, max_length=16),
+                             q: str | None = Query(None, max_length=80), limit: int = Query(50, ge=1, le=200),
+                             offset: int = Query(0, ge=0, le=100_000),
+                             _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.sessions(days, outcome, q, limit, offset)
+
+    @app.get("/shop/assist/sessions/{session_id}")
+    def shop_assist_session(session_id: str, _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return {"turns": assist_admin.session(session_id[:64])}
+
+    @app.get("/shop/assist/insights")
+    def shop_assist_insights(days: int = Query(30, ge=1, le=90), _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.insights(days)
+
+    class PoliciesBody(BaseModel):
+        answers: list[dict] = Field(default_factory=list, max_length=20)
+
+    @app.get("/shop/assist/policies")
+    def shop_assist_policies(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.policies_get()
+
+    @app.put("/shop/assist/policies")
+    def shop_assist_policies_put(body: PoliciesBody, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """The office's approved answers (returns, warranty, payment...): the only words the chat may use on them."""
+        from app import assist_admin
+        try:
+            out = assist_admin.policies_put(body.answers, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.assist_policies", detail={"topics": [a.get("topic") for a in out["answers"]]})
+        return out
+
     @app.get("/shop/feedback")
     def shop_feedback_list(status: str | None = None, limit: int = Query(200, ge=1, le=500),
                            _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:

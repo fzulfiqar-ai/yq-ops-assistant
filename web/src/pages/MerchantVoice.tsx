@@ -1,37 +1,29 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Eye } from 'lucide-react'
 import { apiGet, apiPatch } from '@/lib/api'
 import { errorText } from '@/lib/errorText'
 import { useToast } from '@/components/Toast'
-import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
-import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
-import { DataTable, Stat, type Column } from '@/components/DataTable'
+import { DataTable, type Column } from '@/components/DataTable'
+import { ConversationsTab } from './assist/ConversationsTab'
+import { InsightsTab } from './assist/InsightsTab'
+import { bhTime } from './assist/format'
+import { NotReady, Pills, Tabs } from './assist/shared'
+import { TicketsTab } from './assist/TicketsTab'
+import { TodayTab } from './assist/TodayTab'
 
-// Merchant voice: what merchants tell the marketplace chat (YQ Assist) and the feedback box.
-// Rows come already masked; no customer names exist in them.
+// YQ Assist (v2, 29-Oct-2026; the page was "Merchant voice"): the back office of the marketplace chat. Today (is it
+// working, is it selling, what needs a person now), Conversations (a chat is its session), Tickets (what shops
+// reported, owned by the order's rep), Insights (sourcing, reorder, the approved answers), the feedback box and the
+// free AI. Everything is summed on the server (app/assist_admin.py). Merchant text arrives already masked.
 
-type Outcome = 'answered' | 'miss' | 'fallback' | 'handoff' | 'capped' | 'error'
 type FbStatus = 'new' | 'seen' | 'done'
 
-interface Turn {
-  id: number
-  ts: string
-  lang?: string | null
-  intent?: string | null
-  message?: string | null
-  query?: string | null
-  reply?: string | null
-  item_codes?: string[] | null
-  outcome: Outcome
-  providers?: string | null
-  ms?: number | null
-  rating?: 'up' | 'down' | null
-}
 interface Feedback {
   id: number
   ts: string
@@ -55,61 +47,7 @@ interface ProviderRow {
   failures?: number | null
   today?: { day?: string; ok?: number; '429'?: number; fail?: number; bad?: number } | null
 }
-interface Wanted { query: string; count: number; last: string }
-
-const OUTCOME_TONE: Record<Outcome, BadgeTone> = {
-  answered: 'green', miss: 'amber', fallback: 'grey', handoff: 'accent', capped: 'rose', error: 'rose',
-}
 const KIND_TONE: Record<string, BadgeTone> = { idea: 'accent', problem: 'rose', question: 'amber', up: 'green', down: 'rose' }
-
-/** Bahrain wall-clock time, like the rest of the portal. */
-function bhTime(ts?: string | null): string {
-  if (!ts) return '—'
-  try {
-    return new Date(ts).toLocaleString('en-GB', {
-      timeZone: 'Asia/Bahrain', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
-    })
-  } catch {
-    return String(ts)
-  }
-}
-
-function NotReady({ what }: { what: string }) {
-  return (
-    <Card className="p-6 text-sm text-muted-foreground">
-      {what} is not switched on yet. It appears here once the marketplace chat database update has been applied and
-      the first merchants have used it.
-    </Card>
-  )
-}
-
-function Tabs<T extends string>({ value, onChange, items }: { value: T; onChange: (v: T) => void; items: { id: T; label: string }[] }) {
-  return (
-    <div role="tablist" className="mb-4 flex flex-wrap gap-1.5">
-      {items.map((t) => (
-        <button key={t.id} type="button" role="tab" aria-selected={value === t.id} onClick={() => onChange(t.id)}
-          className={cn('rounded-full px-3.5 py-1.5 text-sm font-semibold transition',
-            value === t.id ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:text-foreground')}>
-          {t.label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function Pills<T extends string | number>({ value, onChange, items }: { value: T; onChange: (v: T) => void; items: { id: T; label: string }[] }) {
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {items.map((t) => (
-        <button key={String(t.id)} type="button" aria-pressed={value === t.id} onClick={() => onChange(t.id)}
-          className={cn('rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset transition',
-            value === t.id ? 'bg-primary/10 text-primary ring-primary/30' : 'text-muted-foreground ring-border hover:text-foreground')}>
-          {t.label}
-        </button>
-      ))}
-    </div>
-  )
-}
 
 /* ───────────────────────── a. Ideas & problems ───────────────────────── */
 
@@ -189,92 +127,6 @@ function IdeasSection() {
   )
 }
 
-/* ───────────────────────── b. What merchants asked ───────────────────────── */
-
-function AskedSection() {
-  const [days, setDays] = useState(14)
-  const [missOnly, setMissOnly] = useState(false)
-  const q = useQuery({
-    queryKey: ['merchant-voice', 'turns', days],
-    queryFn: () => apiGet<{ turns: Turn[] }>(`/shop/assist/turns?days=${days}&limit=200`),
-    retry: false,
-  })
-  const turns = useMemo(() => q.data?.turns ?? [], [q.data])
-
-  const tiles = useMemo(() => {
-    const n = turns.length
-    const c = (o: Outcome) => turns.filter((t) => t.outcome === o).length
-    return {
-      n, answered: n ? Math.round((c('answered') / n) * 100) : 0, miss: c('miss'), handoff: c('handoff'), fallback: c('fallback'),
-      up: turns.filter((t) => t.rating === 'up').length, down: turns.filter((t) => t.rating === 'down').length,
-    }
-  }, [turns])
-
-  const wanted = useMemo<Wanted[]>(() => {
-    const m = new Map<string, Wanted>()
-    for (const t of turns) {
-      if (t.outcome !== 'miss') continue
-      const key = (t.query || t.message || '').trim().toLowerCase()
-      if (!key) continue
-      const cur = m.get(key)
-      if (!cur) m.set(key, { query: key, count: 1, last: t.ts })
-      else { cur.count += 1; if (t.ts > cur.last) cur.last = t.ts }
-    }
-    return [...m.values()].sort((a, b) => (a.last < b.last ? 1 : -1))
-  }, [turns])
-
-  const shown = missOnly ? turns.filter((t) => t.outcome === 'miss') : turns
-  const cols: Column<Turn>[] = [
-    { key: 'ts', label: 'Time', render: (v) => <span className="whitespace-nowrap">{bhTime(v as string)}</span> },
-    { key: 'intent', label: 'Intent', render: (v) => String(v || '—') },
-    { key: 'message', label: 'Message', render: (v) => <span className="block max-w-[22rem] break-words">{String(v ?? '')}</span> },
-    { key: 'reply', label: 'Reply', render: (v) => <span className="block max-w-[26rem] break-words text-muted-foreground">{String(v ?? '')}</span> },
-    { key: 'item_codes', label: 'Items', render: (v) => <span className="font-mono text-xs">{((v as string[] | null) ?? []).join(', ') || '—'}</span> },
-    { key: 'outcome', label: 'Outcome', render: (v) => <Badge tone={OUTCOME_TONE[v as Outcome] ?? 'grey'}>{String(v)}</Badge> },
-    { key: 'ms', label: 'ms', align: 'right', render: (v) => (v == null ? '—' : String(v)) },
-    { key: 'rating', label: 'Rating', render: (v) => (v === 'up' ? 'Up' : v === 'down' ? 'Down' : '—') },
-  ]
-  const wantedCols: Column<Wanted>[] = [
-    { key: 'query', label: 'Asked for' },
-    { key: 'count', label: 'Times', align: 'right' },
-    { key: 'last', label: 'Last asked', render: (v) => <span className="whitespace-nowrap">{bhTime(v as string)}</span> },
-  ]
-
-  if (q.isError && !q.data) return <NotReady what="The chat log" />
-  return (
-    <div className="space-y-5">
-      <Pills<number> value={days} onChange={setDays} items={[7, 14, 30, 90].map((d) => ({ id: d, label: `${d} days` }))} />
-      {q.isLoading ? <Skeleton className="h-24 w-full" /> : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
-          <Stat label="Turns" value={tiles.n} />
-          <Stat label="Answered" value={`${tiles.answered}%`} tone="emerald" />
-          <Stat label="Misses" value={tiles.miss} tone="amber" />
-          <Stat label="Hand-offs" value={tiles.handoff} tone="violet" />
-          <Stat label="Fallbacks" value={tiles.fallback} tone="slate" />
-          <Stat label="Thumbs up" value={tiles.up} tone="emerald" />
-          <Stat label="Thumbs down" value={tiles.down} tone="rose" />
-        </div>
-      )}
-
-      <div>
-        <h2 className="mb-1 font-display text-base font-semibold">Asked for, not in catalogue</h2>
-        <p className="mb-2 text-xs text-muted-foreground">Products merchants asked for that we do not stock: a sourcing lead list.</p>
-        <DataTable rows={wanted} cols={wantedCols} searchable={false} empty="No misses in this period." maxHeight="40vh" />
-      </div>
-
-      <div>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-display text-base font-semibold">All turns</h2>
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <input type="checkbox" checked={missOnly} onChange={(e) => setMissOnly(e.target.checked)} /> Misses only
-          </label>
-        </div>
-        <DataTable rows={shown} cols={cols} empty="No chat turns in this period." maxHeight="60vh" />
-      </div>
-    </div>
-  )
-}
-
 /* ───────────────────────── c. Free AI today ───────────────────────── */
 
 function AiSection() {
@@ -312,15 +164,40 @@ function AiSection() {
   )
 }
 
+type Tab = 'today' | 'conversations' | 'tickets' | 'insights' | 'ideas' | 'ai'
+const TABS: Tab[] = ['today', 'conversations', 'tickets', 'insights', 'ideas', 'ai']
+
 export default function MerchantVoice() {
-  const [tab, setTab] = useState<'ideas' | 'asked' | 'ai'>('ideas')
+  const [params, setParams] = useSearchParams()
+  const raw = params.get('tab') as Tab | null
+  const tab: Tab = raw && TABS.includes(raw) ? raw : 'today'
+  const openRef = params.get('open')
+  const setTab = useCallback((t: Tab, open?: string) => {
+    const next = new URLSearchParams()
+    next.set('tab', t)
+    if (open) next.set('open', open)
+    setParams(next, { replace: true })
+  }, [setParams])
+  const opened = useCallback(() => {
+    if (params.get('open')) setTab(tab)
+  }, [params, setTab, tab])
+  const open = useQuery({
+    queryKey: ['yq-assist', 'overview', 7],
+    queryFn: () => apiGet<{ tiles: { open_tickets: number } }>('/shop/assist/overview?days=7'),
+    retry: false,
+  })
   return (
     <div>
-      <PageHeader title="Merchant voice" subtitle="What merchants ask the marketplace chat, what they suggest, and whether the free AI is holding up." />
-      <Tabs value={tab} onChange={setTab}
-        items={[{ id: 'ideas', label: 'Ideas & problems' }, { id: 'asked', label: 'What merchants asked' }, { id: 'ai', label: 'Free AI today' }]} />
+      <PageHeader title="YQ Assist" subtitle="The marketplace chat's back office: what it solved, what shops reported, what they asked for that we do not have, and whether the free AI is holding up." />
+      <Tabs<Tab> value={tab} onChange={(t) => setTab(t)}
+        items={[{ id: 'today', label: 'Today' }, { id: 'conversations', label: 'Conversations' },
+          { id: 'tickets', label: 'Tickets', count: open.data?.tiles.open_tickets }, { id: 'insights', label: 'Insights' },
+          { id: 'ideas', label: 'Ideas & problems' }, { id: 'ai', label: 'Free AI today' }]} />
+      {tab === 'today' && <TodayTab onTicket={(ref) => setTab('tickets', ref)} onTab={(t) => setTab(t)} />}
+      {tab === 'conversations' && <ConversationsTab />}
+      {tab === 'tickets' && <TicketsTab openRef={openRef} onOpened={opened} />}
+      {tab === 'insights' && <InsightsTab />}
       {tab === 'ideas' && <IdeasSection />}
-      {tab === 'asked' && <AskedSection />}
       {tab === 'ai' && <AiSection />}
     </div>
   )

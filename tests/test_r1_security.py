@@ -199,6 +199,12 @@ EXPECTED_GATES = {
     ("GET", "/shop/tickets/{ticket_id}"): ["feature:Shop Admin"],
     ("PATCH", "/shop/tickets/{ticket_id}"): ["feature:Shop Admin"],
     ("PATCH", "/shop/me/tickets/{ticket_id}"): ["feature:Shop Orders"],
+    ("GET", "/shop/assist/overview"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/sessions"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/sessions/{session_id}"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/insights"): ["feature:Shop Admin"],
+    ("GET", "/shop/assist/policies"): ["feature:Shop Admin"],
+    ("PUT", "/shop/assist/policies"): ["feature:Shop Admin"],
 }
 
 
