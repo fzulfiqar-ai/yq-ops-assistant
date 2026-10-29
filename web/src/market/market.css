@@ -713,8 +713,13 @@
   }
 }
 
+/* Calm but alive (round 2, 29-Oct-2026, the owner's choice for visitors whose computer asks for reduced
+ * motion): on a desktop an element marked .calm-fade keeps its own fade — opacity only, by construction:
+ * the stage's slides, a reel photo, a product panel and its dim — so the page still changes without
+ * anything rising, zooming, floating or flying. Everything else lands at once, as before; a phone or a
+ * tablet keeps it all still. */
 @media (prefers-reduced-motion: reduce) {
-  *,
+  *:not(.calm-fade),
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
@@ -728,6 +733,22 @@
   /* a waiting photo tile is a still tint (::before), not a sweep */
   .m-photo[data-state='wait']::after {
     display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) and (max-width: 1023.98px) {
+  .calm-fade {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+@media (prefers-reduced-motion: reduce) and (min-width: 1024px) {
+  /* a panel fades in and out with its dim, no slide (ui/Sheet.tsx) */
+  [data-sheet-panel].calm-fade {
+    animation: m-fade-in 240ms ease-out backwards;
+  }
+  [data-sheet-panel].calm-fade[data-leaving] {
+    animation: m-fade-out 160ms var(--m-ease-in) both;
   }
 }
 
@@ -1570,7 +1591,10 @@ html[data-lite] .m-photo::after {
   }
   html:not([data-lite]) [data-slide-state='idle'] .creative,
   html:not([data-lite]) [data-slide-state='idle'] .creative-disc,
-  html:not([data-lite]) [data-slide-state='idle'] .creative-disc::after {
+  html:not([data-lite]) [data-slide-state='idle'] .creative-disc::after,
+  html:not([data-lite]) [data-carousel='paused'] .creative,
+  html:not([data-lite]) [data-carousel='paused'] .creative-disc,
+  html:not([data-lite]) [data-carousel='paused'] .creative-disc::after {
     animation-play-state: paused;
   }
 }
@@ -1600,6 +1624,17 @@ html[data-lite] .m-photo::after {
   }
   .creative-disc > .reel-out {
     animation: m-reel-out 700ms var(--m-ease-in) both;
+  }
+}
+/* calm (reduced motion): the new photo fades in over the last, no zoom (the layer is .calm-fade) */
+@media (prefers-reduced-motion: reduce) {
+  .creative-disc > .reel-in {
+    animation: m-reel-fade 600ms var(--m-ease) both;
+  }
+}
+@keyframes m-reel-fade {
+  from {
+    opacity: 0;
   }
 }
 @keyframes m-reel-in {
@@ -1683,7 +1718,10 @@ html[data-lite] .m-photo::after {
   html:not([data-lite]) .slide-card[data-size='aside'] .slide-beam {
     --beam-at: 4.4s;
   }
-  html:not([data-lite]) [data-slide-state='idle'] .slide-beam::before {
+  /* held with its slideshow (paused, focused, off screen: PromoSlider data-carousel) */
+  html:not([data-lite]) [data-slide-state='idle'] .slide-beam::before,
+  html:not([data-lite]) [data-carousel='held'] .slide-beam::before,
+  html:not([data-lite]) [data-carousel='paused'] .slide-beam::before {
     animation-play-state: paused;
   }
   [dir='rtl'] .slide-beam {

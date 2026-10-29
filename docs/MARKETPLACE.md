@@ -793,6 +793,8 @@ guard in `scripts/qa/smooth.py` that failed on the build before it.
 | Search, PC (round 2) | The header's search types an example ("20W charger"), holds it, erases it and types the next, a blinking plum caret after it; under the mouse its edge turns plum with a soft glow, the glass nudges, a press gives | `search-typing` |
 | Opening a product, PC (round 2) | The page behind holds still and only dims (no blur): nothing on it moves or animates; the panel slides in and the card's photo flies into the panel's photo | `panel-still` |
 | Header, PC (round 2) | Solid surfaces instead of frosted glass (a blur was recomputed on every scroll frame on integrated graphics) | `no-blur` |
+| Reduced motion, PC (round 2: calm but alive) | A computer that asks for reduced motion still sees the page change, by fades only: the stage and the Spotlight keep turning by crossfade, a reel photo fades in over the last (no zoom), the search hint swaps whole every 3 s, a product panel fades in with its dim (no slide, no flight), the opening is its still frame and a 400 ms fade. Nothing rises, zooms, floats or flies; the count shows its number; a phone keeps it all still. The kill switch spares only elements marked `.calm-fade`, opacity only by construction | `calm`, `calm-alive` |
+| Pause (round 2) | The slideshow's pause button (and keyboard focus in it, or the stage scrolled away) also holds the reel and the light; the pause also stops the floats (WCAG 2.2.2) | `banner-reel` |
 | The opening | See "The opening" above | `opening-motion`, `opening-logo` |
 
 ## Release log

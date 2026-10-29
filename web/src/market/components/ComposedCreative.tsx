@@ -3,7 +3,7 @@ import { useLayerOpen } from '@/lib/sheet'
 import { cn } from '@/lib/utils'
 import { onSlideActive, slideIdle, whenWatched, SLIDE_THUMB_SIZES, type SlideArt, type SlideCanvas, type SlideSize } from '../lib/slides'
 import { useShellViewport } from '../shell/ShellContext'
-import { isDesktopLike, useReducedMotion } from '../shell/useViewport'
+import { isDesktopLike } from '../shell/useViewport'
 import { ProductImage } from '../ui/ProductImage'
 
 /**
@@ -23,8 +23,9 @@ import { ProductImage } from '../ui/ProductImage'
  * 2.2 s, the sides 0.7 s and 1.4 s after it — each new photo zooming in over the last one (market.css,
  * "The banner's motion"). It starts once the page can be watched (lib/slides whenWatched: loaded,
  * idle, the opening gone), so slide 1's first frame is the preloaded photo; a slide coming on stage
- * shows its own photos for 2.2 s first. It holds on an idle slide, a hovered card, behind an open panel
- * and in a hidden tab; never on a phone or tablet, a lite device or under reduced motion.
+ * shows its own photos for 2.2 s first. It holds on an idle slide, a hovered or focused card, behind an
+ * open panel, in a hidden tab and while its slideshow is held or paused (PromoSlider data-carousel); never on a phone or tablet or a lite device. Under reduced motion it still turns,
+ * calm: each photo only fades in over the last (market.css m-reel-fade, a .calm-fade layer).
  *
  * Never a white disc: the next photo waits hidden in the centre disc; every photo keeps one layer
  * (keyed by its code) from waiting to showing to leaving, so none loads twice; and the leaving photo
@@ -115,11 +116,10 @@ function reelStep(s: Reel, a: ReelAct): Reel {
 
 function useReel(root: RefObject<HTMLDivElement | null>, products: SlideArt[], reel: SlideArt[] | undefined) {
   const viewport = useShellViewport()
-  const still = useReducedMotion()
   const layered = useLayerOpen()
   const codes = products.map((p) => p.item_code).join(' ')
   const pool = reel ? reel.map((p) => p.item_code).join(' ') : ''
-  const on = codes !== '' && pool !== '' && isDesktopLike(viewport) && !still
+  const on = codes !== '' && pool !== '' && isDesktopLike(viewport)
   const [state, dispatch] = useReducer(reelStep, products, fresh)
   const [seen, setSeen] = useState(codes)
   if (seen !== codes) {
@@ -141,8 +141,9 @@ function useReel(root: RefObject<HTMLDivElement | null>, products: SlideArt[], r
     const cycle = [...reel, ...products]
     let started = false
     const chain: number[] = []
-    // the slide in view and not held: not idle, not hovered, not under a panel, not in a hidden tab
-    const live = () => !(document.hidden || layeredRef.current || 'lite' in document.documentElement.dataset || slideIdle(el) || el.closest('.slide-card')?.matches(':hover'))
+    // the slide in view and not held: not idle, not hovered or focused, not under a panel, not in a hidden
+    // tab, its slideshow turning (paused by the merchant, focused, off screen: it holds)
+    const live = () => !(document.hidden || layeredRef.current || 'lite' in document.documentElement.dataset || slideIdle(el) || el.closest('.slide-card')?.matches(':hover, :focus-visible') || el.closest('[data-carousel="held"], [data-carousel="paused"]'))
     const schedule = (k: number, delay: number) => {
       chain[k] = window.setTimeout(() => {
         if (live()) dispatch({ type: 'turn', k, cycle, at: performance.now() })
@@ -199,7 +200,7 @@ export function ComposedCreative({ products, reel, canvas, size, priority, class
           )}
           <div
             key={d.cur.item_code}
-            className={cn('reel', d.tick > 0 && 'reel-in')}
+            className={cn('reel', d.tick > 0 && 'reel-in calm-fade')}
             onAnimationEnd={(e) => {
               if (d.prev && e.target === e.currentTarget) dispatch({ type: 'arrived', k, tick: d.tick })
             }}

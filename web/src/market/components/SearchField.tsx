@@ -10,6 +10,9 @@ const TYPE_MS = 55
 const ERASE_MS = 30
 const HOLD_MS = 1600
 const GAP_MS = 280
+/** calm (reduced motion): the next whole example every 3 s, through a 200 ms fade out and in */
+const CALM_EVERY_MS = 3000
+const CALM_FADE_MS = 200
 
 /**
  * The rotating example query — "Search “20W charger”" — shown where a placeholder would be (the
@@ -66,8 +69,9 @@ export function SearchHints({ hints, paused, className, leadClassName, hintClass
  * a thin plum caret after it (solid while it types, blinking while it holds). Purely visual: aria-hidden,
  * the trigger around it carries the accessible name. The characters are set straight on the text node
  * (React renders it empty), so a keystroke costs no render. It stands on a whole example — never half a
- * word — while `paused` (the palette or a panel is open), while the trigger has focus, in a hidden tab,
- * and under reduced motion (the first example, still). The phone band keeps SearchHints.
+ * word — while `paused` (the palette or a panel is open), while the trigger has focus and in a hidden tab.
+ * Under reduced motion it never types: calm but alive, the whole next example fades in every 3 s. The
+ * phone band keeps SearchHints.
  */
 export function TypedHints({ hints, paused, className, leadClassName, hintClassName }: { hints: readonly string[]; paused?: boolean; className?: string; leadClassName?: string; hintClassName?: string }) {
   const reduced = useReducedMotion()
@@ -75,7 +79,8 @@ export function TypedHints({ hints, paused, className, leadClassName, hintClassN
   const boxRef = useRef<HTMLSpanElement>(null)
   // which example, and how many of its characters show (-1: all); kept across a pause
   const at = useRef({ i: 0, n: -1 })
-  const run = !paused && !reduced && hints.length > 1
+  const run = !paused && hints.length > 1
+  const typing = run && !reduced
   useLayoutEffect(() => {
     const el = textRef.current
     const box = boxRef.current
@@ -94,6 +99,25 @@ export function TypedHints({ hints, paused, className, leadClassName, hintClassN
     if (!run) return
     const trigger = box.closest('button')
     const held = () => document.hidden || Boolean(trigger?.matches(':focus'))
+    if (reduced) {
+      // calm: the whole next example, faded out and in (Web Animations, opacity only)
+      let fade: Animation | null = null
+      const id = window.setInterval(() => {
+        if (held()) return
+        fade = el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: CALM_FADE_MS, easing: 'ease-in', fill: 'forwards' })
+        fade.onfinish = () => {
+          s.i = (s.i + 1) % hints.length
+          chars = word(s.i)
+          show(chars.length)
+          fade?.cancel()
+          fade = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: CALM_FADE_MS, easing: 'ease-out' })
+        }
+      }, CALM_EVERY_MS)
+      return () => {
+        window.clearInterval(id)
+        fade?.cancel()
+      }
+    }
     let timer = 0
     const later = (ms: number, fn: () => void) => {
       timer = window.setTimeout(fn, ms)
@@ -132,14 +156,14 @@ export function TypedHints({ hints, paused, className, leadClassName, hintClassN
     }
     hold()
     return () => window.clearTimeout(timer)
-  }, [run, hints])
+  }, [run, reduced, hints])
   if (!hints.length) return null
   return (
     <span aria-hidden="true" className={cn('pointer-events-none flex min-w-0 items-center gap-[0.3em] overflow-hidden whitespace-nowrap leading-[1.6]', className)}>
       <span className={cn('shrink-0', leadClassName)}>{S.search.hintLead}</span>
       <span ref={boxRef} className="typed flex h-[1.6em] min-w-0 flex-1 items-center">
         <span ref={textRef} className={cn('min-w-0 truncate', hintClassName)} />
-        {run && <i className="typed-caret" />}
+        {typing && <i className="typed-caret" />}
       </span>
     </span>
   )

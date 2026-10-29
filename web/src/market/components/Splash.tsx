@@ -50,7 +50,7 @@ const HOLD_MS = 1900
 const HOLD_WELCOME_MS = 2800
 const HOLD_STILL_MS = 600
 const EXIT_MS = 560
-const EXIT_STILL_MS = 240
+const EXIT_STILL_MS = 400
 /** a skip leaves from wherever the timeline is, this fast */
 const SKIP_MS = 320
 /**

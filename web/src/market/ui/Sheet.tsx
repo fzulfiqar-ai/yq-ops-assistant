@@ -199,7 +199,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         // the entrance fills `backwards` only: with `both` its finished keyframe outranked the opacity
         // the drag writes, so the dim stayed full under a dragged sheet and cut out at the end
         style={{ animation: closing ? `m-fade-in ${OUT_MS}ms ease-in reverse both` : 'm-fade-in 200ms ease-out backwards' }}
-        className="absolute inset-0 h-full w-full cursor-default bg-ink/45"
+        className="calm-fade absolute inset-0 h-full w-full cursor-default bg-ink/45"
       />
       <div
         ref={attachPanel}
@@ -211,7 +211,8 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
         data-sheet-panel=""
         data-leaving={closing ? '' : undefined}
         style={{ viewTransitionName: vtName, ...lift }}
-        className={cn('relative flex flex-col overflow-hidden bg-surface shadow-3 outline-none', shape, closing ? exit : enter, className)}
+        // calm-fade: under reduced motion a desktop panel fades in and out with its dim (market.css)
+        className={cn('calm-fade relative flex flex-col overflow-hidden bg-surface shadow-3 outline-none', shape, closing ? exit : enter, className)}
       >
         {/* Grab handle — the affordance that says "this slides". Phones only; a 24 px strip to catch. */}
         <div aria-hidden="true" onPointerDown={onPointerDown} className={cn('flex touch-none justify-center pb-2 pt-2.5', isDrawer || !isDialog ? 'md:hidden' : 'sm:hidden')}>

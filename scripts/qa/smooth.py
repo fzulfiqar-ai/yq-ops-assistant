@@ -1004,7 +1004,8 @@ def first_screen_slow(page: Page, base: str, delay_ms: int = 2500) -> list[Findi
 
 def calm(page: Page, base: str) -> list[Finding]:
     """Under reduced motion nothing of the feel pass runs: no wheel glide, no entrance, no drift or title
-    rise, and every reveal is shown (the plan's `calm` guard)."""
+    rise, and every reveal is shown (the plan's `calm` guard). Round 2 (calm but alive): fades may run,
+    but nothing that moves - no running animation carries a transform, translate, scale or rotate."""
     page.emulate_media(reduced_motion="reduce")
     page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
     try:
@@ -1016,6 +1017,8 @@ def calm(page: Page, base: str) -> list[Finding]:
       const names = new Set(document.getAnimations().map((a) => a.animationName).filter(Boolean));
       return { lenis: document.documentElement.classList.contains('lenis'), intro: document.documentElement.hasAttribute('data-intro'),
         moving: ['m-intro', 'm-hero-drift', 'm-title-rise', 'm-header-lift'].filter((n) => names.has(n)),
+        // a transform animation that runs (one the kill switch collapsed to 0.01 ms only lands: not motion)
+        movers: document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.getComputedTiming().duration > 1 && a.effect.getKeyframes().some((k) => ['transform', 'translate', 'scale', 'rotate'].some((p) => k[p] && k[p] !== 'none'))).map((a) => a.animationName || a.transitionProperty || 'waapi'),
         hidden: [...document.querySelectorAll('.reveal')].filter((n) => parseFloat(getComputedStyle(n).opacity) < 0.99).length };
     }""")
     out: list[Finding] = []
@@ -1025,6 +1028,8 @@ def calm(page: Page, base: str) -> list[Finding]:
         out.append(("fail", "calm", f"reduced motion still plays: {', '.join(r['moving']) or 'the entrance'}", r))
     if r["hidden"]:
         out.append(("fail", "calm", f"reduced motion hides {r['hidden']} reveal nodes", r))
+    if r["movers"]:
+        out.append(("fail", "calm", "reduced motion still moves something: " + ", ".join(r["movers"][:5]), r))
     return out or [("note", "calm", "reduced motion: no glide, no entrance, no drift, nothing hidden", r)]
 
 
@@ -1990,12 +1995,13 @@ REEL_PROBE = r"""
 """
 
 
-def banner_reel(page: Page, settle_ms: int = 800, watch_ms: int = 5600) -> list[Finding]:
+def banner_reel(page: Page, settle_ms: int = 800, watch_ms: int = 5600, pause_label: str | None = None) -> list[Finding]:
     """Round 2, A (desktop): the banner is a product reel - within a few seconds of the page settling,
     the slide's centre disc shows at least two different products (it starts once the page has loaded
     and gone idle, then turns every 2.2 s), and no disc is ever left white (the old photo gone before
     the new one arrived: a swap undone by a stale state, or a fixed timer on a busy laptop, 29-Oct-2026).
-    The mouse is kept off the banner: a hovered slide holds."""
+    The mouse is kept off the banner: a hovered slide holds. With `pause_label` (the desktop stage), the
+    slideshow's pause button holds the reel too, and the light (WCAG 2.2.2: a pause stops what moves)."""
     page.mouse.move(5, page.viewport_size["height"] - 5)
     page.wait_for_timeout(settle_ms)
     seen: list[str] = []
@@ -2018,7 +2024,28 @@ def banner_reel(page: Page, settle_ms: int = 800, watch_ms: int = 5600) -> list[
         return [("fail", "banner-reel", f"a banner disc showed no photo in {white} of {watch_ms // 250} samples (the old photo left before the new one arrived)", vals)]
     if len(seen) < 2:
         return [("fail", "banner-reel", f"the banner's centre disc showed one product for {watch_ms / 1000:.1f} s (a still picture, not a reel)", vals)]
-    return [("note", "banner-reel", f"the centre disc turned through {len(seen)} products in {watch_ms / 1000:.1f} s", vals)]
+    out: list[Finding] = [("note", "banner-reel", f"the centre disc turned through {len(seen)} products in {watch_ms / 1000:.1f} s", vals)]
+    pause = page.locator(f'button[aria-label="{pause_label}"]').first if pause_label else None
+    if pause is not None and pause.count() and pause.is_visible():
+        pause.click()
+        page.mouse.move(5, page.viewport_size["height"] - 5)
+        page.wait_for_timeout(900)  # a swap already under way lands
+        held: list[str] = []
+        beams = set()
+        for _ in range(4600 // 250):
+            r = page.evaluate(REEL_PROBE)
+            if r and r["src"] and r["src"] not in held:
+                held.append(r["src"])
+            beams.update(page.evaluate("() => document.getAnimations().filter((a) => a.animationName === 'm-slide-beam' && !a.effect.target.closest('[data-slide-state=idle]')).map((a) => a.playState)"))
+            page.wait_for_timeout(250)
+        vals["paused"] = {"photos": held, "beam": sorted(beams)}
+        if len(held) > 1:
+            out = [("fail", "banner-reel", f"with the slideshow paused the reel kept turning ({len(held)} products in 4.6 s)", vals)]
+        elif "running" in beams:
+            out = [("fail", "banner-reel", "with the slideshow paused the light still crosses the banner", vals)]
+        else:
+            out[0] = ("note", "banner-reel", out[0][2] + "; the pause button holds it", vals)
+    return out
 
 
 # ── the typing search hint (round 2, 29-Oct-2026, the owner's choice: "typing hint") ─────────────────
@@ -2083,3 +2110,84 @@ def search_typing(page: Page, label: str, watch_ms: int = 5600) -> list[Finding]
     if not texts[0].rstrip().endswith(("”", "»", '"')):
         return [("fail", "search-typing", f"with the trigger focused the hint stopped mid-word: {texts[0][-24:]!r}", vals)]
     return [("note", "search-typing", f"typed ({gain} characters in {steps} steps within 1.2 s); still on a whole example once focused", vals)]
+
+
+# ── calm but alive (round 2, 29-Oct-2026, the owner's choice for reduced motion) ──────────────────────
+CALM_WATCH = r"""
+async ({ label, ms }) => {
+  const btn = [...document.querySelectorAll('button[aria-label]')].find((b) => b.getAttribute('aria-label') === label && b.getBoundingClientRect().width > 120);
+  const hint = () => { if (!btn) return null; const out = []; const w = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT); for (let n = w.nextNode(); n; n = w.nextNode()) { const el = n.parentElement; if (el && !el.closest('kbd') && (n.textContent || '').trim()) out.push(n.textContent); } return out.join(''); };
+  const banner = () => {
+    const s = document.querySelector('.slider-stage [data-slide-state="active"]');
+    if (!s) return null;
+    const imgs = [...s.querySelectorAll('.creative-disc[data-pos="c"] img')].filter((i) => !i.closest('.reel-next'));
+    const top = imgs[imgs.length - 1];
+    return (s.textContent || '').trim().slice(0, 24) + ' | ' + (top ? (top.currentSrc || top.src).split('/').pop() : '');
+  };
+  // an animation that moves something: transform, translate, scale or rotate in its keyframes, still running
+  // (one the kill switch collapsed to 0.01 ms only lands: not motion)
+  const moving = () => document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.getComputedTiming().duration > 1 && a.effect.getKeyframes().some((k) => ['transform', 'translate', 'scale', 'rotate'].some((p) => k[p] && k[p] !== 'none'))).map((a) => a.animationName || a.id || 'waapi');
+  const hints = new Set(), banners = new Set(), movers = new Set();
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    const h = hint(); if (h) hints.add(h);
+    const b = banner(); if (b) banners.add(b);
+    for (const m of moving()) movers.add(m);
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return { hints: [...hints], banners: [...banners], movers: [...movers] };
+}
+"""
+
+PANEL_FADE = r"""
+async () => {
+  const seen = []; const t0 = performance.now();
+  while (performance.now() - t0 < 900) {
+    const p = document.querySelector('[data-sheet-panel]');
+    if (p) seen.push([Math.round(performance.now() - t0), +(+getComputedStyle(p).opacity).toFixed(2), new DOMMatrix(getComputedStyle(p).transform === 'none' ? undefined : getComputedStyle(p).transform).m41]);
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  return seen;
+}
+"""
+
+
+def calm_alive(page: Page, base: str, quick_view: str, label: str, watch_ms: int = 6500) -> list[Finding]:
+    """Round 2, G (desktop, reduced motion asked for): calm but alive. Within 6.5 s the banner changes (a
+    slide or a reel photo) and the search hint changes; a product panel fades in (its opacity passes
+    between 0.05 and 0.95 over >= 120 ms, not one frame); and through all of it nothing moves: no running
+    animation carries a transform, translate, scale or rotate, and the panel never slides."""
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+    try:
+        page.wait_for_selector("main article[data-stock]", timeout=15000)
+    except PWError:
+        pass
+    page.mouse.move(5, page.viewport_size["height"] - 5)
+    w = page.evaluate(CALM_WATCH, {"label": label, "ms": watch_ms})
+    vals: dict[str, Any] = {"hints": w["hints"][:4], "banners": w["banners"][:4], "movers": w["movers"]}
+    out: list[Finding] = []
+    if len(w["banners"]) < 2:
+        out.append(("fail", "calm-alive", f"under reduced motion the banner stood still for {watch_ms / 1000:.1f} s (no slide or photo change)", vals))
+    if len(w["hints"]) < 2:
+        out.append(("fail", "calm-alive", f"under reduced motion the search hint stood still for {watch_ms / 1000:.1f} s", vals))
+    if w["movers"]:
+        out.append(("fail", "calm-alive", "under reduced motion something moves: " + ", ".join(w["movers"][:5]), vals))
+    btn = _quick_view(page, quick_view)
+    if btn is not None:
+        btn.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+        page.wait_for_timeout(500)
+        btn.evaluate("(el) => el.click()")
+        seen = page.evaluate(PANEL_FADE)
+        # the fade, from the panel's first visible frame to its first whole one
+        mid = [s for s in seen if 0.02 < s[1] < 0.98]
+        start = next((s[0] for s in seen if s[1] > 0.02), None)
+        whole = next((s[0] for s in seen if s[1] >= 0.98), None)
+        span = (whole - start) if start is not None and whole is not None else 0
+        slid = max((abs(s[2]) for s in seen), default=0)
+        vals["panel"] = {"frames": len(seen), "mid_frames": len(mid), "fade_ms": span, "slide_px": round(slid)}
+        if len(mid) < 2 or span < 120:
+            out.append(("fail", "calm-alive", f"under reduced motion a product panel appears at once ({len(mid)} frames mid-fade, {span} ms from first sight to whole)", vals))
+        if slid > 1:
+            out.append(("fail", "calm-alive", f"under reduced motion the product panel slides ({slid:.0f} px)", vals))
+    return out or [("note", "calm-alive", "reduced motion: the banner and the search hint change, a panel fades in; nothing moves", vals)]

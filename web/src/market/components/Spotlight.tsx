@@ -6,7 +6,6 @@ import { bhd, distinctNames, productName } from '../lib/format'
 import { bestSellers } from '../lib/home'
 import { buildSlides, useCarousel, useClaimedSlides, useSlideClaimsActive } from '../lib/slides'
 import { useUpcoming } from '../lib/upcoming'
-import { useReducedMotion } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
 import { ltrText } from '../i18n'
 import { S } from '../strings'
@@ -20,7 +19,8 @@ import { SlideCard } from './SlideCard'
  * the aside never repeats the hero beside it. Every slide is real data; nothing counts down unless
  * a campaign really ends. Dissolves every 7 s (one slide at a time, never two at half opacity over
  * each other); pauses on hover, keyboard focus, interaction, a
- * hidden tab; still under reduced motion. The header carries a pause/play control, because hover
+ * hidden tab; under reduced motion it still turns, by crossfade only (round 2, calm but alive). The
+ * header carries a pause/play control, because hover
  * and focus are not a way to stop it (WCAG 2.2.2).
  *
  * No visible swap on Home: the slider claims its slides in a layout effect in the same commit, so
@@ -50,7 +50,6 @@ export function Spotlight({ className }: { className?: string }) {
   const { items, campaigns, recognized } = useMarket()
   const claimed = useClaimedSlides()
   const claiming = useSlideClaimsActive()
-  const reduced = useReducedMotion()
   const rootRef = useRef<HTMLElement>(null)
 
   const hasItems = items.length > 0
@@ -72,7 +71,7 @@ export function Spotlight({ className }: { className?: string }) {
   // the teaser rides on top of buildSlides' `max`; the aside's own cap keeps it at MAX
   const slides = useMemo(() => buildSlides({ items, campaigns, recognized, upcoming: upcoming ?? null }, { exclude: claimed, placements: ['aside', 'hero', 'strip'], max: MAX }).slice(0, MAX), [items, campaigns, recognized, upcoming, claimed])
   const n = (claiming || settled) && (upcoming !== undefined || waited) ? slides.length : 0
-  const c = useCarousel({ count: n, dwell: DWELL, reduced, rootRef })
+  const c = useCarousel({ count: n, dwell: DWELL, reduced: false, rootRef })
   const idx = c.index
 
   const [shown, setShown] = useState({ cur: idx, prev: -1 })
@@ -110,7 +109,7 @@ export function Spotlight({ className }: { className?: string }) {
       {/* the stage wears the incoming slide's canvas and the two slides are sequenced, never
           simultaneous (components/PromoSlider.tsx): a plain opacity crossfade painted both
           headlines on top of each other over a mix of two canvases */}
-      <div className={cn('slider-stage relative mt-1.5 aspect-[6/5] overflow-hidden rounded-lg', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'}>
+      <div className={cn('slider-stage relative mt-1.5 aspect-[6/5] overflow-hidden rounded-lg', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'} data-carousel={c.autoplay ? (c.userPaused ? 'paused' : c.running ? 'running' : 'held') : undefined}>
         {slides.map((s, i) => {
           const active = i === idx
           return (
@@ -122,7 +121,7 @@ export function Spotlight({ className }: { className?: string }) {
               aria-hidden={active ? undefined : true}
               inert={!active}
               data-slide-state={active ? 'active' : 'idle'}
-              className={cn('absolute inset-0 motion-reduce:transition-none', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
+              className={cn('calm-fade absolute inset-0', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
             >
               <SlideCard slide={s} size="aside" where="spotlight" className="h-full w-full" live />
             </div>

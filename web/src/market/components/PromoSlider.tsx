@@ -26,7 +26,8 @@ import { SlideCard } from './SlideCard'
  * are never both legible and the canvas never dips; inactive slides inert + aria-hidden; under it a control
  * row: dots that fill over the dwell time (the fill pauses with the timer), pause/play, prev/next.
  * Arrow keys move too, but only from that row — inside the stage they would turn the focused slide
- * inert under the merchant. Hover pauses.
+ * inert under the merchant. Hover pauses. Under reduced motion the stage still turns (round 2, calm but
+ * alive): its slides only crossfade (.calm-fade), nothing in them moves; the pause button stops it.
  *
  * Both register their slide ids (useClaimSlides) so the aside Spotlight never repeats them.
  */
@@ -186,9 +187,9 @@ function PhoneSlider({ slides, className }: { slides: Slide[]; className?: strin
 
 function DesktopSlider({ slides, className }: { slides: Slide[]; className?: string }) {
   const n = slides.length
-  const reduced = useReducedMotion()
   const rootRef = useRef<HTMLElement>(null)
-  const c = useCarousel({ count: n, reduced, rootRef })
+  // calm but alive: reduced motion keeps the turns, as crossfades
+  const c = useCarousel({ count: n, reduced: false, rootRef })
   const idx = c.index
 
   // the slide that was showing: it fades away FIRST, over the stage already wearing the incoming
@@ -219,7 +220,8 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
           swap: the outgoing slide then dissolves into that colour instead of the two slides
           overlapping at half opacity — which, between an apricot and a night slide, painted both
           headlines, both lines and both CTAs on top of each other over mud. */}
-      <div className={cn('slider-stage relative aspect-[21/9] overflow-hidden rounded-xl', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'}>
+      {/* data-carousel: whether the slideshow turns (the reel, the light and the floats in it hold with it: a pause stops what moves, WCAG 2.2.2) */}
+      <div className={cn('slider-stage relative aspect-[21/9] overflow-hidden rounded-xl', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'} data-carousel={c.autoplay ? (c.userPaused ? 'paused' : c.running ? 'running' : 'held') : undefined}>
         {slides.map((s, i) => {
           const active = i === idx
           return (
@@ -233,7 +235,7 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
               data-slide-state={active ? 'active' : 'idle'}
               /* Sequenced, never simultaneous: the outgoing slide is gone by 200 ms and the
                  incoming one only starts at 180 ms, so no frame carries two headlines. */
-              className={cn('absolute inset-0 motion-reduce:transition-none', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
+              className={cn('calm-fade absolute inset-0', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
             >
               <SlideCard slide={s} size="hero" priority={i === 0} where="slider" className="h-full w-full" live />
             </div>
