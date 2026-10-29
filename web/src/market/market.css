@@ -1328,3 +1328,262 @@ html[data-lite] .m-photo::after {
 :root[dir='rtl'] {
   --m-dir: -1;
 }
+
+/* v3: assist */
+/* YQ Assist v2 (29-Oct-2026): the orb, the water, the stages. The orb is the assistant's face and its motion is
+ * its state: idle breathes, listening follows the voice (--orb-level, set per frame from the microphone),
+ * thinking swirls fast, answered pulses once, busy slows and cools. Opening: a drop's two rings, then the panel
+ * fills from the launcher's corner (desktop) or lands with a water line that settles flat (phone). Only transform
+ * and opacity animate; everything is gated on no-preference, the kill switch above leaves the last frame (the
+ * decorative layers end invisible, the content visible) and lite mode drops the decoration. Plain CSS (not a
+ * layer) so the state classes survive the build. */
+@keyframes assist-swirl {
+  to {
+    transform: rotate(1turn);
+  }
+}
+@keyframes assist-breathe {
+  50% {
+    transform: scale(1.045);
+  }
+}
+@keyframes assist-ring {
+  from {
+    transform: scale(0.7);
+    opacity: 0.6;
+  }
+  to {
+    transform: scale(2.3);
+    opacity: 0;
+  }
+}
+@keyframes assist-pulse {
+  40% {
+    transform: scale(1.12);
+  }
+}
+@keyframes assist-fill {
+  from {
+    transform: scale(0.03);
+    opacity: 1;
+  }
+  65% {
+    opacity: 1;
+  }
+  to {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+@keyframes assist-rise {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}
+@keyframes assist-wave {
+  0% {
+    transform: scaleY(1);
+  }
+  40% {
+    transform: scaleY(0.4);
+  }
+  65% {
+    transform: scaleY(0.65);
+  }
+  85% {
+    transform: scaleY(0.15);
+  }
+  100% {
+    transform: scaleY(0);
+  }
+}
+@keyframes assist-in {
+  from {
+    transform: translateY(12px) scale(0.98);
+    opacity: 0;
+  }
+}
+@keyframes assist-out {
+  to {
+    transform: translateY(10px) scale(0.98);
+    opacity: 0;
+  }
+}
+@keyframes assist-dim {
+  50% {
+    opacity: 0.55;
+  }
+}
+.assist-orb {
+  --s: var(--orb-size, 36px);
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: var(--s);
+  height: var(--s);
+  border-radius: 9999px;
+  overflow: hidden;
+  isolation: isolate;
+  /* the header's own two shades (owner, 29-Oct-2026: "match the purple up top"): the logo plum and the lighter
+   * sash on the same hard diagonal as .band-sash, mirrored for Arabic */
+  background: linear-gradient(148deg, hsl(var(--m-plum)) 0 47%, hsl(var(--m-sash)) 47% 100%);
+  box-shadow: inset 0 -2px 6px hsl(var(--m-plum-ink) / 0.35), 0 6px 16px -6px hsl(var(--m-plum) / 0.6);
+  transform: scale(calc(1 + var(--orb-level, 0) * 0.22));
+  transition: transform 90ms linear;
+}
+[dir='rtl'] .assist-orb {
+  background: linear-gradient(212deg, hsl(var(--m-plum)) 0 47%, hsl(var(--m-sash)) 47% 100%);
+}
+/* the light that moves: a soft sweep round the orb (its speed is the state), never a colour of its own */
+.assist-orb__swirl {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: conic-gradient(from 0deg, transparent 0 62%, hsl(0 0% 100% / 0.3) 82%, transparent 96%);
+}
+.assist-orb__glint {
+  position: absolute;
+  inset: 14% 50% 58% 18%;
+  border-radius: 9999px;
+  background: hsl(0 0% 100% / 0.45);
+  filter: blur(1.5px);
+}
+.assist-orb::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px hsl(0 0% 100% / 0.32);
+}
+.assist-orb.is-busy {
+  filter: saturate(0.55);
+}
+.assist-rings {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.assist-rings > span {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid hsl(var(--m-plum) / 0.45);
+  opacity: 0;
+}
+.assist-fill {
+  position: absolute;
+  z-index: 0;
+  width: 260%;
+  aspect-ratio: 1;
+  inset-block-end: -130%;
+  inset-inline-end: -130%;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle, hsl(var(--m-plum-wash)) 0 32%, hsl(var(--m-plum-soft)) 52%, hsl(var(--m-plum) / 0.22) 66%, transparent 70%);
+}
+.assist-wave {
+  position: absolute;
+  inset-inline: 0;
+  top: 1px;
+  height: 18px;
+  transform: translateY(-100%) scaleY(0);
+  transform-origin: bottom;
+  color: hsl(var(--m-surface));
+  pointer-events: none;
+}
+.assist-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+}
+.assist-bars > span {
+  width: 3px;
+  height: 100%;
+  border-radius: 3px;
+  background: hsl(var(--m-plum));
+  transform: scaleY(calc(0.15 + var(--lv, 0) * var(--k, 1)));
+  transition: transform 90ms linear;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .assist-orb.is-idle {
+    animation: assist-breathe 4.2s var(--m-ease) infinite;
+  }
+  .assist-orb.is-idle .assist-orb__swirl {
+    animation: assist-swirl 9s linear infinite;
+  }
+  .assist-orb.is-listening .assist-orb__swirl {
+    animation: assist-swirl 3s linear infinite;
+  }
+  .assist-orb.is-thinking .assist-orb__swirl {
+    animation: assist-swirl 1.3s linear infinite;
+  }
+  .assist-orb.is-busy .assist-orb__swirl {
+    animation: assist-swirl 16s linear infinite;
+  }
+  .assist-orb.is-answered {
+    animation: assist-pulse 520ms var(--m-ease-out) 1;
+  }
+  .assist-rings.go > span {
+    animation: assist-ring 640ms var(--m-ease-out) both;
+  }
+  .assist-rings.go > span + span {
+    animation-delay: 150ms;
+  }
+  .assist-rings.listen > span {
+    animation: assist-ring 1.8s var(--m-ease-out) infinite;
+  }
+  .assist-rings.listen > span + span {
+    animation-delay: 0.9s;
+  }
+  .assist-fill.go {
+    animation: assist-fill 420ms var(--m-ease-out) both;
+  }
+  .assist-wave.go {
+    animation: assist-wave 640ms var(--m-ease-sheet) both;
+  }
+  .assist-in {
+    animation: assist-in 280ms var(--m-ease-out) both;
+  }
+  .assist-out {
+    animation: assist-out 200ms var(--m-ease-in) both;
+  }
+  .assist-sheet-in {
+    animation: m-sheet-up 280ms var(--m-ease-sheet) both;
+  }
+  .assist-sheet-out {
+    animation: m-sheet-down 200ms var(--m-ease-in) both;
+  }
+  .assist-rise > * {
+    animation: assist-rise 280ms var(--m-ease-out) both;
+  }
+  .assist-rise > :nth-child(2) {
+    animation-delay: 40ms;
+  }
+  .assist-rise > :nth-child(3) {
+    animation-delay: 80ms;
+  }
+  .assist-rise > :nth-child(4) {
+    animation-delay: 120ms;
+  }
+  .assist-rise > :nth-child(n + 5) {
+    animation-delay: 160ms;
+  }
+  .assist-stage {
+    animation: assist-dim 1.6s ease-in-out infinite;
+  }
+}
+html[data-lite] .assist-orb,
+html[data-lite] .assist-orb__swirl,
+html[data-lite] .assist-rise > *,
+html[data-lite] .assist-stage {
+  animation: none !important;
+}
+html[data-lite] .assist-rings,
+html[data-lite] .assist-fill,
+html[data-lite] .assist-wave {
+  display: none;
+}
+/* end v3: assist */

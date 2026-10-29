@@ -52,13 +52,22 @@ function LineRow({
   return (
     <li className="px-3.5 py-3">
       <div className="flex items-start gap-2">
-        <p className="min-w-0 flex-1 pt-1 text-xs text-ink-2">
-          {A.youWrote}: <span dir="auto" className="font-semibold text-ink-2 break-words">{row.text}</span>
-        </p>
-        <span className={cn('mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-semibold', badge.cls)}>
-          {row.status === 'matched' ? <Check size={11} aria-hidden="true" /> : <CircleAlert size={11} aria-hidden="true" />}
-          {badge.label}
-        </span>
+        {row.why ? (
+          // a plan's line: why it is in the plan, not what was typed
+          <p className="min-w-0 flex-1 pt-1">
+            <span className="inline-flex items-center rounded-full bg-plum-soft px-2 py-0.5 text-2xs font-semibold text-plum-ink">{A.why[row.why] || row.why}</span>
+          </p>
+        ) : (
+          <>
+            <p className="min-w-0 flex-1 pt-1 text-xs text-ink-2">
+              {A.youWrote}: <span dir="auto" className="font-semibold text-ink-2 break-words">{row.text}</span>
+            </p>
+            <span className={cn('mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-semibold', badge.cls)}>
+              {row.status === 'matched' ? <Check size={11} aria-hidden="true" /> : <CircleAlert size={11} aria-hidden="true" />}
+              {badge.label}
+            </span>
+          </>
+        )}
         <button
           type="button"
           aria-label={A.removeLine}
@@ -143,7 +152,7 @@ function LineRow({
 }
 
 export function ListReview({ m, onPatch, onStock }: { m: Msg; onPatch: (id: string, p: Partial<Msg>) => void; onStock: (text: string) => Promise<boolean> }) {
-  const { itemsByCode, addMany, allowBackorder, soldOutLabel, rep } = useMarket()
+  const { itemsByCode, addMany, allowBackorder, soldOutLabel, rep, settings } = useMarket()
   const toast = useToast()
   const navigate = useNavigate()
   const [failed, setFailed] = useState(false)
@@ -165,9 +174,28 @@ export function ListReview({ m, onPatch, onStock }: { m: Msg; onPatch: (id: stri
     else toast(A.addedNone, 'info')
   }
 
+  // a plan (v2): how far the lines as they stand go towards the wholesale minimum, from the catalogue's own prices
+  const minimum = Number(settings.min_order_bhd) || 0
+  const value = addable.reduce((s, { r }) => {
+    const it = itemsByCode.get(r.code as string) as ShopItem
+    return s + (unitAt(it, r.qty) || 0) * r.qty
+  }, 0)
+  const title = m.plan ? A.planTitle : A.reviewTitle
+
   return (
-    <section aria-label={A.reviewTitle} className="overflow-hidden rounded-lg border border-line bg-surface">
-      <h3 className="border-b border-line-2 bg-plum-wash px-3.5 py-2 font-display text-sm font-bold text-plum-ink">{A.reviewTitle}</h3>
+    <section aria-label={title} className="overflow-hidden rounded-lg border border-line bg-surface">
+      <div className="border-b border-line-2 bg-plum-wash px-3.5 py-2">
+        <h3 className="font-display text-sm font-bold text-plum-ink">{title}</h3>
+        {m.plan ? <p className="text-2xs font-semibold text-plum-ink/80">{A.planSteps(m.plan.usual, m.plan.selling, m.plan.deal)}</p> : null}
+        {m.plan && minimum > 0 ? (
+          <div className="mt-1.5">
+            <div className="h-1.5 overflow-hidden rounded-full bg-plum-soft" aria-hidden="true">
+              <div className="h-full origin-left rounded-full bg-plum transition-transform duration-3 rtl:origin-right" style={{ transform: `scaleX(${Math.min(1, value / minimum)})` }} />
+            </div>
+            <p className="mt-1 text-2xs text-ink-2">{value >= minimum ? A.minimumMet(bhd(minimum)) : A.minimumOf(bhd(value), bhd(minimum))}</p>
+          </div>
+        ) : null}
+      </div>
       <ul className="divide-y divide-line-2">
         {visible.map(({ r, i }) => {
           const item = r.code ? itemsByCode.get(r.code) : undefined

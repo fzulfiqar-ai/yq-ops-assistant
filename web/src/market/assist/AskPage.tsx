@@ -17,7 +17,7 @@ export default function AskPage() {
     <div className="container-m py-3 md:py-6">
       <section
         aria-labelledby={titleId}
-        className="mx-auto h-[calc(100dvh-var(--m-header-h,72px)-var(--m-bottom-stack,0px)-var(--m-safe-b,0px)-24px)] min-h-[440px] max-w-2xl overflow-hidden rounded-xl shadow-1 ring-1 ring-line md:h-[min(720px,calc(100dvh-10rem))]"
+        className="mx-auto h-[calc(100dvh-var(--m-header-h,72px)-var(--m-bottom-stack,0px)-var(--m-safe-b,0px)-24px)] min-h-[440px] max-w-2xl overflow-hidden rounded-xl bg-surface shadow-1 ring-1 ring-line md:h-[min(720px,calc(100dvh-10rem))]"
       >
         <AssistChat itemCode={null} titleId={titleId} />
       </section>

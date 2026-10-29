@@ -38,3 +38,13 @@ export function openAssist(opts: OpenOptions = {}): void {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent<OpenOptions>(OPEN_EVENT, { detail: opts }))
 }
+
+/* ───────────────────────── an answer that arrived while the chat was closed (v2) ───────────────────────── */
+
+export const READY_EVENT = 'yq-assist-ready'
+
+/** The chat (lazy chunk) tells the launcher an answer is waiting; the launcher shows a dot until opened. */
+export function announceReady(): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new Event(READY_EVENT))
+}
