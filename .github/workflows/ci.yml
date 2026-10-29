@@ -62,6 +62,10 @@ jobs:
       # leak tests (no price, cost or quantity reaches a model or a reply; stored text masked)
       - name: YQ Assist suite (no DB, no network)
         run: python -m tests.test_market_assist
+      # YQ Assist v2 (29-Oct-2026): never a sold-out recommendation, policy only from approved text,
+      # tickets only on orders the device holds, the v2 migration's pins
+      - name: YQ Assist v2 suite (no DB, no network)
+        run: python -m tests.test_assist_v2
       # R2 loader / costs / margin truth / receivables: pure tests here; the "local:" replay
       # tests print SKIP without the scratch Postgres
       - name: R2 loader suite (no DB)

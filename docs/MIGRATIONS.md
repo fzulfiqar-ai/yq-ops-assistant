@@ -918,3 +918,30 @@ refusal of the self-check provoked once (a wrong sample, the old view, a run sto
 `python -m tests.test_r10_long_number_mask` (in CI as text and Python; its replay on a scratch PostgreSQL only with
 `YQ_LOCAL_PG_R10`, a loopback address); `tests/test_r7b_security.py` holds the three earlier files to R7b's rule
 (history).
+
+## Release assist2 (built 29-Oct-2026, not applied): `market_assist_v2_migration.sql` — YQ Assist v2, tickets and richer turns
+
+assist1 (28-Oct-2026, applied 29-Oct) added `shop_ask_turns` and `shop_feedback` (`market_assist_migration.sql`,
+documented in `docs/MARKETPLACE.md` § YQ Assist). This file builds on them; additive and idempotent, service role only.
+
+- **`shop_tickets`**: what a merchant reports in the chat (damaged, wrong item, missing, not working, delivery, return,
+  a call-back, an account request), only on an order that device holds (app/market_support.py checks the token and the
+  line). `ref` (T-YYMM-NNNN, Bahrain month, the id padded to 4) is set by a BEFORE INSERT trigger; owned by the order's
+  rep (`salesman_id`); masked note; photo PATHS in the private bucket `assist-tickets` (created by the API on first use).
+- **`shop_ticket_events`**: the timeline. A row is never changed (UPDATE and TRUNCATE refused by trigger); rows leave
+  only with their ticket (ON DELETE CASCADE), through the retention purge. One SLA reminder claim per ticket (unique
+  partial index on `event = 'reminder'`).
+- **`shop_ask_turns`**: 12 nullable columns (the tile tapped, the detected language, a policy topic, the shop and the
+  rep offered, the orders it held, the cards and why, escalated, the milliseconds of each stage, the ticket) and an
+  index on `(session_id, ts)` (the server rebuilds a chat's history from it); the outcome check gains `ticket`.
+- **`shop_notifications.kind`** gains `ticket`, `callback`, `ticket_sla` (only if the table exists).
+- **Settings** (seeded `on conflict do nothing`, mirrored in `SETTING_DEFAULTS`): `shop_ai_support_enabled` 0,
+  `shop_ai_retention_days` 180, `shop_ticket_keep_days` 730, `shop_ticket_sla_hours` 24, `shop_ai_policies` `[]`
+  (owner, 29-Oct-2026).
+- **Reverse**: the lines in the file's header (drop the two tables, their functions and `shop_ask_turns.ticket_id`;
+  the other columns, the widened checks and the settings can stay).
+
+Rehearsed 29-Oct-2026 on a throwaway PostgreSQL 17.6 (synthetic schema; Supabase-style roles with the pre-lockdown
+default grants, so only the file's own revokes close the new objects): assist1, v2 twice, then refs generated, a
+timeline UPDATE refused, a second reminder claim refused, a bad kind refused, a ticket delete removing its timeline and
+clearing the turn's link, anon refused; the reverse; v2 again. Tests: `python -m tests.test_assist_v2` (in CI).
