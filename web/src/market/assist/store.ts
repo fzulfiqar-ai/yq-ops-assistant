@@ -1,4 +1,4 @@
-import type { AskAddLine, AskHandoff, AskIntent, AskOrder, LineStatus } from './assistApi'
+import type { AskAddLine, AskCard, AskHandoff, AskIntent, AskOrder, AskPlan, AskTicketCard, AskTicketRow, LineStatus, TicketReceipt } from './assistApi'
 
 /**
  * What the chat keeps for this tab (sessionStorage, key 'yq-assist'): the last 30 messages and the
@@ -18,6 +18,8 @@ export interface Row {
   removed?: boolean
   /** "Ask YQ to stock it" was sent for this line */
   asked?: boolean
+  /** v2, a plan's line: why it is there (usual, selling, deal, minimum) */
+  why?: string
 }
 
 export interface Msg {
@@ -48,6 +50,20 @@ export interface Msg {
   error?: ErrorKind
   /** error: the text to send again */
   retryText?: string
+  // v2
+  cards?: AskCard[]
+  alts?: Record<string, string[]>
+  plan?: AskPlan | null
+  /** the ticket card (its steps run here; one POST at the end) */
+  ticket?: AskTicketCard | null
+  /** the receipt once the ticket (or a call-back request) was sent */
+  receipt?: TicketReceipt | null
+  tickets?: AskTicketRow[]
+  policy?: { topic: string; official: boolean } | null
+  callback?: boolean
+  escalated?: boolean
+  /** the cards arrived, the sentence is still being written */
+  pending?: boolean
 }
 
 export interface Saved {

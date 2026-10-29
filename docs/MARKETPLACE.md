@@ -658,10 +658,100 @@ fenced as data. Rate limits: 30/min per address, 6/min and 60/day per device. `s
 **Hand-off order:** the rep on this device's latest order → the storefront rep (if they opted in
 to WhatsApp) → `WA_HUMAN_NUMBER` → none (the rep confirms every order and calls).
 
+## YQ Assist v2: sell, support, escalate (built 29-Oct-2026, release assist2)
+
+The owner's brief: a chat that solves problems, not a fancy one. Each turn ends in a cart, an answer, a ticket
+or the rep. His decisions (29-Oct-2026): the order's rep owns a ticket and the owner watches every one; after a
+report the shop is promised **the next step only**; chats are kept 180 days; alerts go to Telegram and the
+Command Centre. Release steps: docs/RELEASE.md § Release assist2.
+
+| Piece | Where |
+|---|---|
+| Intents `top`, `deals`, `plan`, `ticket`, `ticket_status`, `policy`, `account`; tiles (`action`, no model call); in-stock picks with their reason; sold-out → alternatives; the plan; approved policy answers; escalation | `app/market_assist.py` |
+| The streamed turn (`Accept: text/event-stream`: `stage`, `cards`, `result`; plain JSON otherwise) | `app/market_assist.py` `ask_events`, `app/shop_api.py` |
+| A chat timeout benches a provider for 30 s, not `_CB_COOLDOWN` (`timeout_bench`) | `app/llm_router.py` |
+| Tickets: checks on the order and its lines, photos (re-encoded, private bucket `assist-tickets`, 1 h signed links), alerts, SLA reminders, retention | `app/market_support.py`, `app/shop_jobs.py` |
+| `POST /public/market/ticket`; staff `GET/PATCH /shop/tickets[/{id}]`, `PATCH /shop/me/tickets/{id}`, `GET /shop/assist/overview|sessions[/{sid}]|insights`, `GET/PUT /shop/assist/policies` | `app/shop_api.py` |
+| The back office's sums (sessions, outcomes, chat → order, insights, approved answers) | `app/assist_admin.py` |
+| The rep's "From the chat" card | `app/followups.py`, `web/src/pages/sales/ChatTickets.tsx` |
+| Command Centre item `chat_tickets` (feature Shop Admin), `/yq-brief`, `/yq-watch` | `app/metrics.py`, `app/command_api.py`, `scripts/ops/` |
+| Tables `shop_tickets`, `shop_ticket_events` (append-only); 12 columns on `shop_ask_turns`; view `v_assist_open_tickets`; settings `shop_ai_support_enabled`, `shop_ai_policies`, `shop_ticket_sla_hours`, `shop_ai_retention_days`, `shop_ticket_keep_days` | `scripts/market_assist_v2_migration.sql` |
+| The orb, the opening, the sheet, tiles, cards (plan, ticket, hand-off, policy), stage words, the disclosure | `web/src/market/assist/`, `market.css` (`v3: assist` block) |
+| Portal **YQ Assist** (was Merchant voice): Today, Conversations, Tickets, Insights + Teach, Ideas, Free AI | `web/src/pages/MerchantVoice.tsx`, `web/src/pages/assist/` |
+| Tests; the scorecard | `tests/test_assist_v2.py`; `tests/assist_cases.yaml` + `scripts/eval_assist.py` |
+
+**What each job answers from (Python, public data; the model only reads the intent and writes 1–3 sentences):**
+
+| Asked | Answer | Never |
+|---|---|---|
+| What sells, what is new | best seller → trending → selling fast → new, one category at a time, narrowed to what was named | a sold-out line; a category the shelf does not have ("best selling hdmi projector" says so) |
+| Deals | real price drops, live offers, clearance | a "was" price that never was |
+| Plan my order | the usual (in stock), what sells in those categories, two deals, the line that closes the minimum (`price_cart` gap suggestions); a budget trims from the end | a sold-out line; the usual trimmed before the extras |
+| A product / fit / add | the match; a sold-out match keeps its card marked Sold out and brings in-stock alternatives (same category, two or more shared words such as the connector or the watts) | a USB-C cable for a Lightning one |
+| A policy (returns, warranty, payment, credit, delivery, hours, account, invoice) | the office's approved text, marked "Official YQ answer" | a policy in the model's words; an empty topic goes to the rep |
+| A problem with goods or an order | the ticket card (issue → order → items → photos and a note → send), then the T-number and the rep's name | a refund, replacement, credit or date promised |
+| A person, a price, credit, an account, or an upset shop | the rep on WhatsApp, and "Ask for a call back" when tickets are on | — |
+
+**Guardrails added in v2.**
+- *Names.* The chat history comes from `shop_ask_turns` (the turns of this session AND device), not from the
+  browser. Shop and customer names (Focus customers and marketplace shops) are replaced by `[shop]` before any
+  model call; the list is rebuilt hourly off the request path.
+- *What the model may write.* Model text loses its markdown, and every sentence with a price the facts did not
+  give, a link, a masked number or e-mail, or the market's banned copy; "out of stock" becomes "sold out".
+- *Ticket checks.* A ticket's order must belong to this device or its shop. Its quantities stay within what was
+  delivered, less what was returned or is already reported. Rate limits: 10/min per address; 3/min and 10/day per
+  device.
+- *Logging.* Every turn is logged with `ms_understand`, `ms_handle` and `ms_answer`, an error turn included. Until
+  the migration runs, the API logs as assist1 did.
+
+**Speed.** Tiles answer from data with no model call. The model's sentence is written only if the turn is under
+5 s (`_ANSWER_BY`); otherwise a template line goes. Cards are streamed before the sentence. A dropped connection
+still logs the turn.
+
+**When no model can answer** (none answered, or past `shop_ai_daily_cap`), the commonest asks still get their
+tile's answer from data. `rule_action` reads the words in English, Arabic and romanised Urdu (what sells also in
+Hindi and Malayalam), in this order:
+1. a ticket reference;
+2. a problem with goods;
+3. an order;
+4. the rep;
+5. a plan;
+6. offers;
+7. what sells.
+
+The turn is logged with `providers = 'rules'`. Anything else gets `fallback: true` (the page searches) as before.
+The rules never run before the model: words alone misread too much.
+
+**The look** follows the market's motion law (transform and opacity only, no motion library, a still frame under
+reduced motion and lite mode):
+- *The orb* (the header's plum and its lighter sash) breathes when idle, follows the voice level while listening,
+  and swirls faster while thinking.
+- *The opening.* Rings drop out of the launcher; on a desktop the panel fills from its corner; on a phone the sheet
+  lands on a flattening wave.
+- *After closing.* The answer still arrives, and the orb shows a dot when it is ready.
+
+**How smart, in numbers:** `python -m scripts.eval_assist` (read-only; the public catalogue from the QA stand-in or
+a saved payload; no database). It runs the 81 cases of `tests/assist_cases.yaml` on the live free models and
+scores six checks against their gates:
+
+| Check | Gate |
+|---|---|
+| intent | ≥ 92% |
+| sold_out | 100% |
+| escalate | ≥ 95% |
+| official | 100% |
+| lang | ≥ 95% |
+| leak | 100% |
+
+It also prints p50/p95. Run it before every assist release and put the table in the release note. CI checks the
+case file only (`tests/test_assist_v2.py`).
+
 ## Not done yet (in order)
 
-- **YQ Assist P2–P6** (paste or voice order, photo search, smart reorder and alerts, smarter search
-  with Arabic item names, honest insights): see the plan in the 28-Oct-2026 release note.
+- **YQ Assist, after v2** (each on the owner's go): voice sent at once when the transcript is clear; "Add to quality
+  case" from a damage ticket (Market Intel cases); the same brain on WhatsApp (Cloud API keys); web push for
+  back-in-stock and ticket updates; a salesman co-pilot ("what to push to this shop today"); Urdu, Hindi and
+  Malayalam template lines; seeding the scorecard from real chat turns.
 - **7 SKUs still have no photo.**
 - Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
   from Focus history (needs `focus_customer_id` links) · web push · a real `shop_clearance_pct`

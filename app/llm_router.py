@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
-from openai import APIStatusError, RateLimitError
+from openai import APIStatusError, APITimeoutError, RateLimitError
 
 from app.config import settings
 
@@ -365,11 +365,15 @@ def _candidates(tier: int = 1, model_name: str | None = None,
 def chat(messages: list[dict[str, str]], *, tier: int = 1,
          temperature: float = 0.2, max_tokens: int = 1024, model_name: str | None = None,
          task: str | None = None, request_timeout: float | None = None,
-         max_429_retries: int | None = None, max_providers: int | None = None) -> str:
+         max_429_retries: int | None = None, max_providers: int | None = None,
+         timeout_bench: float | None = None) -> str:
     """Send a chat completion through the rotation. Returns the assistant text.
 
     Latency caps (so a slow free model never hangs a request): `request_timeout` per call,
     `max_429_retries` (0 = no backoff), `max_providers` (try at most N then give up).
+    `timeout_bench`: how long a provider that timed out sits out (default _CB_COOLDOWN, 300 s); a caller
+    with a tight deadline (the marketplace chat) passes a short one, so its own timeout never benches a
+    provider the owner's reports need. It never shortens a longer bench already set.
     `task` drives capability-aware provider ordering. Caller redacts PII (use Redactor).
     """
     if not _ROTATION:
@@ -423,10 +427,18 @@ def chat(messages: list[dict[str, str]], *, tier: int = 1,
             except Exception as exc:  # noqa: BLE001 - network/timeout -> next provider
                 last_err = exc
                 _note(prov, "fail")
-                prov.disabled_until = time.time() + _CB_COOLDOWN
+                _bench_failed(prov, exc, timeout_bench)
                 break
 
     raise AllProvidersFailed(f"All providers failed. Last error: {last_err}")
+
+
+def _bench_failed(prov: Provider, exc: Exception, timeout_bench: float | None) -> None:
+    """A network error benches for _CB_COOLDOWN; a timeout for `timeout_bench` when the caller gave one."""
+    if isinstance(exc, APITimeoutError) and timeout_bench is not None:
+        prov.disabled_until = max(prov.disabled_until, time.time() + timeout_bench)
+    else:
+        prov.disabled_until = time.time() + _CB_COOLDOWN
 
 
 _JSON_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
@@ -447,7 +459,7 @@ def parse_json_object(text: str | None) -> dict | None:
 
 def chat_json(messages: list[dict], *, validate=None, tier: int = 1, task: str = "assist",
               temperature: float = 0.0, max_tokens: int = 300, request_timeout: float = 10.0,
-              max_providers: int = 3, vision: bool = False) -> tuple[dict, str]:
+              max_providers: int = 3, vision: bool = False, timeout_bench: float | None = None) -> tuple[dict, str]:
     """One structured answer: `(object, provider name)` from the first provider whose reply parses
     as a JSON object and passes `validate`. A reply that is not the JSON asked for moves on to the
     next provider instead of failing the call. No 429 backoff and never a throttled host: the
@@ -483,7 +495,7 @@ def chat_json(messages: list[dict], *, validate=None, tier: int = 1, task: str =
         except Exception as exc:  # noqa: BLE001 - network/timeout -> next provider
             last_err = exc
             _note(prov, "fail")
-            prov.disabled_until = time.time() + _CB_COOLDOWN
+            _bench_failed(prov, exc, timeout_bench)
     raise AllProvidersFailed(f"json: all providers failed. Last error: {last_err}")
 
 

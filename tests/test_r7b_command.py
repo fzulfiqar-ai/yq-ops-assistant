@@ -249,7 +249,8 @@ class FakeRPC:
         self.data = {"anchor": ANCHOR, "sales": SALES, "trend": TREND, "daily": DAILY, "reps": REPS, "attainment": ATTAINMENT,
                      "customers": CUSTOMERS, "movers": MOVERS, "stock": STOCK, "margin_totals": MARGIN_TOTALS,
                      "below_cost": BELOW_COST, "landed": LANDED, "receivables": RECEIVABLES, "ar_owner": AR_OWNER,
-                     "orders": ORDERS, "match": MATCH, "price_drops": PRICE_DROPS, "drop_costs": DROP_COSTS}
+                     "orders": ORDERS, "match": MATCH, "price_drops": PRICE_DROPS, "drop_costs": DROP_COSTS,
+                     "chat_tickets": []}
         self.data.update(over)
         self.calls: list[tuple[str, str, list | None]] = []
 
@@ -268,7 +269,8 @@ class FakeRPC:
                  ("DISTINCT ON (v.customer_name)", "ar_owner"), ("AS invoiced_open", "match"),
                  ("FROM v_command_orders", "orders"), ("units_count AS units_ordered", "orders_fallback"),
                  # the costs' subquery also reads v_price_change: its own needle comes first
-                 ("FROM v_product_economics e WHERE", "drop_costs"), ("FROM v_price_change", "price_drops")]
+                 ("FROM v_product_economics e WHERE", "drop_costs"), ("FROM v_price_change", "price_drops"),
+                 ("FROM v_assist_open_tickets", "chat_tickets")]
         for needle, name in table:
             if needle in s:
                 return name
@@ -989,7 +991,8 @@ def _():
         metrics._live_cache.clear()                   # the live half expires after a minute
         metrics.overview("mtd")
         new = [c[0] for c in fake.calls[n2:]]
-        assert set(new) <= {"orders", "match"} and "orders" in new, f"only the live half is re-read: {new}"
+        # the live half: the orders, the invoice match and (YQ Assist v2) the open chat tickets
+        assert set(new) <= {"orders", "match", "chat_tickets"} and "orders" in new, f"only the live half is re-read: {new}"
         reports.invalidate_dashboard_cache()
         assert not metrics._focus_cache and not metrics._live_cache
     # a build that missed a source (the database blinked) is kept a minute, not until the next upload

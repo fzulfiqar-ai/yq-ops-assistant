@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { ageLabel, bhd3, bhdStr, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useToday, waLink, type MoneyStrip, type TodayData } from './lib'
 import { ComingSoon } from './ComingSoon'
 import { BasketsNotSent, DueThisWeek, LinkThisWeek } from './FollowUps'
+import { ChatTickets } from './ChatTickets'
 import { PriceDrops } from './PriceDrops'
 
 /**
@@ -232,6 +233,9 @@ export default function Today() {
 
             {/* baskets opened on my link and never sent (R3a) */}
             <BasketsNotSent data={t.baskets} />
+
+            {/* YQ Assist v2: problems and call-backs my shops raised in the chat (the order's rep owns them) */}
+            <ChatTickets tickets={t.chat || []} />
 
             {/* waiting for stock */}
             {t.restock.length > 0 && (

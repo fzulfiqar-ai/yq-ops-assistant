@@ -1,11 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation } from 'react-router-dom'
-import { MessageCircleQuestion } from 'lucide-react'
+import { MessageCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAssistEnabled } from './enabled'
-import { OPEN_EVENT, rememberOpen, wasOpen, type OpenOptions } from './open'
+import { OPEN_EVENT, READY_EVENT, rememberOpen, wasOpen, type OpenOptions } from './open'
 import { L } from './launcherStrings'
+import { Orb } from './Orb'
 
 const loadPanel = () => import('./AssistPanel')
 const AssistPanel = lazy(loadPanel)
@@ -48,6 +49,15 @@ export function AssistLauncher() {
   const [itemCode, setItemCode] = useState<string | null>(null)
   const [first, setFirst] = useState<{ id: number; text: string } | null>(null)
   const stackHidden = useStackHidden()
+  // v2: an answer that landed while the chat was closed (the chat keeps running), and the drop's rings on a tap
+  const [ready, setReady] = useState(false)
+  const [drop, setDrop] = useState(0)
+  useEffect(() => {
+    const on = () => setReady(true)
+    window.addEventListener(READY_EVENT, on)
+    return () => window.removeEventListener(READY_EVENT, on)
+  }, [])
+  if (open && ready) setReady(false)
 
   useEffect(() => {
     if (!enabled) return
@@ -93,21 +103,36 @@ export function AssistLauncher() {
       ) : null}
       <button
         type="button"
-        aria-label={L.label}
+        aria-label={ready ? L.ready : L.label}
         aria-expanded={open}
         aria-haspopup="dialog"
         data-assist-launcher=""
-        onClick={() => (open ? close() : setOpen(true))}
+        onClick={() => {
+          setDrop((n) => n + 1)
+          if (open) close()
+          else setOpen(true)
+        }}
         onPointerEnter={() => void loadPanel()}
         onFocus={() => void loadPanel()}
         style={{ bottom: stackHidden ? 'calc(var(--m-safe-b, 0px) + 12px)' : 'calc(var(--m-bottom-stack, 0px) + 12px)' }}
         className={cn(
-          'fixed end-3 z-[44] inline-flex h-[52px] w-[52px] items-center justify-center gap-2 rounded-full bg-plum font-semibold text-white shadow-3 transition-[bottom,transform,background-color] duration-3 ease-m hover:bg-plum-deep active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
-          'md:bottom-5 md:end-5 md:h-12 md:w-auto md:px-5 md:text-sm',
+          'fixed end-3 z-[44] inline-flex h-[54px] w-[54px] items-center justify-center gap-2.5 rounded-full font-semibold transition-[bottom,transform] duration-3 ease-m active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
+          'md:bottom-5 md:end-5 md:h-12 md:w-auto md:bg-surface md:pe-5 md:ps-1.5 md:text-sm md:text-plum-ink md:shadow-3 md:ring-1 md:ring-line md:hover:ring-plum/40',
           open && 'max-md:hidden',
         )}
       >
-        <MessageCircleQuestion size={22} aria-hidden="true" />
+        <span className="relative grid place-items-center">
+          <Orb size={54} className="shadow-3 md:hidden" />
+          <Orb size={38} className="max-md:hidden" />
+          <MessageCircle size={20} aria-hidden="true" className="absolute text-white md:hidden" />
+          {drop > 0 ? (
+            <span key={drop} className="assist-rings go" aria-hidden="true">
+              <span />
+              <span />
+            </span>
+          ) : null}
+          {ready ? <span aria-hidden="true" className="absolute -end-0.5 -top-0.5 h-3.5 w-3.5 rounded-full bg-bad ring-2 ring-surface" /> : null}
+        </span>
         <span className="hidden md:inline">{L.text}</span>
       </button>
     </>,

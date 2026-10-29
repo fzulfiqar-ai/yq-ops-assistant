@@ -285,6 +285,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         item_code: str | None = Field(default=None, max_length=64)
         order_tokens: list[str] = Field(default_factory=list, max_length=20)
         referral_code: str | None = Field(default=None, max_length=32)
+        # v2: a tile or chip (market_assist.ACTIONS), answered from data with no model call; `message` is its label
+        action: str | None = Field(default=None, max_length=16)
+        # v2: the ids of the turns on screen; the server reads the chat so far from its own log (`history` is
+        # still accepted from older pages and ignored: a page could forge an "assistant" line)
+        history_ids: list[int] = Field(default_factory=list, max_length=6)
 
     class FeedbackRequest(BaseModel):
         kind: str = Field(max_length=16)
@@ -307,6 +312,32 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     class RestockResolve(BaseModel):
         ids: list[int] = Field(max_length=200)
+
+    # YQ Assist v2 tickets (app/market_support.py): the ticket card's one request, and the staff's changes
+    class TicketLine(BaseModel):
+        index: int | None = Field(default=None, ge=0, le=500)     # the line's position in the order (with a token)
+        item_code: str = Field(max_length=64)
+        qty: int = Field(ge=1, le=9999)
+
+    class TicketRequest(BaseModel):
+        kind: str = Field(max_length=16)
+        order_token: str | None = Field(default=None, max_length=64)
+        lines: list[TicketLine] = Field(default_factory=list, max_length=10)
+        note: str | None = Field(default=None, max_length=500)
+        photos: list[str] = Field(default_factory=list, max_length=3)    # data URLs, each checked and re-encoded
+        client_ticket_id: str | None = Field(default=None, max_length=64)
+        device_id: str | None = Field(default=None, max_length=64)
+        session_id: str | None = Field(default=None, max_length=64)
+        turn_id: int | None = None
+        referral_code: str | None = Field(default=None, max_length=32)
+        lang: str | None = Field(default=None, max_length=8)
+
+    class TicketChange(BaseModel):
+        status: str | None = Field(default=None, max_length=16)
+        resolution: str | None = Field(default=None, max_length=16)
+        salesman_id: int | None = None
+        unassign: bool = False
+        note: str | None = Field(default=None, max_length=1000)
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _check_token(token: str) -> None:
@@ -633,12 +664,20 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @limiter.limit("30/minute")                              # per address: the net
     @limiter.limit("6/minute", key_func=device_key)          # per address + device
     @limiter.limit("60/day", key_func=device_key)
-    def market_ask(request: Request, body: AskRequest) -> dict:
+    def market_ask(request: Request, body: AskRequest):
         """One chat turn: what the merchant wants, answered from the public catalog and the
-        device's own orders only. Never places an order; `add` lines wait for the merchant's tap."""
+        device's own orders only. Never places an order; `add` lines wait for the merchant's tap.
+        `Accept: text/event-stream` (v2): the same turn streamed (its stages, the cards before the
+        sentence, then the result); text/event-stream because GZipMiddleware leaves that type alone,
+        so each event leaves at once. Validation, the switch and the limits answer before the stream."""
         _assist_open()
         from app import market_assist
-        return market_assist.ask(body.model_dump(), ip=_ip(request))
+        if "text/event-stream" in (request.headers.get("accept") or ""):
+            from fastapi.responses import StreamingResponse
+            return StreamingResponse(market_assist.ask_events(body.model_dump(), ip=_ip(request)),
+                                     media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
+        return market_assist.ask_safe(body.model_dump(), ip=_ip(request))
 
     @app.post("/public/market/voice")
     @limiter.limit("20/minute")                              # per address: the net
@@ -680,12 +719,122 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         from app import market_assist
         return {"ok": market_assist.save_feedback(body.model_dump(), ip=_ip(request))}
 
+    @app.post("/public/market/ticket")
+    @limiter.limit("10/minute")                              # per address
+    @limiter.limit("3/minute", key_func=device_key)          # per address + device
+    @limiter.limit("10/day", key_func=device_key)
+    def market_ticket(request: Request, body: TicketRequest) -> dict:
+        """YQ Assist v2: a damaged, wrong or missing item, a delivery problem, a return, a call back or an
+        account request, from the chat's ticket card. An order is named by the token this device holds;
+        its lines are checked against it (app/market_support.py). Off until shop_ai_support_enabled."""
+        _assist_open()
+        from app import market_support
+        if not market_support.enabled():
+            raise HTTPException(status_code=404, detail="Problem reports are not open yet.")
+        try:
+            return market_support.create_ticket(body.model_dump(), ip=_ip(request))
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # ── portal: chat tickets (Shop Admin), and a rep's own (Shop Orders) ────────
+    @app.get("/shop/tickets")
+    def shop_tickets_list(status: str | None = None, salesman_id: int | None = None, kind: str | None = None,
+                          limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0, le=100_000),
+                          _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_support
+        return market_support.list_tickets(status, salesman_id, kind, limit, offset)
+
+    @app.get("/shop/tickets/{ticket_id}")
+    def shop_ticket_get(ticket_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_support
+        t = market_support.get_ticket(ticket_id, user.email)
+        if not t:
+            raise HTTPException(status_code=404, detail="Ticket not found.")
+        return t
+
+    @app.patch("/shop/tickets/{ticket_id}")
+    def shop_ticket_update(ticket_id: int, body: TicketChange,
+                           user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import market_support
+        changes = body.model_dump(exclude_none=True)
+        if body.unassign:
+            changes["salesman_id"] = None
+        changes.pop("unassign", None)
+        try:
+            t = market_support.update_ticket(ticket_id, changes, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.ticket_update", detail={"id": ticket_id, **{k: v for k, v in changes.items() if k != "note"}})
+        return t
+
+    @app.patch("/shop/me/tickets/{ticket_id}")
+    def shop_my_ticket_update(ticket_id: int, body: TicketChange,
+                              user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """A rep moves only his own tickets (in progress, waiting for the shop, resolved) and adds a note; he
+        cannot hand one to another rep. An admin may move any."""
+        from app import market_support
+        if user.role != "admin":
+            sm = shop.salesman_for_user(user.email)
+            own = market_support.list_tickets(None, (sm or {}).get("id") or -1, None, 200, 0)["rows"]
+            if not sm or ticket_id not in {t["id"] for t in own}:
+                raise HTTPException(status_code=404, detail="Ticket not found.")
+        changes = body.model_dump(exclude_none=True, exclude={"salesman_id", "unassign"})
+        try:
+            t = market_support.update_ticket(ticket_id, changes, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.my_ticket_update", detail={"id": ticket_id, "status": changes.get("status")})
+        return t
+
     # ── portal: what merchants ask and suggest (Shop Admin) ──────────────────
     @app.get("/shop/assist/turns")
     def shop_assist_turns(days: int = Query(14, ge=1, le=90), limit: int = Query(200, ge=1, le=500),
                           _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
         from app import market_assist
         return {"turns": market_assist.recent_turns(days, limit)}
+
+    # YQ Assist v2 back office (app/assist_admin.py): summed on the server, Shop Admin only
+    @app.get("/shop/assist/overview")
+    def shop_assist_overview(days: int = Query(7, ge=1, le=90), _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.overview(days)
+
+    @app.get("/shop/assist/sessions")
+    def shop_assist_sessions(days: int = Query(7, ge=1, le=90), outcome: str | None = Query(None, max_length=16),
+                             q: str | None = Query(None, max_length=80), limit: int = Query(50, ge=1, le=200),
+                             offset: int = Query(0, ge=0, le=100_000),
+                             _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.sessions(days, outcome, q, limit, offset)
+
+    @app.get("/shop/assist/sessions/{session_id}")
+    def shop_assist_session(session_id: str, _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return {"turns": assist_admin.session(session_id[:64])}
+
+    @app.get("/shop/assist/insights")
+    def shop_assist_insights(days: int = Query(30, ge=1, le=90), _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.insights(days)
+
+    class PoliciesBody(BaseModel):
+        answers: list[dict] = Field(default_factory=list, max_length=20)
+
+    @app.get("/shop/assist/policies")
+    def shop_assist_policies(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app import assist_admin
+        return assist_admin.policies_get()
+
+    @app.put("/shop/assist/policies")
+    def shop_assist_policies_put(body: PoliciesBody, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """The office's approved answers (returns, warranty, payment...): the only words the chat may use on them."""
+        from app import assist_admin
+        try:
+            out = assist_admin.policies_put(body.answers, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.assist_policies", detail={"topics": [a.get("topic") for a in out["answers"]]})
+        return out
 
     @app.get("/shop/feedback")
     def shop_feedback_list(status: str | None = None, limit: int = Query(200, ge=1, le=500),

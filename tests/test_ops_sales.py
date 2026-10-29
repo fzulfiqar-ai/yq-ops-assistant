@@ -1730,7 +1730,7 @@ def _():
     # every source the Command Centre's attention list is worked out from, by the reader's own names
     src = (ROOT / "app" / "metrics.py").read_text(encoding="utf-8")
     needed = ("anchor", "orders", "match", "salesmen", "reps", "attainment", "receivables", "ar_owner", "stock", "movers",
-              "margin_totals", "below_cost")
+              "margin_totals", "below_cost", "chat_tickets")
     assert sorted(sales.ATTENTION_SOURCES) == sorted(needed)
     for name in needed:
         assert f'"{name}"' in src, f"app.metrics no longer reads a source called {name}"

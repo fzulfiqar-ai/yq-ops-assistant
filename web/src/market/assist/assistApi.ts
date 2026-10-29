@@ -1,10 +1,14 @@
-import { request } from '@/lib/shopApi'
+import { API_BASE, ShopApiError, request } from '@/lib/shopApi'
 
 /** Transport for YQ Assistant. Same idiom as lib/marketApi: no auth header, JSON in and out. */
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
 export type AskIntent = 'find' | 'fit' | 'add' | 'order_status' | 'usual' | 'handoff' | 'feedback' | 'chat' | 'list' | 'photo'
+  | 'top' | 'deals' | 'plan' | 'ticket' | 'ticket_status' | 'policy' | 'account'
+
+/** v2: the chat's tiles, answered from data with no model call (app/market_assist.py ACTIONS) */
+export type AskAction = 'top' | 'deals' | 'plan' | 'usual' | 'orders' | 'handoff' | 'ticket' | 'tickets'
 
 export interface AskHistory {
   role: 'user' | 'assistant'
@@ -20,6 +24,10 @@ export interface AskBody {
   item_code: string | null
   order_tokens: string[]
   referral_code: string | null
+  /** v2: a tile tapped (the message is its label) */
+  action?: AskAction
+  /** v2: the turn ids on screen; the server reads the chat so far from its own log */
+  history_ids?: number[]
 }
 
 export interface AskAddLine {
@@ -54,6 +62,36 @@ export interface AskLine {
   /** 0-2 other codes the merchant can swap in */
   alternatives: string[]
   status: LineStatus
+  /** v2, a plan's line: why it is there (usual, selling, deal, minimum) */
+  why?: string
+}
+
+/** v2: why a card is shown (the card itself shows its badges) */
+export interface AskCard {
+  code: string
+  why: string
+}
+
+export interface AskPlan {
+  usual: number
+  selling: number
+  deal: number
+  minimum: boolean
+  budget: number | null
+}
+
+export interface AskTicketCard {
+  issue: string
+  issues: string[]
+  orders: AskOrder[]
+}
+
+export interface AskTicketRow {
+  ref: string
+  kind: string
+  status: string
+  created_at: string
+  updated_at?: string | null
 }
 
 export interface AskResponse {
@@ -71,6 +109,123 @@ export interface AskResponse {
   /** nothing found for a product ask */
   miss: boolean
   turn_id: number | null
+  // v2 (absent on an older API)
+  cards?: AskCard[]
+  /** a sold-out card's in-stock alternatives */
+  alts?: Record<string, string[]>
+  plan?: AskPlan | null
+  ticket?: AskTicketCard | null
+  tickets?: AskTicketRow[]
+  policy?: { topic: string; official: boolean } | null
+  /** offer "Ask for a call back" */
+  callback?: boolean
+  /** the rep was brought in */
+  escalated?: boolean
+}
+
+export type AskStage = 'reading' | 'checking' | 'writing'
+
+export interface StreamHandlers {
+  onStage?: (key: AskStage) => void
+  /** the products, before the sentence is written */
+  onCards?: (partial: AskResponse) => void
+}
+
+/**
+ * v2: the same turn, streamed (Accept: text/event-stream). Stages and the cards arrive as they are known,
+ * then the result. An API that answers JSON (older, or the QA harness's mock) is read as one result. A stream
+ * that breaks before its result is asked again once as plain JSON.
+ */
+export async function postAskStream(body: AskBody, h: StreamHandlers, signal?: AbortSignal): Promise<AskResponse> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 60000)
+  const onAbort = () => ctrl.abort()
+  signal?.addEventListener('abort', onAbort)
+  try {
+    const res = await fetch(`${API_BASE}/public/market/ask`, {
+      method: 'POST',
+      headers: { ...JSON_HEADERS, Accept: 'text/event-stream, application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      let detail = ''
+      try {
+        detail = String((JSON.parse(text) as { detail?: unknown }).detail || '')
+      } catch {
+        detail = text.slice(0, 200)
+      }
+      throw new ShopApiError(res.status, detail)
+    }
+    if (!(res.headers.get('content-type') || '').includes('text/event-stream') || !res.body) {
+      return (await res.json()) as AskResponse
+    }
+    const reader = res.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ''
+    let result: AskResponse | null = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (value) buf += dec.decode(value, { stream: true })
+      let cut = buf.indexOf('\n\n')
+      while (cut >= 0) {
+        const block = buf.slice(0, cut)
+        buf = buf.slice(cut + 2)
+        cut = buf.indexOf('\n\n')
+        let kind = ''
+        let data = ''
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) kind = line.slice(7).trim()
+          else if (line.startsWith('data: ')) data += line.slice(6)
+        }
+        if (!kind || !data) continue
+        try {
+          const payload = JSON.parse(data)
+          if (kind === 'stage') h.onStage?.(payload.key as AskStage)
+          else if (kind === 'cards') h.onCards?.(payload as AskResponse)
+          else if (kind === 'result') result = payload as AskResponse
+        } catch {
+          /* a broken event is skipped */
+        }
+      }
+      if (done) break
+    }
+    if (result) return result
+    if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+    return postAsk(body, signal)            // the stream broke before its result: once more, plainly
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+/** v2: the ticket card's one request (app/market_support.py create_ticket). */
+export interface TicketBody {
+  kind: string
+  order_token?: string | null
+  lines: { index?: number | null; item_code: string; qty: number }[]
+  note?: string
+  photos?: string[]
+  client_ticket_id: string
+  device_id: string | null
+  session_id: string | null
+  turn_id?: number | null
+  referral_code: string | null
+  lang: 'en' | 'ar'
+}
+
+export interface TicketReceipt {
+  ok: boolean
+  ref: string
+  kind: string
+  status: string
+  rep: AskHandoff | null
+  repeat?: boolean
+}
+
+export function postTicket(body: TicketBody): Promise<TicketReceipt> {
+  return request<TicketReceipt>(`/public/market/ticket`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) })
 }
 
 export type FeedbackKind = 'idea' | 'problem' | 'up' | 'down' | 'question'

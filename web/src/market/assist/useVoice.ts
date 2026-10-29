@@ -13,7 +13,12 @@ import { A } from './strings'
 export type VoiceState = 'idle' | 'recording' | 'uploading'
 const MAX_SECONDS = 55
 
-export function useVoice(onText: (text: string) => void) {
+/**
+ * v2: `onLevel(0..1)` hears the voice's loudness about 60 times a second while recording (a Web Audio
+ * analyser, nothing leaves the phone); the chat writes it into a CSS variable for the orb and the bars, so
+ * nothing re-renders per frame. 0 when recording ends.
+ */
+export function useVoice(onText: (text: string) => void, onLevel?: (level: number) => void) {
   const [state, setState] = useState<VoiceState>('idle')
   const [secs, setSecs] = useState(0)
   const [note, setNote] = useState('')
@@ -24,15 +29,57 @@ export function useVoice(onText: (text: string) => void) {
   const cancelled = useRef(false)
   const abort = useRef<AbortController | null>(null)
   const onTextRef = useRef(onText)
+  const onLevelRef = useRef(onLevel)
+  const meter = useRef<{ ctx: AudioContext; raf: number } | null>(null)
   useEffect(() => {
     onTextRef.current = onText
+    onLevelRef.current = onLevel
   })
+
+  const stopMeter = useCallback(() => {
+    const m = meter.current
+    meter.current = null
+    if (m) {
+      cancelAnimationFrame(m.raf)
+      void m.ctx.close().catch(() => {})
+    }
+    onLevelRef.current?.(0)
+  }, [])
+
+  const startMeter = useCallback((stream: MediaStream) => {
+    if (!onLevelRef.current) return
+    const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!Ctx) return
+    try {
+      const ctx = new Ctx()
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      ctx.createMediaStreamSource(stream).connect(analyser)
+      const buf = new Uint8Array(analyser.fftSize)
+      let smooth = 0
+      const tick = () => {
+        analyser.getByteTimeDomainData(buf)
+        let sum = 0
+        for (let i = 0; i < buf.length; i++) {
+          const v = (buf[i] - 128) / 128
+          sum += v * v
+        }
+        smooth = smooth * 0.7 + Math.min(1, Math.sqrt(sum / buf.length) * 4) * 0.3
+        onLevelRef.current?.(smooth)
+        if (meter.current) meter.current.raf = requestAnimationFrame(tick)
+      }
+      meter.current = { ctx, raf: requestAnimationFrame(tick) }
+    } catch {
+      /* no meter: the recording works without it */
+    }
+  }, [])
 
   const release = useCallback(() => {
     window.clearInterval(timer.current)
+    stopMeter()
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
-  }, [])
+  }, [stopMeter])
 
   const upload = useCallback(
     async (blob: Blob, ext: string) => {
@@ -105,6 +152,7 @@ export function useVoice(onText: (text: string) => void) {
     }
     recRef.current = rec
     rec.start()
+    startMeter(stream)
     setSecs(0)
     setState('recording')
     const t0 = Date.now()
@@ -113,7 +161,7 @@ export function useVoice(onText: (text: string) => void) {
       setSecs(s)
       if (s >= MAX_SECONDS) stop()
     }, 250)
-  }, [release, stop, upload])
+  }, [release, startMeter, stop, upload])
 
   // closing the panel mid-recording lets go of the microphone
   useEffect(
