@@ -39,7 +39,8 @@ export function MegaNav({ onClose, onEnter, onLeave, leaving = false, onGone }: 
         if (leaving && e.target === e.currentTarget) onGone?.()
       }}
       className={cn(
-        'absolute start-0 top-full z-header mt-2 flex w-[min(960px,calc(100vw-2*var(--m-gutter)))] overflow-hidden rounded-xl border border-line bg-surface shadow-3',
+        // top-full of Browse's wrapper, whose 8 px bottom padding is the hover bridge (StickyHeader)
+        'absolute start-0 top-full z-header flex w-[min(960px,calc(100vw-2*var(--m-gutter)))] overflow-hidden rounded-xl border border-line bg-surface shadow-3',
         leaving ? 'pointer-events-none [animation:m-pop-out_140ms_var(--m-ease-in)_both]' : '[animation:m-pop_200ms_var(--m-ease-out)_both]',
       )}
     >

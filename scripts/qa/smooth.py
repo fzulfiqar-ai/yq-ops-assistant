@@ -720,10 +720,18 @@ def browse_menu(page: Page) -> list[Finding]:
         b = page.evaluate(MENU_STATE)
         if not _menu_open(b):
             return out + [("fail", "browse-menu", "the menu did not open again on hover", b)]
-    # a real click at the first row's spot, reached the way a hand does: straight down from Browse
-    page.mouse.move(b["x"], b["y"], steps=8)
+    # a real click at the first row's spot, reached the way a slow hand does: straight down from
+    # Browse, resting 250 ms over the space between the button and the menu (a gap there let the
+    # menu's 160 ms close timer win, and the click landed on the strip under it)
+    # (from Browse's centre, so the path is the same in Arabic, where the menu hangs from its right)
+    box = btn.bounding_box()
+    x = box["x"] + box["width"] / 2 if box else b["x"]
+    gap_y = box["y"] + box["height"] + 2 if box else b["y"]
+    page.mouse.move(x, gap_y, steps=4)
+    page.wait_for_timeout(250)
+    page.mouse.move(x, b["y"], steps=4)
     page.wait_for_timeout(150)
-    page.mouse.click(b["x"], b["y"])
+    page.mouse.click(x, b["y"])
     try:
         page.wait_for_url(lambda u: urlparse(u).path != "/", timeout=4000)
     except PWError:

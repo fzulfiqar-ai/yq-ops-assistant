@@ -154,7 +154,9 @@ export function StickyHeader() {
           {desktop ? (
             <div
               ref={megaRef}
-              className="relative shrink-0"
+              // pb-2 + -mb-2: the 8 px between the button and the menu is part of this hover area (a
+              // bridge), so a slow hand crossing it never starts the 160 ms close; the layout is unchanged
+              className="relative -mb-2 shrink-0 pb-2"
               onPointerEnter={(e) => e.pointerType === 'mouse' && openMega()}
               onPointerLeave={(e) => e.pointerType === 'mouse' && closeMegaSoon()}
             >
