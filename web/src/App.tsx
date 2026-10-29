@@ -1,4 +1,4 @@
-import { lazy, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { ProtectedRoute, Gate } from '@/components/guards'
 import { isManagement, useAuth } from '@/lib/auth'
@@ -6,52 +6,15 @@ import { homeFor } from '@/lib/nav'
 import Login from '@/pages/Login'
 import AcceptInvite from '@/pages/AcceptInvite'
 
-// Route-level code-splitting — each page is its own chunk.
-const Dashboard = lazy(() => import('@/pages/Dashboard'))
-const Feed = lazy(() => import('@/pages/Feed'))
-const Assistant = lazy(() => import('@/pages/Assistant'))
-const FieldNotes = lazy(() => import('@/pages/FieldNotes'))
-const Orders = lazy(() => import('@/pages/Orders'))
-const OrderDetail = lazy(() => import('@/pages/OrderDetail'))
-const Leads = lazy(() => import('@/pages/Leads'))
-const Coaching = lazy(() => import('@/pages/Coaching'))
-const Agents = lazy(() => import('@/pages/Agents'))
-const Catalog = lazy(() => import('@/pages/Catalog'))
-const Upcoming = lazy(() => import('@/pages/Upcoming'))
-const Finds = lazy(() => import('@/pages/Finds'))
-const MarketIntel = lazy(() => import('@/pages/MarketIntel'))
-// Market Intel v2 (r8m): one quality case — timeline, verification, evidence level, supplier actions.
-const MarketCase = lazy(() => import('@/pages/market-intel/CasePage'))
-const Inventory = lazy(() => import('@/pages/Inventory'))
-const StockMovement = lazy(() => import('@/pages/StockMovement'))
-const Sales = lazy(() => import('@/pages/Sales'))
-const Margins = lazy(() => import('@/pages/Margins'))
-const PriceTracker = lazy(() => import('@/pages/PriceTracker'))
-const Receivables = lazy(() => import('@/pages/Receivables'))
-const DataPage = lazy(() => import('@/pages/DataPage'))
-const Team = lazy(() => import('@/pages/Team'))
-const Settings = lazy(() => import('@/pages/Settings'))
-const PublicCatalog = lazy(() => import('@/pages/PublicCatalog'))
-const PublicFinds = lazy(() => import('@/pages/PublicFinds'))
-const Marketing = lazy(() => import('@/pages/Marketing'))
-const OptOut = lazy(() => import('@/pages/OptOut'))
-const OrderStatus = lazy(() => import('@/pages/OrderStatus'))
-const ShopOrders = lazy(() => import('@/pages/ShopOrders'))
-const Salesmen = lazy(() => import('@/pages/Salesmen'))
-const ShopRules = lazy(() => import('@/pages/ShopRules'))
-const ShopAnalytics = lazy(() => import('@/pages/ShopAnalytics'))
-const MerchantVoice = lazy(() => import('@/pages/MerchantVoice'))
-// R7d: one marketplace merchant — facts, trend against its own usual, INSIGHTS with their evidence.
-const MerchantProfile = lazy(() => import('@/pages/MerchantProfile'))
-// The customer-facing shop, reused inside the portal so a salesman can order for a shop.
-const ShopPage = lazy(() => import('@/pages/shop/ShopPage'))
-const PickList = lazy(() => import('@/pages/PickList'))
-// The salesman app (SalesmanShell): Today · Catalog · Orders · Customers · Me.
-const SalesToday = lazy(() => import('@/pages/sales/Today'))
-const SalesCustomers = lazy(() => import('@/pages/sales/Customers'))
-const SalesAccount = lazy(() => import('@/pages/sales/Account'))
-// The Management Command Centre (R7b): the whole company on one page, plus its team and customer views.
-const CommandCentre = lazy(() => import('@/pages/CommandCentre'))
+// Route-level code-splitting: each page is its own chunk, declared once in lib/pageCode (lib/lazyPage: a page
+// whose code is here renders at once, and the shells fetch the next page's code ahead — lib/prefetch).
+import {
+  Dashboard, Feed, Assistant, FieldNotes, Orders, OrderDetail, Leads, Coaching, Agents, Catalog, Upcoming,
+  Finds, MarketIntel, MarketCase, Inventory, StockMovement, Sales, Margins, PriceTracker, Receivables,
+  DataPage, Team, Settings, PublicCatalog, PublicFinds, Marketing, OptOut, OrderStatus, ShopOrders, Salesmen,
+  ShopRules, ShopAnalytics, MerchantVoice, MerchantProfile, ShopPage, PickList, SalesToday, SalesCustomers,
+  SalesAccount, CommandCentre,
+} from '@/lib/pageCode'
 
 /** Shop analytics and the merchant profile: the office (Shop Admin) and management, which reads them
  * through its Customer orders page ('Shop Orders'; lib/nav MANAGEMENT_NAV decides what it may open). */

@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@supabase/supabase-js'
 import { supabase, getSessionSafe } from './supabase'
 import { apiGet, ApiError, API_BASE, PASSWORD_CHANGE_EVENT } from './api'
+import { warmSalesmanLanding } from './prefetch'
 
 export type Role = 'admin' | 'member' | 'salesman' | 'storekeeper' | 'management'
 
@@ -176,8 +177,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       /* storage unavailable */
     }
-    // A salesman never sees the Dashboard: skip the chunk + the 403 (role remembered from the last /me).
-    if (role === 'salesman') return
+    // A salesman never sees the Dashboard (role remembered from the last /me): no chunk, no 403. He lands
+    // on Today, so warm that instead — its code and its read (ship 2, item 13; the shell warms his other
+    // tabs at idle once it has painted, lib/prefetch). This used to skip him: his first tap froze.
+    if (role === 'salesman') {
+      warmSalesmanLanding(queryClient)
+      return
+    }
     // Management lands on the Command Centre (R7b): warm that page and its default period instead.
     if (role === 'management') {
       void import('@/pages/CommandCentre')
