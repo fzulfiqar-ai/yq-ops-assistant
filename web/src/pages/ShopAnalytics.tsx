@@ -584,7 +584,7 @@ export default function ShopAnalytics() {
   return (
     <div>
       <PageHeader
-        title="Shop Analytics"
+        title="Shop analytics"
         subtitle={`What merchants did on the marketplace: visits, searches, orders and who is due · ${MONEY_NOTE}`}
         actions={
           <div className="flex flex-wrap gap-1.5">

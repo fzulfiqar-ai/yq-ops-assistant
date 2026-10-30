@@ -34,7 +34,7 @@ export default function Coaching() {
     const p = brief?.profile || {}
     return (
       <div>
-        <PageHeader title="Pre-visit coach" subtitle="Everything you need before you walk in — what they buy, owe, and what to pitch next" />
+        <PageHeader title="Coach" subtitle="Everything you need before you walk in — what they buy, owe, and what to pitch next" />
         <button onClick={() => setAccount(null)} className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground">
           <ArrowLeft size={15} /> Pick another account
         </button>
@@ -112,7 +112,7 @@ export default function Coaching() {
 
   return (
     <div>
-      <PageHeader title="Pre-visit coach" subtitle="Pick an account to get a ready brief before you call or visit" />
+      <PageHeader title="Coach" subtitle="Pick an account to get a ready brief before you call or visit" />
       <div className="mb-4 flex items-center gap-2 rounded-2xl border bg-card px-3.5 py-2.5 shadow-soft focus-within:border-primary/40">
         <Search size={17} className="text-muted-foreground" />
         <input value={q} onChange={(e) => setQ(e.target.value)} autoFocus placeholder="Search an account…"

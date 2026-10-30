@@ -80,7 +80,7 @@ function SendCenter() {
         if (row.channel === 'whatsapp' && row.wa_link) window.open(row.wa_link, '_blank')
         const r = await apiPost<{ ok: boolean; reason?: string }>(`/outreach/${row.id}/send`)
         if (!r.ok) { toast(r.reason || 'Send failed.', 'error'); return }
-        toast(row.channel === 'email' ? 'Email sent ✓' : 'Logged — message opened in WhatsApp ✓', 'success')
+        toast(row.channel === 'email' ? 'Email sent' : 'Logged — message opened in WhatsApp', 'success')
       }
       qc.invalidateQueries({ queryKey: ['outreach'] })
     } catch { toast('Action failed.', 'error') }
@@ -170,7 +170,7 @@ function Contacts() {
         '/contacts/import', { rows: parsed, commit })
       setPreview(r.rows)
       if (commit) {
-        toast(`Saved ${r.committed} contacts ✓`, 'success')
+        toast(`Saved ${r.committed} contacts`, 'success')
         setPaste(''); setPreview(null)
         qc.invalidateQueries({ queryKey: ['contacts', 'coverage'] })
       }
@@ -331,7 +331,7 @@ function Content() {
     setPublishing(p.id)
     try {
       const r = await apiPost<{ ok: boolean; results: Record<string, { ok: boolean; reason?: string; error?: string }> }>(`/social/posts/${p.id}/publish`)
-      const parts = Object.entries(r.results || {}).map(([k, v]) => `${k}: ${v.ok ? '✓' : (v.reason || v.error || '✗')}`)
+      const parts = Object.entries(r.results || {}).map(([k, v]) => `${k}: ${v.ok ? 'sent' : (v.reason || v.error || 'failed')}`)
       toast(parts.join(' · ') || 'Done.', r.ok ? 'success' : 'error')
       qc.invalidateQueries({ queryKey: ['social-posts'] })
     } catch { toast('Publish failed.', 'error') }
@@ -478,7 +478,7 @@ export default function Marketing() {
   const [tab, setTab] = useState<(typeof TABS)[number]['id']>('send')
   return (
     <div className="space-y-4">
-      <PageHeader title="Marketing Studio"
+      <PageHeader title="Marketing"
         subtitle="Outreach, campaigns & content — every message waits for your tap" />
       <div className="flex gap-1.5 overflow-x-auto">
         {TABS.map((t) => (

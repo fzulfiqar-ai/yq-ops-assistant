@@ -1,3 +1,4 @@
+import { CheckCircle2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { API_BASE } from '@/lib/api'
@@ -23,7 +24,7 @@ export default function OptOut() {
         {state === 'working' && <p className="mt-4 text-sm text-[#6b6480]">One moment…</p>}
         {state === 'done' && (
           <>
-            <h1 className="mt-4 font-display text-lg font-bold text-[#1a1430]">You're unsubscribed ✓</h1>
+            <h1 className="mt-4 font-display text-lg font-bold text-[#1a1430]">You're unsubscribed <CheckCircle2 size={18} className="inline align-[-3px] text-success" aria-hidden="true" /></h1>
             <p className="mt-2 text-sm text-[#6b6480]">
               YQ Bahrain won't send you further marketing messages. You can always reach us
               directly on WhatsApp — we're happy to help anytime.

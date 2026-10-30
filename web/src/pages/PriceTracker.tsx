@@ -256,7 +256,7 @@ export default function PriceTracker() {
 
   return (
     <div>
-      <PageHeader title="Price Tracker"
+      <PageHeader title="Price tracker"
         subtitle="Selling price & purchase cost — before vs now, per SKU. Updates itself with every report upload." />
 
       <div className="mb-3 flex overflow-hidden rounded-xl border text-sm font-semibold" style={{ width: 'fit-content' }}>
