@@ -308,8 +308,12 @@ async def intro_skip(page, result, case, out):
 
 
 async def intro_still(page, result, case, out):
-    await page.wait_for_timeout(300)
-    await page.screenshot(path=str(out / f"{case['name']}_still.png"))
+    # the still frame, once the app has booted under the served night (or 20 s)
+    try:
+        await page.wait_for_function("() => (window.__qaIntro || []).some((s) => s[3])", timeout=20000)
+        await page.screenshot(path=str(out / f"{case['name']}_still.png"))
+    except Exception:  # noqa: BLE001
+        pass
     await page.wait_for_timeout(1500)
     samples = await page.evaluate("() => window.__qaIntro || []")
     first, last = overlay_span(samples)
