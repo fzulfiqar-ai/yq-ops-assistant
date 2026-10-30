@@ -222,25 +222,49 @@ DIALOG_STATE = """() => {
            moving: d.getAnimations().filter((a) => a.playState === 'running').length }
 }"""
 
-# anything still animating whose element holds `text` (the exit of a dialog that has just closed)
-LEAVING = """(text) => document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.target
-  && (a.effect.target.textContent || '').includes(text)).length"""
+# Watches every frame for 1.5 s from before a tap or a key (a busy machine may take a while to commit the
+# change, so one sample at a fixed delay can miss a 200 ms animation): `in` once an open dialog is animating;
+# `out` once something outside any open dialog that holds `text` is (the exit of a dialog that has just
+# closed), with the properties those exits animate.
+SAMPLER = """(text) => { window.__seen = { in: false, out: false, props: [] }; const t0 = performance.now()
+  const keys = (a) => [...new Set(a.effect.getKeyframes().flatMap((k) => Object.keys(k)
+    .filter((x) => !['offset', 'easing', 'composite', 'computedOffset'].includes(x))))]
+  const step = () => {
+    const d = document.querySelector('[role="dialog"]')
+    if (d && d.getAnimations().some((a) => a.playState === 'running')) window.__seen.in = true
+    if (text) for (const a of document.getAnimations()) {
+      const t = a.effect && a.effect.target
+      if (a.playState !== 'running' || !t || t.closest('[role="dialog"]') || !(t.textContent || '').includes(text)) continue
+      window.__seen.out = true
+      window.__seen.props.push(keys(a).join(','))
+    }
+    if (performance.now() - t0 < 1500) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step) }"""
 
 
 async def open_dialog(page, opener, result: dict) -> dict | None:
-    """Click `opener` (marked first, to check the focus comes back to it) and read the dialog at once."""
+    """Click `opener` (marked first, to check the focus comes back to it); the dialog must animate in."""
     await opener.scroll_into_view_if_needed()
     await opener.evaluate("el => { document.querySelectorAll('[data-qa-opener]').forEach((x) => x.removeAttribute('data-qa-opener')); el.setAttribute('data-qa-opener', '') }")
+    await page.evaluate(SAMPLER, None)
     await opener.click()
-    await page.wait_for_timeout(40)
+    await page.wait_for_timeout(700)
     st = await page.evaluate(DIALOG_STATE)
     if not st:
         fail(result, "no role=dialog after opening")
         return None
-    if not st["moving"]:
+    if not await page.evaluate("() => window.__seen.in"):
         fail(result, "the dialog does not animate in")
-    await page.wait_for_timeout(450)
-    return await page.evaluate(DIALOG_STATE)
+    return st
+
+
+async def escape_leaves(page, title: str) -> dict:
+    """Escape, then what of the dialog animated out (watched every frame from before the key)."""
+    await page.evaluate(SAMPLER, title)
+    await page.keyboard.press("Escape")
+    await page.wait_for_timeout(700)
+    return await page.evaluate("() => ({ out: window.__seen.out, props: [...new Set(window.__seen.props)] })")
 
 
 async def modal_check(page, result: dict, case: dict) -> None:
@@ -260,12 +284,9 @@ async def modal_check(page, result: dict, case: dict) -> None:
             if not await page.evaluate("() => !!document.querySelector('[role=dialog]')?.contains(document.activeElement)"):
                 fail(result, f"{key} #{i + 1} left the dialog")
                 break
-    await page.keyboard.press("Escape")
-    await page.wait_for_timeout(60)
-    leaving = await page.evaluate(LEAVING, title) if title else 0
-    if not leaving:
+    left = await escape_leaves(page, title)
+    if not left["out"]:
         fail(result, "nothing of the dialog animates out after Escape")
-    await page.wait_for_timeout(500)
     still = await page.evaluate("() => document.querySelectorAll('[role=dialog]').length")
     if still:
         fail(result, "Escape did not close the dialog")
@@ -400,27 +421,28 @@ async def s6_drag(page, result: dict, case: dict) -> None:
 
 # ── reduced motion ──────────────────────────────────────────────────────────────────────────────────────
 
-ANIM_PROPS = """(sel) => { const el = document.querySelector(sel); if (!el) return null
-  return el.getAnimations().map((a) => ({ d: a.effect.getTiming().duration,
-    props: [...new Set(a.effect.getKeyframes().flatMap((k) => Object.keys(k).filter((x) => !['offset', 'easing', 'composite', 'computedOffset'].includes(x))))] })) }"""
+# the dialog's entrance as first seen (watched every frame from before the tap): duration and properties
+ENTRANCE = """() => { window.__entrance = null; const t0 = performance.now()
+  const step = () => { const d = document.querySelector('[role="dialog"]')
+    const anims = d ? d.getAnimations() : []
+    if (anims.length && !window.__entrance) window.__entrance = anims.map((a) => ({ d: a.effect.getTiming().duration,
+      props: [...new Set(a.effect.getKeyframes().flatMap((k) => Object.keys(k).filter((x) => !['offset', 'easing', 'composite', 'computedOffset'].includes(x))))] }))
+    if (!window.__entrance && performance.now() - t0 < 1500) requestAnimationFrame(step) }
+  requestAnimationFrame(step) }"""
 
 
 async def reduced_fade(page, result: dict, case: dict) -> None:
+    await page.evaluate(ENTRANCE)
     await page.get_by_role("button", name="Edit", exact=True).first.click()
-    await page.wait_for_timeout(40)
-    anims = await page.evaluate(ANIM_PROPS, '[role="dialog"]')
+    await page.wait_for_timeout(700)
+    anims = await page.evaluate("() => window.__entrance")
     result["notes"].append(f"entrance {anims}")
     if not anims or not all(a["props"] == ["opacity"] and a["d"] >= 120 for a in anims):
         fail(result, "under reduced motion the dialog should fade (opacity only, >= 120 ms)")
-    await page.wait_for_timeout(400)
     title = (await page.evaluate(DIALOG_STATE) or {}).get("named", "")
-    await page.keyboard.press("Escape")
-    await page.wait_for_timeout(40)
-    leaving = await page.evaluate("""(text) => document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.target
-        && (a.effect.target.textContent || '').includes(text)).map((a) => [...new Set(a.effect.getKeyframes().flatMap((k) => Object.keys(k)
-        .filter((x) => !['offset', 'easing', 'composite', 'computedOffset'].includes(x))))])""", title)
-    result["notes"].append(f"exit {leaving}")
-    if not leaving or not all(p == ["opacity"] for p in leaving):
+    left = await escape_leaves(page, title)
+    result["notes"].append(f"exit {left}")
+    if not left["out"] or not all(p == "opacity" for p in left["props"]):
         fail(result, "under reduced motion the dialog should fade out (opacity only)")
 
 
