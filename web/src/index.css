@@ -2,81 +2,125 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Self-hosted portal fonts (R6, 24-Sep-2026): the latin variable builds of Inter and Space Grotesk
-   from @fontsource-variable/inter and @fontsource-variable/space-grotesk 5.3.0 (OFL — the licences
-   sit beside the files in public/fonts), the same source the marketplace's Instrument Sans came from.
-   Preloaded from index.html; they replace the render-blocking Google Fonts stylesheet. The
-   unicode-range is Google's latin subset, so a non-Latin glyph falls to the system font instead of
-   downloading nothing. */
+/* Portal fonts (ship 2, 30-Oct-2026): the marketplace's own Instrument Sans (text) and Sora (display), the same
+   self-hosted files (public/fonts, OFL — the licences sit beside them), so the office, the salesman app and the
+   marketplace read as one brand. Only the text face is preloaded (index.html, the portal-fonts block); Sora swaps
+   in when a heading first asks for it. The unicode-range is Google's latin subset, so a non-Latin glyph (the
+   Arabic Spotted sheet) falls to the system font instead of downloading nothing. */
 @font-face {
-  font-family: 'Inter';
+  font-family: 'Instrument Sans';
   font-style: normal;
-  font-weight: 100 900;
+  font-weight: 400 700;
   font-display: swap;
-  src: url('/fonts/inter-v1.woff2') format('woff2-variations');
+  src: url('/fonts/instrument-sans-v1.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
-  font-family: 'Space Grotesk';
+  font-family: 'Sora';
   font-style: normal;
-  font-weight: 300 700;
+  font-weight: 400 800;
   font-display: swap;
-  src: url('/fonts/space-grotesk-v1.woff2') format('woff2-variations');
+  src: url('/fonts/sora-v1.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* Metric-matched fallbacks (the marketplace's, computed against Arial) so the swap moves nothing. */
+@font-face {
+  font-family: 'Instrument Sans Fallback';
+  src: local('Arial'), local('Liberation Sans'), local('Helvetica');
+  size-adjust: 103.25%;
+  ascent-override: 93.95%;
+  descent-override: 24.21%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Sora Fallback';
+  src: local('Arial'), local('Liberation Sans'), local('Helvetica');
+  size-adjust: 114.55%;
+  ascent-override: 84.68%;
+  descent-override: 25.32%;
+  line-gap-override: 0%;
 }
 
+/* Tokens. One identity with the marketplace (src/market/market.css) and the salesman shell (SalesmanShell.tsx):
+   the logo plum, a warm canvas, ink with a plum undertone. Every value is an HSL triplet so Tailwind adds alpha
+   (`bg-primary/10`). WCAG contrast, measured on these values: body text 16.8:1 on the canvas and 17.9:1 on a
+   card; muted text 6.1:1 / 6.5:1; plum text 7.5:1 on a card; white on plum 7.5:1. Dark: 16.3:1, 7.7:1, 7.3:1.
+   The status inks (success / warning / destructive / info) read at 4.9:1 or more on their own 12 % tint. */
 @layer base {
-  :root {
-    --background: 250 40% 99%;
-    --foreground: 257 35% 12%;
+  /* The shared sheet's panel (components/ui/sheet.tsx, .yq-panel) is white in both themes, so in dark mode the
+     light tokens are re-declared on it: a page's content inside (text-foreground, bg-muted, the Spotted sheet)
+     reads dark-on-white instead of light-on-white. Were the panel to take the tokens itself (bg-card), it would
+     still be white here — the two always agree. The salesman shell is light by design (SalesmanShell.tsx,
+     colorScheme: light): the same light set is declared on it, so a token its inline block does not list (sash,
+     target, the status inks) never takes a dark value on a phone whose stored theme is dark. */
+  :root,
+  [data-theme='dark'] .yq-panel,
+  [data-theme='dark'] [data-shell='sales'] {
+    --background: 36 33% 97%;          /* #FAF8F5 the warm canvas */
+    --foreground: 268 28% 11%;         /* ink */
     --card: 0 0% 100%;
-    --card-foreground: 257 35% 12%;
+    --card-foreground: 268 28% 11%;
     --popover: 0 0% 100%;
-    --popover-foreground: 257 35% 12%;
-    --primary: 262 73% 50%;            /* #6d28d9 */
+    --popover-foreground: 268 28% 11%;
+    --primary: 273 39% 41%;            /* #6D4091 the logo plum */
     --primary-foreground: 0 0% 100%;
-    --secondary: 258 30% 96%;
-    --secondary-foreground: 257 35% 22%;
-    --muted: 258 25% 96%;
-    --muted-foreground: 257 12% 46%;
-    --accent: 262 83% 95%;
-    --accent-foreground: 262 60% 35%;
-    --destructive: 0 72% 51%;
+    --primary-deep: 273 42% 33%;       /* #583177 hover / pressed */
+    --sash: 273 37% 49%;               /* #824FAB the lighter plum (a partial bar, a gradient's end) */
+    --secondary: 36 25% 95%;
+    --secondary-foreground: 268 28% 11%;
+    --muted: 36 25% 95%;               /* wells, skeletons */
+    --muted-foreground: 266 12% 40%;   /* the one grey for secondary text */
+    --accent: 273 40% 94%;             /* the plum wash: selected chips, table heads */
+    --accent-foreground: 272 40% 22%;  /* text on the wash */
+    --destructive: 350 65% 40%;
     --destructive-foreground: 0 0% 100%;
-    --success: 152 56% 40%;
+    --success: 152 48% 30%;
     --success-foreground: 0 0% 100%;
-    --warning: 35 92% 50%;
+    --warning: 30 82% 31%;             /* an ink-grade amber: text on white or on its tint */
     --warning-foreground: 0 0% 100%;
-    --border: 258 30% 92%;
-    --input: 258 30% 90%;
-    --ring: 262 73% 58%;
-    --radius: 0.85rem;
+    --info: 214 70% 42%;               /* wholesale, B2B, a neutral link of data */
+    --info-foreground: 0 0% 100%;
+    --target: 32 95% 44%;              /* a target line on a chart */
+    --border: 270 14% 89%;
+    --input: 270 14% 80%;
+    --ring: 273 60% 55%;
+    --night: 254.3 41.2% 10%;          /* #140F24 — the marketplace opening's night */
+    --night-2: 260.3 66.4% 21%;        /* #2A1259 */
+    --wa: 142 70% 49%;                 /* WhatsApp brand green */
+    --radius: 0.875rem;
+    --shadow-card: 0 1px 2px hsl(268 30% 10% / 0.05), 0 10px 28px -16px hsl(268 30% 10% / 0.16);
   }
 
   [data-theme='dark'] {
-    --background: 257 45% 8%;          /* #140f24 */
-    --foreground: 257 30% 92%;
-    --card: 257 40% 12%;
-    --card-foreground: 257 30% 92%;
-    --popover: 257 40% 12%;
-    --popover-foreground: 257 30% 92%;
-    --primary: 262 83% 67%;
-    --primary-foreground: 257 45% 10%;
-    --secondary: 257 30% 18%;
-    --secondary-foreground: 257 30% 90%;
-    --muted: 257 30% 16%;
-    --muted-foreground: 257 15% 66%;
-    --accent: 262 40% 26%;
-    --accent-foreground: 262 80% 86%;
-    --destructive: 0 62% 52%;
-    --destructive-foreground: 0 0% 100%;
-    --success: 152 46% 46%;
-    --success-foreground: 0 0% 100%;
-    --warning: 35 86% 56%;
-    --warning-foreground: 257 45% 10%;
-    --border: 257 30% 22%;
-    --input: 257 30% 24%;
-    --ring: 262 83% 67%;
+    --background: 266 30% 8%;          /* #140E1B plum night */
+    --foreground: 270 20% 94%;
+    --card: 266 26% 12%;               /* #1E1727 */
+    --card-foreground: 270 20% 94%;
+    --popover: 266 26% 12%;
+    --popover-foreground: 270 20% 94%;
+    --primary: 273 58% 74%;            /* #C196E3 plum light enough to read on the night */
+    --primary-foreground: 268 30% 10%;
+    --primary-deep: 273 50% 66%;
+    --sash: 273 45% 66%;
+    --secondary: 266 22% 17%;
+    --secondary-foreground: 270 20% 92%;
+    --muted: 266 22% 17%;
+    --muted-foreground: 268 14% 70%;
+    --accent: 273 30% 24%;
+    --accent-foreground: 272 60% 88%;
+    --destructive: 350 80% 70%;
+    --destructive-foreground: 268 30% 10%;
+    --success: 152 45% 58%;
+    --success-foreground: 268 30% 10%;
+    --warning: 36 85% 62%;
+    --warning-foreground: 268 30% 10%;
+    --info: 214 80% 70%;
+    --info-foreground: 268 30% 10%;
+    --target: 36 90% 60%;
+    --border: 266 20% 22%;
+    --input: 266 18% 30%;
+    --ring: 273 60% 70%;
+    --shadow-card: 0 1px 0 0 hsl(0 0% 100% / 0.03) inset, 0 14px 36px -18px hsl(268 60% 2% / 0.8);
   }
 }
 
@@ -93,22 +137,19 @@
     margin: 0;
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
-    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-family: 'Instrument Sans', 'Instrument Sans Fallback', system-ui, -apple-system, 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
   h1, h2, h3, h4, .font-display {
-    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    font-family: 'Sora', 'Sora Fallback', 'Instrument Sans', system-ui, sans-serif;
     letter-spacing: -0.015em;
   }
 }
 
-/* ───────────────────────── Luxe layer ─────────────────────────
-   Premium light+purple polish: ambient depth, glass surfaces, gradient
-   ink and multi-layer shadows. All token-driven so dark mode follows. */
 @layer components {
-  /* Ambient canvas — soft layered violet glows behind the content area.
-     pointer-events:none so it never intercepts clicks; sits at z-0. */
+  /* Ambient canvas — two faint plum glows and a dot grid behind the content area. Still: a layer this size that
+     moves forever costs integrated graphics a repaint per frame behind the top bar (plan item 23). */
   .luxe-canvas {
     position: absolute;
     inset: 0;
@@ -116,74 +157,50 @@
     pointer-events: none;
     overflow: hidden;
     background:
-      radial-gradient(60rem 60rem at 8% -10%, hsl(262 83% 60% / 0.10), transparent 60%),
-      radial-gradient(50rem 50rem at 100% 0%, hsl(290 80% 62% / 0.08), transparent 55%),
-      radial-gradient(70rem 50rem at 50% 120%, hsl(255 80% 58% / 0.07), transparent 60%);
+      radial-gradient(60rem 60rem at 8% -10%, hsl(273 45% 55% / 0.08), transparent 60%),
+      radial-gradient(50rem 50rem at 100% 0%, hsl(273 37% 49% / 0.06), transparent 55%);
   }
-  /* faint dot-grid texture for tactile depth */
   .luxe-canvas::before {
     content: '';
     position: absolute;
     inset: 0;
-    background-image: radial-gradient(hsl(var(--foreground) / 0.04) 1px, transparent 1px);
+    background-image: radial-gradient(hsl(var(--foreground) / 0.035) 1px, transparent 1px);
     background-size: 22px 22px;
     mask-image: radial-gradient(ellipse 100% 80% at 50% 0%, #000 30%, transparent 75%);
   }
   [data-theme='dark'] .luxe-canvas {
     background:
-      radial-gradient(60rem 60rem at 8% -10%, hsl(262 83% 60% / 0.18), transparent 60%),
-      radial-gradient(50rem 50rem at 100% 0%, hsl(290 80% 62% / 0.14), transparent 55%),
-      radial-gradient(70rem 50rem at 50% 120%, hsl(255 80% 58% / 0.12), transparent 60%);
+      radial-gradient(60rem 60rem at 8% -10%, hsl(273 50% 45% / 0.14), transparent 60%),
+      radial-gradient(50rem 50rem at 100% 0%, hsl(273 40% 40% / 0.10), transparent 55%);
   }
 
-  /* Premium surface — gradient-tinted border + layered depth. The ::before
-     paints a subtle top sheen; hover lifts with a colored shadow. */
+  /* The one card surface (Card, the KPI tile, the Command Centre's cards): a white card, a hairline border and an
+     ink-tinted shadow — never a purple glow. */
   .card-luxe {
-    position: relative;
-    background:
-      linear-gradient(180deg, hsl(var(--card)) 0%, hsl(var(--card)) 100%) padding-box,
-      linear-gradient(160deg, hsl(262 70% 86% / 0.9), hsl(258 30% 92% / 0.4) 40%, hsl(258 30% 92% / 0.25)) border-box;
-    border: 1px solid transparent;
-    box-shadow:
-      0 1px 0 0 hsl(0 0% 100% / 0.6) inset,
-      0 1px 2px hsl(257 50% 20% / 0.04),
-      0 12px 32px -12px hsl(262 60% 30% / 0.14);
-  }
-  [data-theme='dark'] .card-luxe {
-    background:
-      linear-gradient(180deg, hsl(var(--card)) 0%, hsl(var(--card)) 100%) padding-box,
-      linear-gradient(160deg, hsl(262 60% 50% / 0.5), hsl(257 30% 30% / 0.4)) border-box;
-    box-shadow:
-      0 1px 0 0 hsl(0 0% 100% / 0.04) inset,
-      0 14px 36px -14px hsl(262 80% 8% / 0.7);
+    background-color: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-card);
   }
 
-  /* Frosted glass — for floating/hero surfaces over the ambient canvas. */
-  .glass {
-    background: hsl(var(--card) / 0.72);
-    backdrop-filter: blur(16px) saturate(140%);
-    -webkit-backdrop-filter: blur(16px) saturate(140%);
-    border: 1px solid hsl(var(--border) / 0.7);
+  /* The office sidebar: the marketplace opening's night (#2A1259 → #140F24), the same in light and dark. */
+  .sidebar-night {
+    background: linear-gradient(180deg, hsl(var(--night-2)) 0%, hsl(var(--night)) 100%);
   }
 
-  /* Gradient ink — for hero numbers and brand emphasis. */
-  .text-gradient {
-    background-image: linear-gradient(120deg, hsl(262 83% 52%), hsl(290 75% 56%) 55%, hsl(255 85% 62%));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+  /* The one page-title style: the page header and the Command Centre's band. */
+  .page-title {
+    font-family: 'Sora', 'Sora Fallback', 'Instrument Sans', system-ui, sans-serif;
+    font-size: 1.5rem;
+    line-height: 1.2;
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
-  [data-theme='dark'] .text-gradient {
-    background-image: linear-gradient(120deg, hsl(262 90% 78%), hsl(290 85% 80%) 55%, hsl(255 90% 82%));
+  @media (min-width: 640px) {
+    .page-title {
+      font-size: 1.75rem;
+    }
   }
 }
-
-/* a slow, GPU-cheap drift so the ambient glows feel alive, not static */
-@keyframes luxe-drift {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
-  50% { transform: translate3d(0, -1.5%, 0) scale(1.04); }
-}
-.luxe-canvas { animation: luxe-drift 18s ease-in-out infinite; }
 
 /* thin, branded scrollbars */
 * {
@@ -193,17 +210,20 @@
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 9999px; border: 3px solid transparent; background-clip: content-box; }
 
-/* a11y: visible keyboard focus + honour reduced motion */
+/* a11y: visible keyboard focus + honour reduced motion. The outline follows the control's own corners (a round
+   button keeps a round ring; a rule forcing 8 px squared every pill and avatar while it held focus). */
 :focus-visible {
-  outline: 2px solid hsl(var(--ring) / 0.55);
+  outline: 2px solid hsl(var(--ring) / 0.6);
   outline-offset: 2px;
-  border-radius: 8px;
 }
 /* Text inputs/textareas provide their own soft focus ring on their container —
    suppress the boxy default outline so focus looks premium, not raw. */
 input:focus-visible,
 textarea:focus-visible {
   outline: none;
+}
+::selection {
+  background: hsl(var(--primary) / 0.18);
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
