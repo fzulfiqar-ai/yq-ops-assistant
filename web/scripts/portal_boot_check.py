@@ -114,7 +114,14 @@ async def timeline(page, result, case, out, cast: list):
     await page.wait_for_timeout(250)
     origin = float(await page.evaluate("() => performance.timeOrigin"))
     ready_ms = await page.evaluate("() => performance.now()")
+    # from the document's own first paint on: before it the compositor still shows the new tab's
+    # about:blank (pure #FFFFFF, seen at ~0.1 s), which is not a frame this page painted. A page that
+    # paints white itself (the base) is still caught: its white comes after its first paint.
+    fp = await page.evaluate("() => { const e = performance.getEntriesByName('first-paint')[0]; return e ? e.startTime : null }")
     frames = [(round(ts * 1000 - origin), data) for ts, data in cast if ts * 1000 >= origin - 5]
+    held = [t for t, _ in frames if fp is not None and t < fp - 20]
+    frames = [(t, d) for t, d in frames if fp is None or t >= fp - 20]
+    result["notes"].append(f"first paint at {fp and round(fp)} ms; {len(held)} earlier frame(s) of the blank tab left out")
     import base64
     blank, light, seen = [], [], 0
     for t, data in frames:
@@ -222,6 +229,12 @@ def overlay_span(samples: list) -> tuple[float | None, float | None]:
 
 async def intro_plays(page, result, case, out):
     shots = case.get("frames")
+    if shots:
+        # the frames are timed from the intro's own first frame (a busy boot starts it late)
+        try:
+            await page.wait_for_function("() => (window.__qaIntro || []).some((s) => s[1] !== null)", timeout=20000)
+        except Exception:  # noqa: BLE001
+            pass
     t0 = time.perf_counter()
     if shots:
         for i, at in enumerate(shots):
@@ -308,8 +321,12 @@ async def intro_skip(page, result, case, out):
 
 
 async def intro_still(page, result, case, out):
-    await page.wait_for_timeout(300)
-    await page.screenshot(path=str(out / f"{case['name']}_still.png"))
+    # the still frame, once the app has booted under the served night (or 20 s)
+    try:
+        await page.wait_for_function("() => (window.__qaIntro || []).some((s) => s[3])", timeout=20000)
+        await page.screenshot(path=str(out / f"{case['name']}_still.png"))
+    except Exception:  # noqa: BLE001
+        pass
     await page.wait_for_timeout(1500)
     samples = await page.evaluate("() => window.__qaIntro || []")
     first, last = overlay_span(samples)
@@ -491,8 +508,8 @@ CASES = [
     {"name": "signin_fast_phone", "path": "/login", "viewport": PHONE, "touch": True, "me_delay_ms": 300, "watch_s": 4.0, "check": signin, **NIGHT},
     # the intro, once a week per device
     {"name": "intro_first_visit", "path": "/login", "sample_intro": True, "check": intro_plays},
-    {"name": "intro_frames_390", "path": "/login", "viewport": PHONE, "touch": True, "sample_intro": True, "check": intro_plays, "frames": [120, 450, 1150, 1950, 2500, 2950]},
-    {"name": "intro_frames_1366", "path": "/login", "sample_intro": True, "check": intro_plays, "frames": [120, 450, 1150, 1950, 2500, 2950]},
+    {"name": "intro_frames_390", "path": "/login", "viewport": PHONE, "touch": True, "sample_intro": True, "check": intro_plays, "frames": [150, 520, 1150, 1900, 2350, 3100]},
+    {"name": "intro_frames_1366", "path": "/login", "sample_intro": True, "check": intro_plays, "frames": [150, 520, 1150, 1900, 2350, 3100]},
     {"name": "intro_same_week", "path": "/login", "sample_intro": True, "local": {INTRO_KEY: str(int(time.time() * 1000) - 2 * 86400000)}, "check": intro_absent},
     {"name": "intro_after_a_week", "path": "/login", "sample_intro": True, "local": {INTRO_KEY: str(int(time.time() * 1000) - 8 * 86400000)}, "check": intro_plays},
     {"name": "intro_old_done_stamp", "path": "/login", "sample_intro": True, "local": {INTRO_KEY: "done"}, "check": intro_plays},
