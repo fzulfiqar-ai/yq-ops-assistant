@@ -229,6 +229,12 @@ def overlay_span(samples: list) -> tuple[float | None, float | None]:
 
 async def intro_plays(page, result, case, out):
     shots = case.get("frames")
+    if shots:
+        # the frames are timed from the intro's own first frame (a busy boot starts it late)
+        try:
+            await page.wait_for_function("() => (window.__qaIntro || []).some((s) => s[1] !== null)", timeout=20000)
+        except Exception:  # noqa: BLE001
+            pass
     t0 = time.perf_counter()
     if shots:
         for i, at in enumerate(shots):
@@ -502,8 +508,8 @@ CASES = [
     {"name": "signin_fast_phone", "path": "/login", "viewport": PHONE, "touch": True, "me_delay_ms": 300, "watch_s": 4.0, "check": signin, **NIGHT},
     # the intro, once a week per device
     {"name": "intro_first_visit", "path": "/login", "sample_intro": True, "check": intro_plays},
-    {"name": "intro_frames_390", "path": "/login", "viewport": PHONE, "touch": True, "sample_intro": True, "check": intro_plays, "frames": [120, 450, 1150, 1950, 2500, 2950]},
-    {"name": "intro_frames_1366", "path": "/login", "sample_intro": True, "check": intro_plays, "frames": [120, 450, 1150, 1950, 2500, 2950]},
+    {"name": "intro_frames_390", "path": "/login", "viewport": PHONE, "touch": True, "sample_intro": True, "check": intro_plays, "frames": [150, 520, 1150, 1900, 2350, 3100]},
+    {"name": "intro_frames_1366", "path": "/login", "sample_intro": True, "check": intro_plays, "frames": [150, 520, 1150, 1900, 2350, 3100]},
     {"name": "intro_same_week", "path": "/login", "sample_intro": True, "local": {INTRO_KEY: str(int(time.time() * 1000) - 2 * 86400000)}, "check": intro_absent},
     {"name": "intro_after_a_week", "path": "/login", "sample_intro": True, "local": {INTRO_KEY: str(int(time.time() * 1000) - 8 * 86400000)}, "check": intro_plays},
     {"name": "intro_old_done_stamp", "path": "/login", "sample_intro": True, "local": {INTRO_KEY: "done"}, "check": intro_plays},
