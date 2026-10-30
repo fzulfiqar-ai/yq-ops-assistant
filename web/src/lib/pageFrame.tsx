@@ -25,9 +25,18 @@ export function PageGlide({ glide, className, children }: { glide: boolean; clas
   useLayoutEffect(() => {
     const el = ref.current
     if (!glide || !el || typeof el.animate !== 'function') return
-    const { keyframes, options } = glideFrames(calmMotion())
-    const run = el.animate(keyframes, options)
-    return () => run.cancel()
+    // Started in the next frame's callbacks — still before that frame paints, so the page never shows
+    // without its first keyframe — and not here: animate() makes the browser compute the fresh page's
+    // style at once, in the middle of React's commit, and again after the commit's own updates.
+    let run: Animation | null = null
+    const raf = requestAnimationFrame(() => {
+      const { keyframes, options } = glideFrames(calmMotion())
+      run = el.animate(keyframes, options)
+    })
+    return () => {
+      cancelAnimationFrame(raf)
+      run?.cancel()
+    }
   }, [glide])
   return (
     <div ref={ref} data-page-frame="" className={className}>
