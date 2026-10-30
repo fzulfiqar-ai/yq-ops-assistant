@@ -8,6 +8,8 @@ import { apiGet } from '@/lib/api'
 import { mustResetOf, passwordScreenFor, useAuth, type Me } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { navFor, NAV } from '@/lib/nav'
+import { firstNameOf, greeting } from '@/lib/greeting'
+import { shortcutHint } from '@/lib/shortcut'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
 import { FreshnessChip } from './FreshnessChip'
@@ -51,18 +53,13 @@ function usePrefetchPages(me: Me | null, enabled: boolean) {
   }, [enabled, qc, role, features])
 }
 
-function greeting() {
-  const h = new Date().getHours()
-  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
-}
-
 /** A short greeting. The rotating quotes that used to sit here said nothing about the business;
  *  the data-freshness chip beside it now says how current every figure is (plan §8, §27). */
 function Greeting({ name }: { name?: string }) {
   return (
     <div className="hidden min-w-0 flex-1 justify-center px-4 lg:flex">
       <span className="truncate text-[13px] font-semibold text-muted-foreground">
-        {greeting()}{name ? `, ${name}` : ''}
+        {greeting(name)}
       </span>
     </div>
   )
@@ -127,11 +124,10 @@ export function AppShell() {
       {/* Sidebar (static on lg, slide-in drawer on mobile) */}
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col text-white transition-transform duration-300 lg:static lg:z-auto lg:transition-[width]',
+          'sidebar-night fixed inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col text-white transition-transform duration-300 lg:static lg:z-auto lg:transition-[width]',
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
           collapsed ? 'lg:w-[76px]' : 'lg:w-[260px]',
         )}
-        style={{ background: 'linear-gradient(180deg,#2a1259 0%,#190a3a 100%)' }}
       >
         <Link to="/" className="flex items-center gap-3 px-5 pb-2 pt-6">
           <Logo className="h-9 w-9 rounded-xl shadow-lift" />
@@ -155,7 +151,7 @@ export function AppShell() {
                   alone
                     ? i > 0 && <div className="pt-2" aria-hidden="true" />
                     : (
-                      <div className={cn('px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40', i > 0 && 'pt-3')}>
+                      <div className={cn('px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/55', i > 0 && 'pt-3')}>
                         {n.section}
                       </div>
                     )
@@ -167,7 +163,7 @@ export function AppShell() {
                   className={({ isActive }) =>
                     cn(
                       'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/70 transition-all hover:bg-white/10 hover:text-white',
-                      isActive && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
+                      isActive && 'bg-plum text-white shadow-[0_6px_16px_-6px_rgba(10,6,20,.6)]',
                       collapsed && 'justify-center px-0',
                     )
                   }
@@ -198,7 +194,7 @@ export function AppShell() {
                 <div className="truncate text-[13px] font-semibold">
                   {me?.full_name || me?.email?.split('@')[0]}
                 </div>
-                <div className="text-[10px] uppercase tracking-wide text-white/50">{me?.role} · view profile</div>
+                <div className="text-[10px] uppercase tracking-wide text-white/60">{me?.role} · view profile</div>
               </div>
             )}
           </Link>
@@ -239,7 +235,7 @@ export function AppShell() {
           <div className="min-w-0 shrink-0">
             <div className="truncate font-display text-[15px] font-semibold">{active?.label ?? 'Portal'}</div>
           </div>
-          <Greeting name={me?.full_name?.split(' ')[0] || me?.email?.split('@')[0]} />
+          <Greeting name={firstNameOf(me?.full_name, me?.email)} />
           <div className="ml-auto flex min-w-0 items-center gap-2 lg:ml-0">
             {/* the Command Centre carries the same chip in its own band */}
             {!mustReset && !loc.pathname.startsWith('/command') && <FreshnessChip className="max-w-[46vw] sm:max-w-none" />}
@@ -249,7 +245,7 @@ export function AppShell() {
               title="Search (Ctrl/Cmd + K)"
             >
               <Search size={14} /> Search
-              <kbd className="rounded border px-1 text-[10px]">⌘K</kbd>
+              <kbd className="rounded border px-1 text-[10px]">{shortcutHint()}</kbd>
             </button>
             {/* User menu */}
             <div className="relative" ref={menuRef}>

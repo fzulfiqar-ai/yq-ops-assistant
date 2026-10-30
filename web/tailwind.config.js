@@ -28,6 +28,7 @@ export default {
         target: c('--target'),
         night: { DEFAULT: c('--night'), 2: c('--night-2') },
         wa: c('--wa'),
+        plum: { DEFAULT: c('--plum'), 2: c('--plum-2') },
       },
       // one scale that climbs (sm < md < lg < xl < 2xl); 2xl used to fall back to Tailwind's 16 px, under xl's 17.6
       borderRadius: {

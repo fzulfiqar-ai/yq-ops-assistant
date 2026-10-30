@@ -87,6 +87,8 @@
     --night: 254.3 41.2% 10%;          /* #140F24 — the marketplace opening's night */
     --night-2: 260.3 66.4% 21%;        /* #2A1259 */
     --wa: 142 70% 49%;                 /* WhatsApp brand green */
+    --plum: 273 39% 41%;               /* the logo itself, the same in both themes (the night sidebar's active item) */
+    --plum-2: 273 37% 49%;             /* #824FAB the lighter plum, the same in both themes (the Command Centre's band) */
     --radius: 0.875rem;
     --shadow-card: 0 1px 2px hsl(268 30% 10% / 0.05), 0 10px 28px -16px hsl(268 30% 10% / 0.16);
   }
