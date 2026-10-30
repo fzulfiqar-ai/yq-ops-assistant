@@ -243,6 +243,7 @@ await check('the idle warm-up follows the menu, skips the page on screen and rep
   ok(light({ saveData: true }) && light({ effectiveType: '2g' }) && light({ effectiveType: 'slow-2g' }), 'light connections')
   ok(!light({ effectiveType: '4g' }) && !light({ effectiveType: '3g' }) && !light(null) && !light(undefined), 'ordinary connections')
   ok(need(P, 'HOVER_INTENT_MS') >= 40 && need(P, 'HOVER_INTENT_MS') <= 120, 'a hover rests briefly before it fetches')
+  ok(need(P, 'WARM_START_MS') >= 1000 && need(P, 'WARM_START_MS') <= 3000, 'the idle warm-up waits for the first page to draw')
 })
 
 await check('a warm-up that meets a missing chunk never reloads the tab (the reload rule is for a page the person opens)', () => {

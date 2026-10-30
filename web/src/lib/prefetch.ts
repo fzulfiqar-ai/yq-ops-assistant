@@ -38,6 +38,8 @@ export const PAGE_DATA: Readonly<Record<string, { key: readonly unknown[]; url: 
 
 /** how long a hover must rest on a link before its page is fetched */
 export const HOVER_INTENT_MS = 60
+/** the idle warm-up starts this long after the shell mounts */
+export const WARM_START_MS = 1500
 
 // ── the reload rule stays out of warm-ups ───────────────────────────────────────────────────────
 
@@ -146,14 +148,12 @@ export function useCodeWarm(paths: readonly string[], current: string, enabled: 
         void preloadPage(path).then(next)
       })
     }
-    // after the shell's first paint: two frames, then the first idle moment
-    const raf = requestAnimationFrame(() => {
-      const raf2 = requestAnimationFrame(next)
-      cancel = () => cancelAnimationFrame(raf2)
-    })
+    // well after the shell's first paint (the page in front is still drawing its first answers then, and
+    // his laptop's CPU is busy), then one idle moment per page; a hover warms its page at once meanwhile
+    const start = setTimeout(next, WARM_START_MS)
     return () => {
       stop = true
-      cancelAnimationFrame(raf)
+      clearTimeout(start)
       cancel()
     }
   }, [enabled, list, qc])
