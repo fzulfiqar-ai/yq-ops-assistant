@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Search, ArrowUp, ArrowDown, ChevronsUpDown, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { KpiTile, type KpiTone } from '@/components/ui/kpi-tile'
 import { bhd } from '@/lib/format'
 import { FINE_POINTER_QUERY, WIDE_QUERY, useMediaQuery } from '@/lib/media'
 import {
@@ -327,6 +328,17 @@ export function DataTable<T extends object>({
   )
 }
 
+/** A page's figure in a Stat row (Inventory, Profitability, Receivables, Customer orders, Offers & rules, Shop
+ *  analytics, a merchant): the portal's one KPI tile (components/ui/kpi-tile), its tone colouring the figure. */
+const STAT_TONE: Record<string, KpiTone> = {
+  amber: 'warning',
+  rose: 'destructive',
+  violet: 'primary',
+  emerald: 'success',
+  blue: 'info',
+  slate: 'default',
+}
+
 export function Stat({
   label,
   value,
@@ -338,21 +350,5 @@ export function Stat({
   tone?: 'amber' | 'rose' | 'violet' | 'emerald' | 'blue' | 'slate'
   foot?: ReactNode
 }) {
-  const TONES: Record<string, string> = {
-    amber: 'text-amber-600',
-    rose: 'text-rose-600',
-    violet: 'text-primary',
-    emerald: 'text-emerald-600',
-    blue: 'text-blue-600',
-    slate: 'text-slate-600 dark:text-slate-300',
-  }
-  return (
-    <div className="rounded-xl border bg-card px-4 py-3 shadow-soft transition-shadow hover:shadow-lift">
-      <div className={cn('font-display text-xl font-extrabold tracking-tight tabular-nums', tone && TONES[tone])}>
-        {value}
-      </div>
-      <div className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      {foot && <div className="mt-1 text-[12px] text-muted-foreground">{foot}</div>}
-    </div>
-  )
+  return <KpiTile label={label} value={value} tone={tone ? STAT_TONE[tone] : 'default'} foot={foot} />
 }

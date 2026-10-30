@@ -1,16 +1,10 @@
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 
+/** The one card: the .card-luxe surface (index.css: the card colour, a hairline border, an ink-tinted shadow). It
+ *  animates nothing itself; a card that lifts does so by transform where it is used. */
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return (
-    <div
-      className={cn(
-        'card-luxe rounded-xl text-card-foreground transition-[box-shadow,transform] duration-300',
-        className,
-      )}
-      {...props}
-    />
-  )
+  return <div className={cn('card-luxe rounded-xl text-card-foreground', className)} {...props} />
 }
 export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn('flex flex-col gap-1 p-5 pb-2', className)} {...props} />
