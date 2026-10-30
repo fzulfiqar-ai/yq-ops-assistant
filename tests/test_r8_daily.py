@@ -426,9 +426,9 @@ def _():
     # the weekly chart is the chart it was — its bars, its target line ...
     for needle in ('dataKey="label" interval="preserveStartEnd" minTickGap={10}',
                    "(pace.target_bhd / pace.business_days_total) * 5",
-                   "fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1}",
+                   "fill={p.partial ? 'hsl(var(--sash))' : 'hsl(var(--primary))'} fillOpacity={p.partial ? 0.45 : 1}",
                    "radius={[4, 4, 0, 0]} maxBarSize={34}",
-                   '<ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />'):
+                   '<ReferenceLine y={weekly} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain" />'):
         assert needle in weekly, needle
     assert "const WEEKLY_CAPTION = 'ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far'" in page
 
@@ -438,7 +438,7 @@ def _():
     page = _web("pages/CommandCentre.tsx")
     daily, weekly, key = _fn(page, "DailyChart"), _fn(page, "WeeklyChart"), _fn(page, "TargetKey")
     # one key for both charts: above the plot at the right, out of the pointer's way
-    assert "pointer-events-none absolute right-4 top-0" in key and "border-dashed border-[#d97706]" in key and "{children}" in key
+    assert "pointer-events-none absolute right-4 top-0" in key and "border-dashed border-target" in key and "{children}" in key
     assert "{target != null && <TargetKey>target per business day {fmtBhd0(target)}</TargetKey>}" in daily
     assert "{weekly != null && <TargetKey>weekly target {fmtBhd0(weekly)}</TargetKey>}" in weekly
     # a label on the weekly line itself was printed across the bar of a week that beat the target near the right edge
@@ -457,13 +457,13 @@ def _():
 def _():
     page = _web("pages/CommandCentre.tsx")
     chart = _fn(page, "DailyChart")
-    assert 'fill="#6D4091" />' in chart and 'fill="#6D4091" fillOpacity={0.45}' in chart and "p.business_day" in chart
+    assert 'fill="hsl(var(--primary))" />' in chart and 'fill="hsl(var(--primary))" fillOpacity={0.45}' in chart and "p.business_day" in chart
     assert "minPointSize={2}" in chart, "a day with no sale leaves a mark, so every weekend shows"
     assert "<ReferenceArea x1={latest.day} x2={latest.day}" in chart
     # the Dashboard's rule, only when a company target is set; the same dashed amber line as the weekly view
     assert "targetPerBusinessDay(pace?.target_bhd, pace?.business_days_total)" in chart
     assert chart.count("{target != null && ") == 2 and "target per business day {fmtBhd0(target)}" in chart
-    assert '<ReferenceLine y={target} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />' in chart
+    assert '<ReferenceLine y={target} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain" />' in chart
     # the tooltip: weekday, date and the invoices on one line, the exact amount on the next
     assert "`${p.weekday} ${p.label}${p.business_day ? '' : ' · weekend'} · ${invoicesText(p.invoices)}`" in chart
     assert "formatter={(v) => [fmtBhd(Number(v)), 'Accessories ex-VAT']}" in chart
@@ -489,7 +489,7 @@ def _():
     assert "f.key === 'average' && t.business_days ? ` over ${t.business_days} business days` : ''" in detail
     strip = _fn(page, "DayStrip")
     assert 'role="img"' in strip and "aria-label={`Daily Accessories sales, " in strip
-    assert "p.business_day ? 'bg-[#6D4091]' : 'bg-[#6D4091]/45" in strip
+    assert "p.business_day ? 'bg-primary' : 'bg-primary/45" in strip
     assert "const FULL = new Set(['sales.daily'])" in page and "full && 'md:col-span-2 xl:col-span-3'" in page
     assert "full={FULL.has(t.key)}" in page
     assert "const dayPoints = (t?: Tile): DayPoint[] =>" in page
