@@ -114,7 +114,14 @@ async def timeline(page, result, case, out, cast: list):
     await page.wait_for_timeout(250)
     origin = float(await page.evaluate("() => performance.timeOrigin"))
     ready_ms = await page.evaluate("() => performance.now()")
+    # from the document's own first paint on: before it the compositor still shows the new tab's
+    # about:blank (pure #FFFFFF, seen at ~0.1 s), which is not a frame this page painted. A page that
+    # paints white itself (the base) is still caught: its white comes after its first paint.
+    fp = await page.evaluate("() => { const e = performance.getEntriesByName('first-paint')[0]; return e ? e.startTime : null }")
     frames = [(round(ts * 1000 - origin), data) for ts, data in cast if ts * 1000 >= origin - 5]
+    held = [t for t, _ in frames if fp is not None and t < fp - 20]
+    frames = [(t, d) for t, d in frames if fp is None or t >= fp - 20]
+    result["notes"].append(f"first paint at {fp and round(fp)} ms; {len(held)} earlier frame(s) of the blank tab left out")
     import base64
     blank, light, seen = [], [], 0
     for t, data in frames:
