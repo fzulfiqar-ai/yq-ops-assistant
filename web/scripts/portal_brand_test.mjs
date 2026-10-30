@@ -202,5 +202,36 @@ check('badges have a dark-mode reading: tokens, not light-only hex tints', () =>
   ok(/dark:|var\(--|bg-(accent|success|warning|destructive|muted|foreground)/.test(badge), 'each tone reads a token or a dark: variant')
 })
 
+// cn() itself, run: lib/utils.ts with its two type annotations erased, its packages resolved from web/ (re-rate,
+// 30-Oct-2026: the default tailwind-merge took the custom size text-kpi for a colour and dropped it beside the
+// tone's colour, so every coloured KPI figure fell back to the body size)
+let cn = null
+let cnError = ''
+try {
+  const src = read('lib/utils.ts')
+    .replace(/,\s*type ClassValue\b/, '')
+    .replace(/:\s*ClassValue\[\]/g, '')
+    .replace(/from '([^'.][^']*)'/g, (_, pkg) => `from '${import.meta.resolve(pkg)}'`)
+  ;({ cn } = await import(`data:text/javascript,${encodeURIComponent(src)}`))
+} catch (e) {
+  cnError = e && e.message ? e.message : String(e)
+}
+
+check('cn() keeps the custom sizes (text-kpi, text-2xs) beside a colour, and still lets a later size win', () => {
+  ok(typeof cn === 'function', `lib/utils.ts loads (${cnError})`)
+  const kpi = cn('font-display text-kpi font-bold tabular-nums', 'text-primary').split(' ')
+  ok(kpi.includes('text-kpi') && kpi.includes('text-primary'), `a coloured KPI figure keeps its size: "${kpi.join(' ')}"`)
+  const tiny = cn('text-2xs', 'text-muted-foreground').split(' ')
+  ok(tiny.includes('text-2xs') && tiny.includes('text-muted-foreground'), `a muted caption keeps its size: "${tiny.join(' ')}"`)
+  ok(cn('text-sm', 'text-kpi') === 'text-kpi' && cn('text-kpi', 'text-2xs') === 'text-2xs', 'two sizes still merge to the later one')
+})
+
+check('the Ctrl K palette is on the brand: no blur under it, no violet, and a search reply that is not a list shows no rows', () => {
+  const s = code(read('components/CommandPalette.tsx'))
+  ok(!/backdrop-blur/.test(s), 'no backdrop blur under the palette (a per-frame GPU cost on integrated graphics)')
+  ok(!/(violet|fuchsia|indigo)-\d/.test(s) && !/rgba\((124,\s*58,\s*237|76,\s*29,\s*149)/.test(s), 'no violet, fuchsia or indigo left in the palette')
+  ok(/Array\.isArray\(r\)/.test(s), 'the hits are taken only when /search answers a list')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

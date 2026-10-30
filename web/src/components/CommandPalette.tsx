@@ -44,7 +44,7 @@ export function CommandPalette() {
     const t = setTimeout(async () => {
       try {
         const r = await apiGet<DataHit[]>(`/search?q=${encodeURIComponent(q.trim())}`)
-        if (id === reqRef.current) setHits(r || [])
+        if (id === reqRef.current) setHits(Array.isArray(r) ? r : [])
       } catch {
         if (id === reqRef.current) setHits([])
       } finally {
@@ -83,7 +83,7 @@ export function CommandPalette() {
     <AnimatePresence>
       {open && (
         <motion.div
-          className="fixed inset-0 z-[60] flex items-start justify-center bg-black/50 p-4 pt-[12vh] backdrop-blur-md"
+          className="fixed inset-0 z-[60] flex items-start justify-center bg-black/55 p-4 pt-[12vh]"
           initial={still ? false : { opacity: 0 }} animate={{ opacity: 1 }}
           exit={{ opacity: 0, transition: { duration: still ? 0 : DURATION.press, ease: EXIT_EASE } }}
           transition={{ duration: still ? 0 : DURATION.fade, ease: ENTER_EASE }}
@@ -93,10 +93,9 @@ export function CommandPalette() {
             initial={still ? false : { opacity: 0, y: -8, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={still ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, y: -8, scale: 0.98, transition: { duration: DURATION.press, ease: EXIT_EASE } }}
             transition={{ duration: DURATION.fade, ease: ENTER_EASE }}
-            className="w-full max-w-xl overflow-hidden rounded-2xl border border-white/10 bg-card text-card-foreground shadow-[0_30px_80px_-20px_rgba(76,29,149,.55)] ring-1 ring-black/5"
+            className="w-full max-w-xl overflow-hidden rounded-2xl border border-white/10 bg-card text-card-foreground shadow-[0_30px_80px_-20px_rgba(26,20,40,.5)] ring-1 ring-black/5"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-indigo-500" />
             <div className="flex items-center gap-3 border-b bg-gradient-to-b from-primary/[0.04] to-transparent px-4">
               {loading ? <Loader2 size={18} className="animate-spin text-primary" /> : <Search size={18} className="text-primary" />}
               <input
@@ -127,10 +126,10 @@ export function CommandPalette() {
                     <button
                       onMouseEnter={() => setActive(idx)} onClick={() => go(row.to)}
                       className={cn('flex w-full items-center gap-3 rounded-xl px-2.5 py-2.5 text-left text-sm transition',
-                        on ? 'bg-gradient-to-r from-primary/12 to-fuchsia-500/5 ring-1 ring-primary/20' : 'hover:bg-accent/60')}
+                        on ? 'bg-primary/10 ring-1 ring-primary/20' : 'hover:bg-accent/60')}
                     >
                       <span className={cn('grid h-9 w-9 shrink-0 place-items-center rounded-lg transition',
-                        on ? 'bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-[0_6px_16px_-4px_rgba(124,58,237,.6)]' : 'bg-muted text-muted-foreground')}>
+                        on ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')}>
                         {row.kind === 'page' ? <row.icon size={17} /> : (() => { const I = HIT_ICON[row.hit.type]; return <I size={17} /> })()}
                       </span>
                       <span className="min-w-0 flex-1">
