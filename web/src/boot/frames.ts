@@ -41,18 +41,18 @@ export const BOOT_CSS_ID = 'yq-boot-css'
 // theme and any re-brand of them; the fallbacks are today's light values, for the dev server, where
 // the stylesheet arrives after the first paint. The field app pins its own light plum set
 // (SalesmanShell SALES_TOKENS), and so does its frame.
-const BG = 'hsl(var(--background,250 40% 99%))'
+const BG = 'hsl(var(--background,36 33% 97%))'
 const CARD = 'hsl(var(--card,0 0% 100%))'
-const LINE = 'hsl(var(--border,258 30% 92%))'
-const MUTED = 'hsl(var(--muted,258 25% 96%))'
+const LINE = 'hsl(var(--border,270 14% 89%))'
+const MUTED = 'hsl(var(--muted,36 25% 95%))'
 const PRIMARY = 'hsl(var(--primary,273 39% 41%))'
 const S_BG = 'hsl(36 33% 97%)'
 const S_LINE = 'hsl(270 14% 89%)'
 const S_BAR = 'hsl(270 16% 92%)'
 const S_SOFT = 'hsl(36 25% 95%)'
 const S_ACCENT = 'hsl(273 40% 94%)'
-/** the office sidebar (AppShell) */
-const SIDE = 'linear-gradient(180deg,#2A1259 0%,#190A3A 100%)'
+/** the office sidebar (AppShell .sidebar-night: the brand's night pair, #2A1259 to #140F24) */
+const SIDE = 'linear-gradient(180deg,#2A1259 0%,#140F24 100%)'
 
 export const PORTAL_BOOT_CSS = [
   // the served node: above the app until handed over, never a tap target, a 10 s safety net (the delay
