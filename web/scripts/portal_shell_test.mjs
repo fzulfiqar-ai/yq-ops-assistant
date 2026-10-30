@@ -247,11 +247,12 @@ await check('the idle warm-up follows the menu, skips the page on screen and rep
 })
 
 await check('a warm-up that meets a missing chunk never reloads the tab (the reload rule is for a page the person opens)', () => {
+  // release review, 30-Oct-2026: a capturing listener here ran AFTER the rule (a window runs its own listeners in
+  // the order they were added), so the warm-ups count themselves in lib/warmState and the rule asks it
   const src = text('lib/prefetch.ts')
-  ok(/addEventListener\('vite:preloadError', \(event\) => \{\s*if \(warming > 0\) event\.stopImmediatePropagation\(\)\s*\}, \{ capture: true \}\)/.test(src),
-    'a capturing listener stops the reload while a warm-up runs')
-  ok(/warming \+= 1[\s\S]*finally \{\s*warming -= 1/.test(src), 'the count drops whatever the warm-up\'s outcome')
-  ok(text('main.tsx').includes('installPreloadReload()'), 'premise: the reload rule is installed at boot (before any warm-up)')
+  ok(!/stopImmediatePropagation/.test(src), 'no listener racing the reload rule')
+  ok(/warmStarted\(\)[\s\S]*finally \{\s*warmEnded\(\)/.test(src), 'the count drops whatever the warm-up\'s outcome')
+  ok(text('main.tsx').includes('installPreloadReload(isWarming)'), 'the reload rule asks whether a warm-up is running')
 })
 
 /* ── 4. the shells, read as text ────────────────────────────────────────────────────────────── */

@@ -479,9 +479,11 @@ def _():
     # left the portal on "Something went wrong" and the market with a dead tap. One reload per build,
     # never a loop, never offline (it would land on the browser's error page). The rule's behaviour is
     # tested in web/scripts/merchant_test.mjs.
-    for entry in ("web/src/main.tsx", "web/src/main.market.tsx"):
+    # 30-Oct-2026: the portal passes its warm-up state (lib/warmState), so a deploy that lands mid warm-up
+    # never reloads the tab; the market has no warm-ups and calls the rule bare.
+    for entry, call in (("web/src/main.tsx", "installPreloadReload(isWarming)"), ("web/src/main.market.tsx", "installPreloadReload()")):
         src = _read(entry)
-        assert "import { installPreloadReload } from './lib/preloadReload'" in src and "installPreloadReload()" in src, entry
+        assert "import { installPreloadReload } from './lib/preloadReload'" in src and call in src, entry
         assert "sessionStorage.getItem('yq-preload-reload') === '1'" not in src, entry + ": the old once-per-session flag"
     helper = _read("web/src/lib/preloadReload.ts")
     assert "window.addEventListener('vite:preloadError'" in helper
