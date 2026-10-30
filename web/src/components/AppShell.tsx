@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Link, Navigate, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -136,10 +136,19 @@ export function AppShell() {
   // the first page change on, each new page glides in (never the shell's first page: the boot did that)
   const [drawerPath, setDrawerPath] = useState(loc.pathname)
   const [navigated, setNavigated] = useState(false)
+  // The menu item just clicked, lit at once while its page renders (a chart page can take a few hundred
+  // ms of the CPU: the click is acknowledged on the next frame, not when the page is ready).
+  const [pendingTo, setPendingTo] = useState<string | null>(null)
   if (drawerPath !== loc.pathname) {
     setDrawerPath(loc.pathname)
     setMobileOpen(false)
     setNavigated(true)
+    setPendingTo(null)
+  }
+  // a plain click that React Router turns into a navigation (a Ctrl/⌘ or middle click opens a tab instead)
+  const markPending = (to: string) => (e: ReactMouseEvent) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || to === loc.pathname) return
+    setPendingTo(to)
   }
   // the open drawer holds the page still behind it (phones and tablets; it is the static sidebar from 1024 px)
   useEffect(() => {
@@ -222,10 +231,11 @@ export function AppShell() {
                   to={n.to}
                   end={n.to === '/'}
                   {...warmOn(n.to)}
+                  onClick={markPending(n.to)}
                   className={({ isActive }) =>
                     cn(
                       'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white',
-                      isActive && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
+                      (pendingTo ? pendingTo === n.to : isActive) && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
                       collapsed && 'justify-center px-0',
                     )
                   }

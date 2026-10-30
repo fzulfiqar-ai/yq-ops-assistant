@@ -215,7 +215,9 @@ export function useShellScroll(tabs: readonly string[] = []): void {
     })
     if (plan.kind === 'keep') return
     if (plan.kind === 'top') {
-      window.scrollTo({ top: 0, behavior: plan.smooth && !calm() ? 'smooth' : 'auto' })
+      // left AND top, both 0: the browser needs no layout to clamp (0, 0), so the fresh page is not laid out
+      // here in the middle of React's commit (a scrollTo({ top: 0 }) forced it: ~60 ms on the Sales page)
+      window.scrollTo({ left: 0, top: 0, behavior: plan.smooth && !calm() ? 'smooth' : 'auto' })
       return
     }
     return follow(plan.y)
