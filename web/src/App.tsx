@@ -6,8 +6,8 @@ import { homeFor } from '@/lib/nav'
 import Login from '@/pages/Login'
 import AcceptInvite from '@/pages/AcceptInvite'
 
-// Route-level code-splitting: each page is its own chunk, declared once in lib/pageCode (lib/lazyPage: a page
-// whose code is here renders at once, and the shells fetch the next page's code ahead — lib/prefetch).
+// Route-level code-splitting: each page is its own chunk, declared once in lib/pageCode (a page whose code is
+// here renders at once, and the shells fetch the next page's code ahead — lib/prefetch).
 import {
   Dashboard, Feed, Assistant, FieldNotes, Orders, OrderDetail, Leads, Coaching, Agents, Catalog, Upcoming,
   Finds, MarketIntel, MarketCase, Inventory, StockMovement, Sales, Margins, PriceTracker, Receivables,

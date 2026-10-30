@@ -3,6 +3,7 @@ import { AlertTriangle, RotateCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { reportError } from './errorMeta'
+import { rearmFailedPages } from './pageCode'
 import { glideFrames } from './pageGlide'
 
 /**
@@ -89,6 +90,9 @@ export class PageErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   componentDidCatch(error: Error) {
     console.error('[YQ] A page failed:', error)
     reportError('portal', error)
+    // the error is on screen now: a page whose code did not download asks again on its next mount
+    // (never before — the retries React makes while it settles the error would fetch in a loop)
+    rearmFailedPages()
   }
 
   render() {
