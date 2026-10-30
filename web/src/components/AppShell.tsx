@@ -65,7 +65,7 @@ function usePrefetchPages(me: Me | null, enabled: boolean) {
  * the scrollbar's width (a classic Windows scrollbar; phones have none). lib/sheet's lock knows it.
  */
 const TOPBAR_PX = 64
-function useWindowFrame() {
+function useWindowFrame(collapsed: boolean) {
   useLayoutEffect(() => {
     const root = document.documentElement
     const gutter = root.style.scrollbarGutter
@@ -76,6 +76,23 @@ function useWindowFrame() {
       root.style.scrollbarGutter = gutter
     }
   }, [])
+  // and what a page's fixed bar must keep clear of (pages/shop/StaffCatalog's order bar): no tab bar in the
+  // office, and the sidebar's width from 1024 px up — without them the bar floated 64 px up and over it
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const lg = window.matchMedia('(min-width: 1024px)')
+    const apply = () => {
+      root.style.setProperty('--yq-tabbar', '0px')
+      root.style.setProperty('--yq-sidebar', lg.matches ? (collapsed ? '76px' : '260px') : '0px')
+    }
+    apply()
+    lg.addEventListener('change', apply)
+    return () => {
+      lg.removeEventListener('change', apply)
+      root.style.removeProperty('--yq-tabbar')
+      root.style.removeProperty('--yq-sidebar')
+    }
+  }, [collapsed])
 }
 
 function greeting() {
@@ -104,12 +121,12 @@ export function AppShell() {
   // answers 403, so keep the member on Settings and say why instead of a page full of errors.
   const mustReset = mustResetOf(me, session)
   usePrefetchPages(me, !!me && me.role !== 'salesman' && !mustReset)
-  useWindowFrame()
   // a new page at the top, Back where the page was (lib/shellScroll)
   useShellScroll()
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem('yq-collapsed') === '1',
   )
+  useWindowFrame(collapsed)
   const items = navFor(me)
   // the code of every page this login can open, at idle once the page in front has its answers; a
   // hover, a press or a focus on a menu item fetches that page's code and its main read at once

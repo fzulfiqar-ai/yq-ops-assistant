@@ -284,6 +284,8 @@ await check('the office: the sidebar sticks at h-dvh and swaps its width at once
   // the rep's phone: the floating tab bar and the header sat at 90 % with a blur over the scrolling catalog
   const rep = text('components/SalesmanShell.tsx')
   ok(!/backdrop-blur/.test(rep), 'no blur in the salesman shell (its tab bar and header are solid)')
+  // StaffCatalog's fixed order bar reads these: in the office it floated 64 px up and over the sidebar at 1024-1279
+  ok(/--yq-tabbar/.test(shell) && /--yq-sidebar/.test(shell), 'the office publishes --yq-tabbar and --yq-sidebar for the pages that pin bars')
 })
 
 await check('the office: nothing waits for the old page; one page-shaped skeleton; an error boundary per route (S5, S8, item 24)', () => {
