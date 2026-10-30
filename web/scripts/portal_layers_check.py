@@ -319,9 +319,13 @@ MODALS = [
 
 # ── S11: a toast raised from an open sheet ──────────────────────────────────────────────────────────────
 
+# the open layer: a dialog — or, before ship 2, a hand-made overlay's panel (no role), so the base is measured too
+LAYER = 'document.querySelector(\'[role="dialog"]\') || document.querySelector("div.fixed.inset-0.z-50 > div")'
+LAYERS = '(document.querySelectorAll(\'[role="dialog"]\').length || document.querySelectorAll("div.fixed.inset-0.z-50").length)'
+
 TOAST_VS_SHEET = """() => {
   const t = [...document.querySelectorAll('[role="status"]')].find((x) => x.textContent.trim().length > 0 && x.getBoundingClientRect().height > 0)
-  const d = document.querySelector('[role="dialog"]')
+  const d = """ + LAYER + """
   if (!t || !d) return { toast: !!t, dialog: !!d }
   const r = t.getBoundingClientRect()
   const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
@@ -336,9 +340,10 @@ TOAST_VS_SHEET = """() => {
 
 
 async def s11_check(page, result: dict, case: dict) -> None:
-    await page.get_by_role("button", name="QA-10000", exact=True).first.click()
+    await case.get("open", desk_order)(page)
     await page.wait_for_timeout(1200)
-    await page.locator('[role="dialog"]').get_by_role("button", name=re.compile(r"^\s*Delivered")).first.click()
+    layer = page.locator('[role="dialog"], div.fixed.inset-0.z-50 > div').first
+    await layer.get_by_role("button", name=re.compile(r"^\s*Delivered")).first.click()
     await page.wait_for_timeout(700)
     st = await page.evaluate(TOAST_VS_SHEET)
     result["notes"].append(json.dumps(st))
@@ -359,19 +364,27 @@ TOPS = """(ms) => new Promise((done) => {
 })"""
 
 
-async def phone_sheet(page):
-    """An order's sheet on a phone (the drawer becomes a bottom sheet under 640 px)."""
+async def desk_order(page):
+    """The office desk's order drawer (hand-made before ship 2)."""
     await page.get_by_role("button", name="QA-10000", exact=True).first.click()
+
+
+async def phone_sheet(page):
+    """The rep's order sheet (Customer orders, the field view): components/ui/sheet before and after ship 2."""
+    await page.get_by_role("button", name=re.compile(r"^Shop 0\b")).first.click()
 
 
 async def s6_enter(page, result: dict, case: dict) -> None:
     # the sampler runs from before the tap, so the entrance's first frames are in it
-    await page.evaluate("""() => { window.__tops = []; const t0 = performance.now()
-      const step = () => { const d = document.querySelector('[role="dialog"]'); if (d) window.__tops.push(d.getBoundingClientRect().top)
-        if (performance.now() - t0 < 2500) requestAnimationFrame(step) }
+    # (until 1.5 s after the sheet first shows: a busy machine may take a while to open it)
+    await page.evaluate("""() => { window.__tops = []; window.__topsDone = false; const t0 = performance.now(); let seen = 0
+      const step = () => { const d = document.querySelector('[role="dialog"]'); const now = performance.now()
+        if (d) { if (!seen) seen = now; window.__tops.push(d.getBoundingClientRect().top) }
+        if ((seen && now - seen > 1500) || now - t0 > 10000) { window.__topsDone = true; return }
+        requestAnimationFrame(step) }
       requestAnimationFrame(step) }""")
     await phone_sheet(page)
-    await page.wait_for_timeout(1200)
+    await page.wait_for_function("() => window.__topsDone", timeout=15000)
     tops = await page.evaluate("() => window.__tops")
     if not tops:
         return fail(result, "no dialog")
@@ -462,13 +475,13 @@ async def palette_over_sheet(page, result: dict, case: dict) -> None:
     await page.keyboard.press("Escape")
     await page.wait_for_timeout(500)
     left = await page.evaluate("""() => ({ palette: !!document.querySelector('input[placeholder^="Search pages"]'),
-      sheet: document.querySelectorAll('[role=dialog]').length })""")
+      sheet: """ + LAYERS + """ })""")
     result["notes"].append(f"after one Escape {left}")
     if left["palette"] or left["sheet"] != 1:
         fail(result, "the first Escape should close the palette only")
     await page.keyboard.press("Escape")
     await page.wait_for_timeout(500)
-    if await page.evaluate("() => document.querySelectorAll('[role=dialog]').length"):
+    if await page.evaluate("() => " + LAYERS):
         fail(result, "the second Escape should close the sheet")
 
 
@@ -513,9 +526,10 @@ async def photo_fade(page, result: dict, case: dict) -> None:
 CASES = [
     *({"name": n, "path": path, "check": modal_check, "opener": opener, **extra} for n, path, opener, extra in MODALS),
     {"name": "s11_toast_drawer", "path": "/shop-orders", "check": s11_check, "fix": {"/shop/orders/:id": order_detail(["deliver"])}},
-    {"name": "s11_toast_phone", "path": "/shop-orders", "check": s11_check, "fix": {"/shop/orders/:id": order_detail(["deliver"])}, **PHONE},
-    {"name": "s6_enter", "path": "/shop-orders", "check": s6_enter, **PHONE},
-    {"name": "s6_drag", "path": "/shop-orders", "check": s6_drag, **PHONE},
+    {"name": "s11_toast_phone", "path": "/shop-orders", "check": s11_check, "fix": {"/shop/orders/:id": order_detail(["deliver"])},
+     "me": REP, "open": phone_sheet, **PHONE},
+    {"name": "s6_enter", "path": "/shop-orders", "check": s6_enter, "me": REP, **PHONE},
+    {"name": "s6_drag", "path": "/shop-orders", "check": s6_drag, "me": REP, **PHONE},
     {"name": "palette_over_sheet", "path": "/shop-orders", "check": palette_over_sheet},
     {"name": "reduced_fade", "path": "/leads", "check": reduced_fade, "reduced": "reduce"},
     {"name": "toast_order_bar", "path": "/shop", "check": toast_order_bar, "me": REP, **PHONE},
