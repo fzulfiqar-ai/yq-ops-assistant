@@ -147,7 +147,7 @@ function FloatingTabs({ tabs }: { tabs: Tab[] }) {
   const n = Math.max(1, tabs.length)
   return (
     <nav aria-label="Main" className="fixed inset-x-3 z-40 md:hidden" style={{ bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' }}>
-      <ul className="relative grid h-16 items-stretch rounded-3xl border border-border/80 bg-card/90 shadow-[0_12px_32px_-12px_rgba(25,20,36,.28)] backdrop-blur-xl" style={{ ['--i' as string]: Math.max(0, active), gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
+      <ul className="relative grid h-16 items-stretch rounded-3xl border border-border/80 bg-card shadow-[0_12px_32px_-12px_rgba(25,20,36,.28)]" style={{ ['--i' as string]: Math.max(0, active), gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
         <li aria-hidden="true" className={cn('pointer-events-none absolute inset-y-1.5 left-1.5 rounded-2xl bg-accent transition-transform duration-300 ease-[cubic-bezier(.22,1.18,.36,1)] motion-reduce:transition-none', active < 0 && 'opacity-0')} style={{ width: `calc((100% - 0.75rem) / ${n})`, transform: 'translateX(calc(var(--i) * 100%))' }} />
         {tabs.map((t, i) => {
           const Icon = t.icon
@@ -340,7 +340,7 @@ export function SalesmanShell() {
         {/* the sidebar is fixed: the page keeps its width clear (64 px rail, 240 px from 1280 unless collapsed) */}
         <div className={cn('min-w-0 flex-1 lg:pl-16', !collapsed && 'xl:pl-60')}>
           {/* top bar: phone + tablet (desktop has the sidebar) */}
-          <header className="sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur lg:hidden">
+          <header className="sticky top-0 z-30 border-b border-border bg-card lg:hidden">
             <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
               <Link to="/account" aria-label="My account" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent font-display text-[13px] font-bold text-accent-foreground">
                 {initials(name) || 'YQ'}

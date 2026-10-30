@@ -281,6 +281,9 @@ await check('the office: the sidebar sticks at h-dvh and swaps its width at once
   const header = shell.split('<header ', 2)[1]?.split('>', 1)[0] || ''
   ok(header.includes('sticky top-0') && !/backdrop-blur/.test(header) && /\bbg-background\b(?!\/)/.test(header), `a sticky, solid top bar (${header})`)
   ok(!/backdrop-blur/.test(shell), 'no blur anywhere in the office shell')
+  // the rep's phone: the floating tab bar and the header sat at 90 % with a blur over the scrolling catalog
+  const rep = text('components/SalesmanShell.tsx')
+  ok(!/backdrop-blur/.test(rep), 'no blur in the salesman shell (its tab bar and header are solid)')
 })
 
 await check('the office: nothing waits for the old page; one page-shaped skeleton; an error boundary per route (S5, S8, item 24)', () => {
