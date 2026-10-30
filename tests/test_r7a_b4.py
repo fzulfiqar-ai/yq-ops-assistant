@@ -375,7 +375,9 @@ def _():
     assert "fixed inset-0 z-50" not in pal
     # an opaque panel: tailwind.config.js defines no 'popover' colour, so bg-popover painted nothing over the overlay
     assert "bg-card text-card-foreground" in pal and "popover" not in pal
-    assert "card: { DEFAULT: 'hsl(var(--card))'" in _read("web/tailwind.config.js")
+    # the card colour exists (ship 2: every colour is `c('--x')` = hsl(var(--x) / <alpha-value>))
+    tw = _read("web/tailwind.config.js")
+    assert "card: { DEFAULT: c('--card')" in tw and "const c = (v) => `hsl(var(${v}) / <alpha-value>)`" in tw
     shell = _read("web/src/components/AppShell.tsx")
     assert shell.index("<CommandPalette />") < shell.index("<main "), "the palette is earlier in the DOM"
     for rel in OVERLAY_FILES:

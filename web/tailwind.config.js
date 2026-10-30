@@ -1,52 +1,63 @@
 /** @type {import('tailwindcss').Config} */
+// The portal's theme on the tokens in src/index.css (ship 2: the logo plum, Instrument Sans + Sora — one brand
+// with the marketplace's tailwind.market.config.js). Every colour takes an alpha (`bg-primary/10`).
+const c = (v) => `hsl(var(${v}) / <alpha-value>)`
+
 export default {
   darkMode: ['class', '[data-theme="dark"]'],
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        border: 'hsl(var(--border))',
-        input: 'hsl(var(--input))',
-        ring: 'hsl(var(--ring))',
-        background: 'hsl(var(--background))',
-        foreground: 'hsl(var(--foreground))',
-        primary: { DEFAULT: 'hsl(var(--primary))', foreground: 'hsl(var(--primary-foreground))' },
-        secondary: { DEFAULT: 'hsl(var(--secondary))', foreground: 'hsl(var(--secondary-foreground))' },
-        muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
-        accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
-        card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
-        destructive: { DEFAULT: 'hsl(var(--destructive))', foreground: 'hsl(var(--destructive-foreground))' },
-        success: { DEFAULT: 'hsl(var(--success))', foreground: 'hsl(var(--success-foreground))' },
-        warning: { DEFAULT: 'hsl(var(--warning))', foreground: 'hsl(var(--warning-foreground))' },
+        border: c('--border'),
+        input: c('--input'),
+        ring: c('--ring'),
+        background: c('--background'),
+        foreground: c('--foreground'),
+        primary: { DEFAULT: c('--primary'), foreground: c('--primary-foreground'), deep: c('--primary-deep') },
+        sash: c('--sash'),
+        secondary: { DEFAULT: c('--secondary'), foreground: c('--secondary-foreground') },
+        muted: { DEFAULT: c('--muted'), foreground: c('--muted-foreground') },
+        accent: { DEFAULT: c('--accent'), foreground: c('--accent-foreground') },
+        card: { DEFAULT: c('--card'), foreground: c('--card-foreground') },
+        popover: { DEFAULT: c('--popover'), foreground: c('--popover-foreground') },
+        destructive: { DEFAULT: c('--destructive'), foreground: c('--destructive-foreground') },
+        success: { DEFAULT: c('--success'), foreground: c('--success-foreground') },
+        warning: { DEFAULT: c('--warning'), foreground: c('--warning-foreground') },
+        info: { DEFAULT: c('--info'), foreground: c('--info-foreground') },
+        target: c('--target'),
+        night: { DEFAULT: c('--night'), 2: c('--night-2') },
+        wa: c('--wa'),
+        plum: { DEFAULT: c('--plum'), 2: c('--plum-2') },
       },
+      // one scale that climbs (sm < md < lg < xl < 2xl); 2xl used to fall back to Tailwind's 16 px, under xl's 17.6
       borderRadius: {
+        '2xl': 'calc(var(--radius) + 8px)',
         xl: 'calc(var(--radius) + 4px)',
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        display: ["'Space Grotesk'", 'Inter', 'sans-serif'],
+        sans: ['Instrument Sans', 'Instrument Sans Fallback', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        display: ['Sora', 'Sora Fallback', 'Instrument Sans', 'system-ui', 'sans-serif'],
+      },
+      // the type scale's named steps beside Tailwind's: 2xs for footnotes and labels, kpi for a tile's figure
+      fontSize: {
+        '2xs': ['0.6875rem', { lineHeight: '1rem' }],
+        kpi: ['1.625rem', { lineHeight: '1.15', letterSpacing: '-0.02em' }],
       },
       boxShadow: {
-        soft: '0 1px 2px rgba(24,16,48,.04), 0 8px 24px -8px rgba(24,16,48,.10)',
-        lift: '0 8px 30px -8px rgba(109,40,217,.28)',
-        // premium tiers — colored, multi-layer depth for the luxe surfaces
-        luxe: '0 1px 0 0 rgba(255,255,255,.6) inset, 0 2px 4px rgba(24,16,48,.04), 0 18px 40px -16px rgba(109,40,217,.20)',
-        'luxe-hover': '0 1px 0 0 rgba(255,255,255,.7) inset, 0 4px 8px rgba(24,16,48,.06), 0 28px 56px -18px rgba(109,40,217,.34)',
-        glow: '0 0 0 1px rgba(124,58,237,.18), 0 8px 32px -8px rgba(124,58,237,.40)',
+        // ink-tinted depth; a plum tint only where something lifts (never the old violet glow)
+        soft: '0 1px 2px rgba(26,20,40,.04), 0 8px 24px -10px rgba(26,20,40,.10)',
+        lift: '0 8px 30px -10px rgba(109,64,145,.30)',
+        luxe: '0 1px 2px rgba(26,20,40,.05), 0 18px 40px -16px rgba(109,64,145,.22)',
       },
       keyframes: {
-        'fade-up': { from: { opacity: '0', transform: 'translateY(8px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
         float: { '0%,100%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-6px)' } },
-        shimmer: { '100%': { transform: 'translateX(100%)' } },
-        sheen: { '0%': { transform: 'translateX(-120%) skewX(-12deg)' }, '60%,100%': { transform: 'translateX(220%) skewX(-12deg)' } },
       },
       animation: {
-        'fade-up': 'fade-up .5s cubic-bezier(.16,1,.3,1) both',
         float: 'float 5s ease-in-out infinite',
-        sheen: 'sheen 1.1s cubic-bezier(.16,1,.3,1)',
       },
     },
   },

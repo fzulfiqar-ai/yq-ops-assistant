@@ -144,7 +144,7 @@ export default function Team() {
     const needsMigration = error instanceof ApiError && error.status >= 500
     return (
       <div>
-        <PageHeader title="Team & Access" subtitle="Invite teammates and control what each person can see" />
+        <PageHeader title="Team & access" subtitle="Invite teammates and control what each person can see" />
         <Card className="p-6 text-sm">
           {needsMigration ? (
             <>
@@ -164,7 +164,7 @@ export default function Team() {
 
   return (
     <div>
-      <PageHeader title="Team & Access" subtitle="Invite teammates and control what each person can see" />
+      <PageHeader title="Team & access" subtitle="Invite teammates and control what each person can see" />
 
       {/* Invite */}
       <Card className="mb-5 p-5">

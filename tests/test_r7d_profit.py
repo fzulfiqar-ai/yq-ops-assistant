@@ -1072,7 +1072,7 @@ def _():
     dash = _read("web/src/pages/Dashboard.tsx")
     assert "top_customers_acc?: TopCustomerAcc[] | null" in dash
     assert "const topCustomersFailed = data?.top_customers_acc === null" in dash
-    card = dash.split("<Crown size={18} className=\"text-amber-500\" /> Top customers", 1)[1].split("</Card>", 1)[0]
+    card = dash.split("<Crown size={18} className=\"text-target\" /> Top customers", 1)[1].split("</Card>", 1)[0]
     assert card.index("topCustomersFailed ?") < card.index("topCustomers.length === 0 ?"), "the failure is checked first"
     assert "Top customers could not be read just now." in card and "No named-account Accessories sales this month." in card
     # 'Sat 26 Sep vs Sat 19 Sep': a weekend day reads as one, and the compared day is named with its weekday
@@ -1113,7 +1113,7 @@ def _():
     # above the line (insideBottom…) the label never lands on the tallest bar's top; both charts get room at the top
     assert "position: 'insideTopRight'" not in dash and dash.count("position: 'insideBottomRight', offset: 5") == 2
     assert dash.count("margin={{ top: 18, right: 8, left: 8, bottom: 0 }}") == 2
-    assert '<ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"' in dash
+    assert '<ReferenceLine y={dailyTarget} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain"' in dash
     # the arrow stays with its %, 'BHD' with its amount
     delta = dash.split("function Delta(", 1)[1].split("\n}\n", 1)[0]
     assert '<span className="whitespace-nowrap">' in delta and "vs?: React.ReactNode" in delta

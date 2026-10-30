@@ -23,6 +23,8 @@ import type { Freshness } from '@/components/FreshnessChip'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
+import { KpiTile, type KpiTone } from '@/components/ui/kpi-tile'
+import { firstNameOf, greeting as greetingFor } from '@/lib/greeting'
 import { Skeleton } from '@/components/ui/skeleton'
 
 interface Kpis {
@@ -143,14 +145,6 @@ const item = {
   hidden: { opacity: 0, y: 8 },
   show: { opacity: 1, y: 0, transition: { duration: DURATION.fade, ease: ENTER_EASE } },
 }
-const ACCENTS = {
-  purple: 'linear-gradient(90deg,#7c3aed,#a78bfa)',
-  blue: 'linear-gradient(90deg,#2563eb,#60a5fa)',
-  amber: 'linear-gradient(90deg,#d97706,#fbbf24)',
-  green: 'linear-gradient(90deg,#059669,#34d399)',
-  slate: 'linear-gradient(90deg,#475569,#94a3b8)',
-}
-
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 /** '2026-09-27' → '27 Sep': the form the API's basis lines and the freshness chip use */
 function dayLabel(iso?: string | null): string {
@@ -176,7 +170,7 @@ function Delta({ pct, vs }: { pct: number | null | undefined; vs?: React.ReactNo
   if (pct == null) return <span className="font-semibold text-muted-foreground">No comparison{vs ? <> with {vs}</> : null}</span>
   const up = pct >= 0
   return (
-    <span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
+    <span className={up ? 'font-semibold text-success' : 'font-semibold text-destructive'}>
       <span className="whitespace-nowrap">
         {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
         {up ? '+' : ''}{pct.toFixed(1)}%
@@ -191,74 +185,24 @@ function Amount({ children }: { children: React.ReactNode }) {
   return <span className="whitespace-nowrap">{children}</span>
 }
 
-function KpiCard({ accent, icon: Icon, label, value, foot, hero, to, basis }: {
-  accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode
-  foot?: React.ReactNode; hero?: boolean; to?: string
-  /** the API's full basis line (the Command Centre's words), on hover */
-  basis?: string
-}) {
-  // the hover lift moves (transform, 200 ms); the deeper shadow is set, never animated
-  const card = (
-    <Card title={basis} className="group relative flex h-full flex-col overflow-hidden p-4 transition-transform duration-200 ease-[cubic-bezier(.22,1,.36,1)] hover:-translate-y-0.5 hover:shadow-luxe-hover motion-reduce:transition-none motion-reduce:hover:translate-y-0">
-      {/* top accent rail */}
-      <div className="absolute inset-x-0 top-0 h-[3px]" style={{ background: accent }} />
-      {/* soft accent glow that intensifies on hover */}
-      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-200 group-hover:opacity-70"
-        style={{ background: accent }} />
-      <div className="relative flex items-start justify-between">
-        <div className="grid h-9 w-9 place-items-center rounded-xl bg-accent/60 text-accent-foreground ring-1 ring-inset ring-white/40">
-          <Icon size={18} />
-        </div>
-        {to && <ArrowUpRight size={15} className="text-muted-foreground/50 transition group-hover:text-primary" />}
-      </div>
-      <div className={cn(
-        'relative mt-3 font-display font-extrabold leading-none tracking-tight tabular-nums',
-        hero ? 'text-gradient text-[1.85rem]' : 'text-[1.6rem]',
-      )}>{value}</div>
-      <div className="relative mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      {foot && <div className="relative mt-1.5 text-[12.5px]">{foot}</div>}
-    </Card>
-  )
+/** One figure of the KPI row: the portal's one tile, rising with the row on its first view in the session. */
+function Kpi(props: Parameters<typeof KpiTile>[0]) {
   return (
-    <motion.div variants={item}>
-      {to ? <Link to={to} className="block h-full">{card}</Link> : card}
+    <motion.div variants={item} className="h-full">
+      <KpiTile {...props} />
     </motion.div>
   )
 }
 
-const TONES = {
-  green: { glow: '#10b981', text: 'text-emerald-600' },
-  amber: { glow: '#f59e0b', text: 'text-amber-600' },
-  red: { glow: '#f43f5e', text: 'text-rose-600' },
-  violet: { glow: '#8b5cf6', text: 'text-violet-600' },
-}
-
-function HealthStat({ icon: Icon, label, value, sub, tone, to, basis }: {
-  icon: typeof Percent; label: string; value: React.ReactNode; sub?: React.ReactNode
-  tone: keyof typeof TONES; to?: string
-  /** what the figure is made of, on hover (as KpiCard's) */
-  basis?: string
-}) {
-  const t = TONES[tone]
-  const inner = (
-    <Card title={basis} className="group relative h-full overflow-hidden p-4 transition-transform duration-200 ease-[cubic-bezier(.22,1,.36,1)] hover:-translate-y-0.5 hover:shadow-luxe-hover motion-reduce:transition-none motion-reduce:hover:translate-y-0">
-      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-30 blur-2xl transition-opacity duration-200 group-hover:opacity-60" style={{ background: t.glow }} />
-      <div className="relative flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        <Icon size={15} className={t.text} /> {label}
-      </div>
-      <div className="relative mt-2 font-display text-[1.5rem] font-extrabold leading-none tabular-nums">{value}</div>
-      {sub && <div className="relative mt-1.5 text-[12px] text-muted-foreground">{sub}</div>}
-    </Card>
-  )
-  return to ? <Link to={to} className="block h-full">{inner}</Link> : inner
-}
+/** Business health: the same tile, its icon coloured by whether the figure is good or bad news. */
+const HEALTH_TONE: Record<'green' | 'amber' | 'red', KpiTone> = { green: 'success', amber: 'warning', red: 'destructive' }
 
 function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: boolean }) {
   const Icon = up ? ArrowUpRight : ArrowDownRight
   return (
     <div>
       <div className={cn('mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide',
-        up ? 'text-emerald-600' : 'text-rose-600')}>
+        up ? 'text-success' : 'text-destructive')}>
         <Icon size={14} /> {title}
       </div>
       <ul className="space-y-0.5">
@@ -275,7 +219,7 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
               <span className="min-w-0 truncate font-medium" title={r.item_name}>{r.item_name}</span>
               <span className="shrink-0 whitespace-nowrap tabular-nums" title={detail}>
                 {units && <span className="mr-2 text-[12px] text-muted-foreground">{units}</span>}
-                <span className={cn('font-semibold', up ? 'text-emerald-600' : 'text-rose-600')}>{pct > 0 ? '+' : ''}{pct}%</span>
+                <span className={cn('font-semibold', up ? 'text-success' : 'text-destructive')}>{pct > 0 ? '+' : ''}{pct}%</span>
               </span>
             </li>
           )
@@ -476,11 +420,9 @@ export default function Dashboard() {
   const smScope = data?.by_salesman_scope
   const smMonth = smScope?.period ? new Date(Number(smScope.period.slice(0, 4)), Number(smScope.period.slice(5, 7)) - 1, 1).toLocaleDateString('en-GB', { month: 'long' }) : ''
 
-  const hour = new Date().getHours()
-  const daypart = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
-  const firstName = (me?.full_name || me?.email || '').split(/[@ ]/)[0]
   const nActions = data?.actions?.length ?? 0
-  const greeting = firstName ? `${daypart}, ${firstName.charAt(0).toUpperCase()}${firstName.slice(1)}` : daypart
+  // the top bar's greeting, word for word (lib/greeting: one helper, one set of hours)
+  const greeting = greetingFor(firstNameOf(me?.full_name, me?.email))
   const focus = nActions > 0
     ? `${nActions} thing${nActions === 1 ? '' : 's'} need${nActions === 1 ? 's' : ''} your attention today`
     : 'All clear — nothing needs your attention right now'
@@ -500,7 +442,7 @@ export default function Dashboard() {
 
       {/* Stale-data guard: the header's freshness chip says the date; this says what to do about it */}
       {fresh?.stale && (
-        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-2.5 text-sm font-medium text-warning">
           <TriangleAlert size={16} className="shrink-0" />
           {fresh.focus_to
             ? `Focus data is ${fresh.focus_days_behind ?? '—'} day(s) old (to ${fresh.focus_label || dayLabel(fresh.focus_to)})`
@@ -527,7 +469,7 @@ export default function Dashboard() {
       {/* a re-read that failed (a poll while behind the chip, a tab coming back): the figures shown are the last
           ones read, and the page says so instead of passing them off as current */}
       {refreshFailed({ data, isError }) && (
-        <div role="status" className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-[13px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+        <div role="status" className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-2 text-[13px] text-warning">
           <TriangleAlert size={15} className="shrink-0" aria-hidden="true" />
           Could not refresh just now — these are the figures read earlier.
           <button type="button" onClick={() => refetch()} disabled={isFetching}
@@ -546,7 +488,7 @@ export default function Dashboard() {
           </div>
           {data.actions.length === 0 ? (
             <p className="flex items-center gap-2 px-2 text-sm text-muted-foreground">
-              <CheckCircle2 size={16} className="shrink-0 text-emerald-600" aria-hidden="true" /> Nothing needs your attention right now.
+              <CheckCircle2 size={16} className="shrink-0 text-success" aria-hidden="true" /> Nothing needs your attention right now.
             </p>
           ) : (
             <div className="space-y-1">
@@ -554,7 +496,7 @@ export default function Dashboard() {
                 <Link key={i} to={a.to}
                   className="group flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-accent/50">
                   <span className={cn('h-2 w-2 shrink-0 rounded-full',
-                    a.urgency >= 3 ? 'bg-rose-500' : a.urgency === 2 ? 'bg-amber-500' : 'bg-slate-400')} />
+                    a.urgency >= 3 ? 'bg-destructive' : a.urgency === 2 ? 'bg-target' : 'bg-muted-foreground/50')} />
                   <span className="min-w-0 flex-1 truncate font-medium" title={a.action}>{a.action}</span>
                   {a.bhd > 0 && <span className="shrink-0 tabular-nums text-muted-foreground">{bhd(a.bhd, 0)}</span>}
                   <ArrowRight size={15} className="shrink-0 text-muted-foreground opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
@@ -568,14 +510,14 @@ export default function Dashboard() {
       {/* KPI row */}
       {k && (
         <KpiRow>
-          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Accessories sales this month · ex-VAT" hero to="/sales"
-            basis={salesMtd?.basis}
+          <Kpi icon={DollarSign} label="Accessories sales this month · ex-VAT" tone="primary" to="/sales"
+            title={salesMtd?.basis}
             value={salesMtd?.value != null ? <CountUp id="dashboard.sales_mtd" value={salesMtd.value} format={(n) => bhd(n, 0)} /> : '—'}
             foot={salesMtd
               ? <Delta pct={salesMtd.delta_pct} vs={cc?.compare_basis || salesMtd.compare?.label} />
               : <span className="text-muted-foreground">Not available just now · the Command Centre figures did not load</span>} />
-          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label={cc?.day ? `Latest day · ${weekdayLabel(cc.day.end)}` : 'Latest day'} to="/sales"
-            basis={salesDay?.basis}
+          <Kpi icon={CalendarDays} label={cc?.day ? `Latest day · ${weekdayLabel(cc.day.end)}` : 'Latest day'} to="/sales"
+            title={salesDay?.basis}
             value={salesDay?.value != null ? <CountUp id="dashboard.sales_day" value={salesDay.value} format={(n) => bhd(n, 0)} /> : '—'}
             foot={salesDay ? (
               <span className="text-muted-foreground">
@@ -584,20 +526,20 @@ export default function Dashboard() {
                 {' '}· {num(salesDay.invoices)} invoices
               </span>
             ) : <span className="text-muted-foreground">Accessories · ex-VAT · not available just now</span>} />
-          <KpiCard accent={ACCENTS.slate} icon={FileText} label="Focus invoices this month (Accessories)" to="/sales"
-            basis={salesMtd?.basis}
+          <Kpi icon={FileText} label="Focus invoices this month (Accessories)" to="/sales"
+            title={salesMtd?.basis}
             value={salesMtd?.invoices != null ? <CountUp id="dashboard.invoices" value={salesMtd.invoices} /> : '—'}
             foot={<span className="text-muted-foreground">Month to date{cc?.focus ? ` · ${cc.focus.label}` : ''} · the Focus sales day book</span>} />
-          <KpiCard accent={ACCENTS.green} icon={Landmark} label={arLabel} to="/receivables"
-            basis={arBasis}
+          <Kpi icon={Landmark} label={arLabel} to="/receivables"
+            title={arBasis}
             value={arValue != null ? <CountUp id="dashboard.receivables" value={arValue} format={(n) => bhd(n, 0)} /> : '—'}
             foot={<span className="text-muted-foreground">
-              {arOver90?.value != null && <><span className="font-semibold text-rose-600">{arOver90.value.toFixed(1)}% over 90 days</span>{' '}· </>}
+              {arOver90?.value != null && <><span className="font-semibold text-destructive">{arOver90.value.toFixed(1)}% over 90 days</span>{' '}· </>}
               <Amount>{bhd(k.overdue_total_bhd, 0)}</Amount> overdue &gt;30d · {k.overdue_count} accts</span>} />
-          <KpiCard accent={ACCENTS.amber} icon={Boxes} label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'} to="/inventory"
-            basis={accOnly ? 'Accessories items with under 30 days of stock cover, sold-out items with sales in the last 90 days included · the latest stock snapshot' : undefined}
+          <Kpi icon={Boxes} label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'} to="/inventory"
+            title={accOnly ? 'Accessories items with under 30 days of stock cover, sold-out items with sales in the last 90 days included · the latest stock snapshot' : undefined}
             value={<CountUp id="dashboard.low_stock" value={k.low_stock_count} />}
-            foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
+            foot={<span className="font-medium text-warning">&lt; 30 days cover</span>} />
         </KpiRow>
       )}
 
@@ -620,8 +562,7 @@ export default function Dashboard() {
                 )}
                 {data.pace.target_bhd > 0 ? (
                   <span className={cn('rounded-full px-2.5 py-0.5 text-[12px] font-semibold',
-                    data.pace.on_track ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
-                      : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300')}>
+                    data.pace.on_track ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning')}>
                     {data.pace.target_pct}% of {bhd(data.pace.target_bhd, 0)} target so far
                   </span>
                 ) : me?.role === 'admin' ? (
@@ -657,12 +598,12 @@ export default function Dashboard() {
                 {/* extendDomain: the line shows when the target is above every bar; its label sits ABOVE the line
                     (insideBottomRight) so it never lands on a bar's top */}
                 {dailyTarget && (
-                  <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
-                    label={{ value: `target per business day ${bhd(dailyTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
+                  <ReferenceLine y={dailyTarget} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain"
+                    label={{ value: `target per business day ${bhd(dailyTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: 'hsl(var(--target))' }} />
                 )}
                 <Bar {...m} dataKey={barKey} radius={[4, 4, 0, 0]} maxBarSize={26}>
                   {data.daily_mtd!.map((r, i) => (
-                    <Cell key={i} fill={dailyTarget && Number(r.acc_net_bhd ?? r.acc_bhd ?? 0) >= dailyTarget ? '#059669' : '#7c3aed'} />
+                    <Cell key={i} fill={dailyTarget && Number(r.acc_net_bhd ?? r.acc_bhd ?? 0) >= dailyTarget ? 'hsl(var(--success))' : 'hsl(var(--primary))'} />
                   ))}
                 </Bar>
               </BarChart>
@@ -672,8 +613,8 @@ export default function Dashboard() {
               <ComposedChart data={cumSeries} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
                 <defs>
                   <linearGradient id="cumFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#7c3aed" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#7c3aed" stopOpacity={0} />
+                    <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
@@ -684,9 +625,9 @@ export default function Dashboard() {
                   formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? (exVat ? 'Accessories MTD ex-VAT' : 'Accessories MTD') : 'Target to date (business days)']}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-                <Area {...m} type="monotone" dataKey="cum_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#cumFill)" />
+                <Area {...m} type="monotone" dataKey="cum_bhd" stroke="hsl(var(--primary))" strokeWidth={2.5} fill="url(#cumFill)" />
                 {dailyTarget && (
-                  <Line {...m} type="monotone" dataKey="cum_target" stroke="#d97706" strokeWidth={2}
+                  <Line {...m} type="monotone" dataKey="cum_target" stroke="hsl(var(--target))" strokeWidth={2}
                     strokeDasharray="6 4" dot={false} />
                 )}
               </ComposedChart>
@@ -699,14 +640,14 @@ export default function Dashboard() {
               {split.rows.map((p) => (
                 <span key={p.sale_type} title={`${num(p.invoices)} invoice${p.invoices === 1 ? '' : 's'} · ${bhd(p.net_bhd, 3)} ex-VAT`}
                   className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
-                  <span className={cn('h-2 w-2 rounded-full', p.sale_type === 'cash' ? 'bg-emerald-500' : 'bg-blue-500')} />
+                  <span className={cn('h-2 w-2 rounded-full', p.sale_type === 'cash' ? 'bg-success' : 'bg-info')} />
                   <span className="capitalize">{p.sale_type}</span>
                   <b className="tabular-nums">{bhd(p.net_bhd, 0)}</b>
                 </span>
               ))}
               {split.giveaway_qty > 0 && (
                 <span title="Accessories units given free this month (zero-priced lines): not in the sales figures"
-                  className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1 text-amber-600">
+                  className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1 text-warning">
                   <b className="tabular-nums">{num(split.giveaway_qty)}</b>
                   <span>free unit{split.giveaway_qty === 1 ? '' : 's'}</span>
                 </span>
@@ -721,24 +662,24 @@ export default function Dashboard() {
         <div className={cn('mt-4 grid grid-cols-1 gap-4', data.health.cost_hidden ? 'sm:grid-cols-2' : 'sm:grid-cols-3')}>
           {/* margin and gross profit are for admins and 'Margins' logins only (the API sends null otherwise) */}
           {!data.health.cost_hidden && (
-          <HealthStat icon={Percent} label="Gross margin · ex-VAT on Focus COGS" tone={(data.health.gp_pct ?? 0) < 20 ? 'amber' : 'green'}
+          <KpiTile icon={Percent} label="Gross margin · ex-VAT on Focus COGS" iconTone={HEALTH_TONE[(data.health.gp_pct ?? 0) < 20 ? 'amber' : 'green']}
             value={data.health.margin_available === false || data.health.gp_pct == null ? '—' : `${data.health.gp_pct.toFixed(1)}%`}
-            sub={<>{bhd(data.health.gp_bhd, 0)} GP · every item costed
+            foot={<>{bhd(data.health.gp_bhd, 0)} GP · every item costed
               {data.health.landed_gp_pct != null && <> · landed {data.health.landed_gp_pct.toFixed(1)}% on {Math.round(data.health.landed_coverage_pct ?? 0)}% of sales</>}
-              {(data.health.below_cost_count ?? 0) > 0 && <> · <span className="font-semibold text-rose-600">{data.health.below_cost_count} below cost</span></>}</>}
+              {(data.health.below_cost_count ?? 0) > 0 && <> · <span className="font-semibold text-destructive">{data.health.below_cost_count} below cost</span></>}</>}
             to="/margins" />
           )}
           {/* what the days are made of is on the tile itself, not only on hover (a phone has none): the page's one
               receivables figure, the Receivables card's, over a day of Accessories sales */}
-          <HealthStat icon={Clock} label="Collection speed · DSO" tone={data.health.ar_overdue_pct > 40 ? 'red' : 'amber'}
-            basis={data.health.dso_basis && `${data.health.dso_basis} · ${bhd(data.health.dso_receivables_bhd, 0)} ÷ ${bhd(data.health.dso_sales_per_day_bhd, 0)} a day`}
+          <KpiTile icon={Clock} label="Collection speed · DSO" iconTone={HEALTH_TONE[data.health.ar_overdue_pct > 40 ? 'red' : 'amber']}
+            title={data.health.dso_basis && `${data.health.dso_basis} · ${bhd(data.health.dso_receivables_bhd, 0)} ÷ ${bhd(data.health.dso_sales_per_day_bhd, 0)} a day`}
             value={`${Math.round(data.health.dso_days)} days`}
-            sub={<>{data.health.dso_basis && <>receivables ÷ a day of Accessories sales · </>}
-              <span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
-          <HealthStat icon={Snowflake} label={data.health.cost_hidden ? 'Dead stock · at selling price' : 'Capital frozen in dead stock · at cost'} tone="red"
+            foot={<>{data.health.dso_basis && <>receivables ÷ a day of Accessories sales · </>}
+              <span className="font-semibold text-destructive">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
+          <KpiTile icon={Snowflake} label={data.health.cost_hidden ? 'Dead stock · at selling price' : 'Capital frozen in dead stock · at cost'} iconTone="destructive"
             value={data.health.stock_basis === 'cost' && data.health.dead_stock_bhd != null ? bhd(data.health.dead_stock_bhd, 0)
               : data.health.cost_hidden && data.health.dead_stock_sell_bhd != null ? bhd(data.health.dead_stock_sell_bhd, 0) : '—'}
-            sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash
+            foot={<>{data.health.dead_stock_count} items not selling — liquidate to release cash
               {data.health.stock_basis === 'cost' && deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted)}
               {data.health.dead_stock_sell_bhd != null && <> · {bhd(data.health.dead_stock_sell_bhd, 0)} at selling price</>}</>} to="/inventory" />
         </div>
@@ -769,12 +710,12 @@ export default function Dashboard() {
                   cursor={{ fill: 'hsl(var(--accent))' }}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 {monthTarget && (
-                  <ReferenceLine y={monthTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
-                    label={{ value: `monthly target ${bhd(monthTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
+                  <ReferenceLine y={monthTarget} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain"
+                    label={{ value: `monthly target ${bhd(monthTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: 'hsl(var(--target))' }} />
                 )}
                 <Bar {...m} dataKey="acc_net_bhd" radius={[4, 4, 0, 0]} maxBarSize={34}>
                   {/* the month still running is lighter: it is not a whole month yet */}
-                  {trendAcc.map((r, i) => <Cell key={i} fill={r.partial ? '#c4b5fd' : '#7c3aed'} />)}
+                  {trendAcc.map((r, i) => <Cell key={i} fill={r.partial ? 'hsl(var(--primary) / 0.35)' : 'hsl(var(--primary))'} />)}
                 </Bar>
               </BarChart>
             )}</ChartBox>
@@ -793,7 +734,7 @@ export default function Dashboard() {
                   <PieChart>
                     <Pie {...m} data={chips.map((c) => ({ name: c.label, value: Number(c.value) || 0 }))}
                       dataKey="value" nameKey="name" innerRadius={54} outerRadius={78} paddingAngle={2} stroke="none">
-                      {chips.map((c, i) => <Cell key={i} fill={c.label === 'B2C' ? '#8b5cf6' : '#3b82f6'} />)}
+                      {chips.map((c, i) => <Cell key={i} fill={c.label === 'B2C' ? 'hsl(var(--sash))' : 'hsl(var(--info))'} />)}
                     </Pie>
                     <Tooltip formatter={(v) => [bhd(Number(v), 0), 'Accessories ex-VAT']}
                       contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
@@ -810,8 +751,8 @@ export default function Dashboard() {
                   return (
                     <div key={c.label} className="flex items-center justify-between text-sm">
                       <span className="flex items-center gap-2 font-medium">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: isB2C ? '#8b5cf6' : '#3b82f6' }} />
-                        {isB2C ? <Store size={14} className="text-violet-500" /> : <Truck size={14} className="text-blue-500" />}
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: isB2C ? 'hsl(var(--sash))' : 'hsl(var(--info))' }} />
+                        {isB2C ? <Store size={14} className="text-sash" /> : <Truck size={14} className="text-info" />}
                         {c.label} · {isB2C ? 'Retail' : 'Wholesale'}
                       </span>
                       <span className="font-semibold tabular-nums">{bhd(c.value, 0)} <span className="text-muted-foreground">({c.share_pct != null ? `${c.share_pct.toFixed(0)}%` : '—'})</span></span>
@@ -846,7 +787,7 @@ export default function Dashboard() {
                 <Tooltip formatter={(value, _name, item) => [`${bhd(Number(value), 3)} ex-VAT · ${bhd(Number((item?.payload as { gross?: number } | undefined)?.gross || 0), 3)} gross`, 'Accessories']} cursor={{ fill: 'hsl(var(--accent))' }}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 <Bar {...m} dataKey="rev" radius={[0, 6, 6, 0]}>
-                  {salesmen.map((s, i) => <Cell key={i} fill={s.no_target ? '#c4b5fd' : i === 0 ? '#7c3aed' : '#a78bfa'} />)}
+                  {salesmen.map((s, i) => <Cell key={i} fill={s.no_target ? 'hsl(var(--primary) / 0.35)' : i === 0 ? 'hsl(var(--primary))' : 'hsl(var(--sash))'} />)}
                 </Bar>
               </BarChart>
             )}</ChartBox>
@@ -855,7 +796,7 @@ export default function Dashboard() {
 
         <Card className="p-5">
           <div className="flex items-center gap-2 font-display text-base font-semibold">
-            <Crown size={18} className="text-amber-500" /> Top customers
+            <Crown size={18} className="text-target" /> Top customers
           </div>
           <div className="mb-3 text-[12px] text-muted-foreground">Accessories · ex-VAT · month to date · Cash Customer left out</div>
           {topCustomersFailed ? (
@@ -899,18 +840,18 @@ export default function Dashboard() {
       {k && (
         <Card className="mt-5 flex flex-wrap items-center gap-x-8 gap-y-3 p-5">
           <div className="flex items-center gap-2 text-sm">
-            <TriangleAlert size={16} className="text-amber-500" />
+            <TriangleAlert size={16} className="text-warning" />
             <span className="font-semibold">{num(k.low_stock_count)}</span>
             <span className="text-muted-foreground">{accOnly ? 'Accessories items' : 'items'} under 30 days cover</span>
           </div>
           <div className="flex items-center gap-2 text-sm">
-            <Landmark size={16} className="text-rose-500" />
+            <Landmark size={16} className="text-destructive" />
             <span className="whitespace-nowrap font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
             <span className="text-muted-foreground">overdue &gt;30 days across {k.overdue_count} accounts</span>
           </div>
           {data?.alerts?.negative_margin_count != null && (
           <div className="flex items-center gap-2 text-sm">
-            <TrendingDown size={16} className="text-violet-500" />
+            <TrendingDown size={16} className="text-primary" />
             <span className="font-semibold">{num(data.alerts.negative_margin_count)}</span>
             <span className="text-muted-foreground">products below cost</span>
           </div>

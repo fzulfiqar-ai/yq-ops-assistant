@@ -169,7 +169,7 @@ export default function Agents() {
             <select value={sched[a.name] || 'off'} onChange={(e) => setSchedule(a.name, e.target.value)}
               title="Auto-run on a schedule and email you (08:00 Bahrain)"
               className="rounded-lg border bg-background px-2 py-1.5 text-[12px] text-muted-foreground outline-none transition hover:text-foreground">
-              <option value="off">⏱ Off</option>
+              <option value="off">Off</option>
               <option value="daily">Daily 8AM</option>
               <option value="weekly">Weekly Mon</option>
             </select>
@@ -269,7 +269,7 @@ export default function Agents() {
 
   return (
     <div>
-      <PageHeader title="The AI Team" subtitle="A chief-of-staff over four departments — run any specialist, or send the morning briefing." />
+      <PageHeader title="AI Agents" subtitle="A chief-of-staff over four departments — run any specialist, or send the morning briefing." />
 
       {/* CEO / chief of staff */}
       <Card className="mb-6 overflow-hidden">

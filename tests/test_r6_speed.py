@@ -440,15 +440,21 @@ def _():
     assert "<!-- portal-fonts" in src, "marketHtml swaps the portal font block for the market's"
 
 
-@test("portal: self-hosted Inter + Space Grotesk, no Google Fonts anywhere, CSP without the font hosts (both files)")
+@test("portal: self-hosted Instrument Sans + Sora (the marketplace's), no Google Fonts anywhere, CSP without the font hosts (both files)")
 def _():
+    # ship 2 (30-Oct-2026): the portal moved onto the marketplace's fonts. index.html's portal-fonts block is the
+    # boot branch's file; its preload line follows there (Instrument Sans only), so only the block is pinned here.
     html = _read("web/index.html")
     assert "fonts.googleapis.com" not in html and "fonts.gstatic.com" not in html
-    assert 'href="/fonts/inter-v1.woff2"' in html and 'href="/fonts/space-grotesk-v1.woff2"' in html
     assert "<!-- portal-fonts" in html and "<!-- /portal-fonts -->" in html
     css = _read("web/src/index.css")
-    assert "font-family: 'Inter';" in css and "url('/fonts/inter-v1.woff2')" in css
-    assert "font-family: 'Space Grotesk';" in css and "url('/fonts/space-grotesk-v1.woff2')" in css
+    assert "font-family: 'Instrument Sans';" in css and "url('/fonts/instrument-sans-v1.woff2')" in css
+    assert "font-family: 'Sora';" in css and "url('/fonts/sora-v1.woff2')" in css
+    assert "font-family: 'Inter';" not in css and "font-family: 'Space Grotesk';" not in css
+    for f in ("instrument-sans-v1.woff2", "sora-v1.woff2"):
+        p = ROOT / "web/public/fonts" / f
+        assert p.exists() and p.read_bytes()[:4] == b"wOF2", f
+    # the old two stay in public/fonts for one release (a tab open across the deploy may still ask for them)
     for f in ("inter-v1.woff2", "space-grotesk-v1.woff2"):
         p = ROOT / "web/public/fonts" / f
         assert p.exists() and p.read_bytes()[:4] == b"wOF2", f

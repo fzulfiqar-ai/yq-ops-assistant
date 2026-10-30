@@ -5,16 +5,18 @@ export type BadgeTone = 'accent' | 'green' | 'amber' | 'grey' | 'rose' | 'ink'
 
 /**
  * Tints are deliberately pale — a badge is a footnote, not a headline. The ring
- * is a hairline at 10% so chips still read as separate objects on a white card
- * without drawing a hard border around every one of them.
+ * is a hairline at 10–15% so chips still read as separate objects on a white card
+ * without drawing a hard border around every one of them. Every tone is a token
+ * (index.css), so a badge reads in dark mode too: the ink on its own tint is
+ * 4.9:1 or more in both themes.
  */
 const TONE: Record<BadgeTone, string> = {
-  accent: 'bg-[#EEE8F4] text-[#6D4091] ring-[#6D4091]/10',
-  green: 'bg-[#e8f7ee] text-[#137a48] ring-[#137a48]/10',
-  amber: 'bg-[#fdf3e3] text-[#96600d] ring-[#96600d]/10',
-  grey: 'bg-[#f4f3f8] text-[#6b6480] ring-[#6b6480]/10',
-  rose: 'bg-[#fdecef] text-[#9f1239] ring-[#9f1239]/10',
-  ink: 'bg-[#1A1428] text-white ring-[#1A1428]/20',
+  accent: 'bg-accent text-primary ring-primary/10',
+  green: 'bg-success/10 text-success ring-success/15',
+  amber: 'bg-warning/10 text-warning ring-warning/15',
+  grey: 'bg-muted text-muted-foreground ring-muted-foreground/10',
+  rose: 'bg-destructive/10 text-destructive ring-destructive/15',
+  ink: 'bg-foreground text-background ring-foreground/20',
 }
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
@@ -24,12 +26,12 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
 }
 
 const DOT: Record<BadgeTone, string> = {
-  accent: 'bg-[#6D4091]',
-  green: 'bg-[#137a48]',
-  amber: 'bg-[#b8790f]',
-  grey: 'bg-[#a8a2bb]',
-  rose: 'bg-[#9f1239]',
-  ink: 'bg-white',
+  accent: 'bg-primary',
+  green: 'bg-success',
+  amber: 'bg-warning',
+  grey: 'bg-muted-foreground/60',
+  rose: 'bg-destructive',
+  ink: 'bg-background',
 }
 
 /** Small, quiet status chip. No gradients, no emoji — a tint and a hairline ring. */

@@ -738,7 +738,7 @@ def _():
               "title={data?.scope?.text}", "Mobile Accessories only",
               "label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'}",
               "{accOnly ? 'Accessories items' : 'items'} under 30 days cover",
-              "'every customer balance in Focus, not split by product'", "basis={arBasis}",
+              "'every customer balance in Focus, not split by product'", "title={arBasis}",
               "data.health.dso_basis", "Number(r.acc_net_bhd ?? r.acc_bhd ?? 0)"):
         assert s in dash, s
     # the pill is shown only when the API states the scope (an older API: no claim), inside the page header

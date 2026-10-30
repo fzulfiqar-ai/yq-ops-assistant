@@ -16,7 +16,7 @@ export const INPUT =
 export const TEXTAREA =
   'w-full resize-y rounded-xl border border-border bg-card px-3 py-2 text-[13.5px] leading-snug text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/40'
 export const BTN =
-  'inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-[#6D4091] px-4 text-[13.5px] font-semibold text-white transition hover:bg-[#5A3478] disabled:opacity-45'
+  'inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-[13.5px] font-semibold text-primary-foreground transition hover:bg-primary-deep disabled:opacity-45'
 export const BTN_OUTLINE =
   'inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-[13px] font-semibold text-foreground transition hover:bg-accent disabled:opacity-45'
 export const BTN_GHOST =

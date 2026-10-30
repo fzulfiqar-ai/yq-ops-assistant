@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import { LoadError } from '@/components/LoadError'
 import { FreshnessChip, type Freshness } from '@/components/FreshnessChip'
 import { Skeleton } from '@/components/ui/skeleton'
+import { KpiTile } from '@/components/ui/kpi-tile'
 
 /**
  * The Management Command Centre (Sprint 4, plan §8): the company on one page, the same layout every
@@ -117,7 +118,7 @@ interface Overview {
   generated_at: string
 }
 
-// Colour: the marketplace's plum identity (#6D4091 plum, #824FAB sash, #F3ECF8 lilac; plan §27) for accents
+// Colour: the marketplace's plum identity (the primary, sash and accent tokens of index.css; plan §27) for accents
 // only — surfaces stay on the portal tokens (bg-card, border, muted) so dark mode holds.
 
 /* ─────────────────────────── formatting ─────────────────────────── */
@@ -190,13 +191,13 @@ function DrillLink({ drill, me, className, iconOnly }: { drill?: Drill | null; m
     // the first screen's compact form: the arrow alone, its label for screen readers and the tooltip
     return (
       <Link to={drill.to} aria-label={drill.label} title={drill.label}
-        className={cn('inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[#6D4091] hover:bg-[#F3ECF8] dark:text-[#c7a6e6] dark:hover:bg-[#6D4091]/20', className)}>
+        className={cn('inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-primary hover:bg-accent', className)}>
         <ArrowRight size={14} aria-hidden="true" />
       </Link>
     )
   }
   return (
-    <Link to={drill.to} className={cn('inline-flex items-center gap-1 text-[12px] font-semibold text-[#6D4091] hover:underline dark:text-[#c7a6e6]', className)}>
+    <Link to={drill.to} className={cn('inline-flex items-center gap-1 text-[12px] font-semibold text-primary hover:underline', className)}>
       {drill.label} <ArrowRight size={13} aria-hidden="true" />
     </Link>
   )
@@ -216,7 +217,7 @@ function Delta({ pct, label }: { pct?: number | null; label?: string }) {
   const up = pct >= 0
   return (
     <span className={cn('inline-flex items-center gap-0.5 text-[12px] font-semibold',
-      up ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
+      up ? 'text-success' : 'text-destructive')}>
       {up ? <ArrowUpRight size={13} aria-hidden="true" /> : <ArrowDownRight size={13} aria-hidden="true" />}
       {up ? '+' : ''}{pct.toFixed(1)} %{label ? <span className="ml-1 font-normal text-muted-foreground">{label}</span> : null}
     </span>
@@ -227,7 +228,7 @@ function ChipRow({ chips }: { chips: Chip[] }) {
   return (
     <div className="mt-3 flex flex-wrap gap-2">
       {chips.map((c) => (
-        <span key={c.label} className="inline-flex items-baseline gap-1.5 rounded-full bg-[#F3ECF8] px-2.5 py-1 text-[12px] text-[#3b2352] dark:bg-[#6D4091]/20 dark:text-[#e6d6f5]">
+        <span key={c.label} className="inline-flex items-baseline gap-1.5 rounded-full bg-accent px-2.5 py-1 text-[12px] text-accent-foreground">
           <span className="font-medium">{c.label}</span>
           <span className="font-bold tabular-nums">{c.unit === 'bhd' ? fmtBhd(c.value) : c.unit === 'pct' ? fmtPct(c.value) : fmtCount(c.value)}</span>
           {c.share_pct != null && <span className="text-[11px] opacity-75">{fmtPct(c.share_pct)}</span>}
@@ -240,8 +241,8 @@ function ChipRow({ chips }: { chips: Chip[] }) {
 function Bar({ pct, className }: { pct: number; className?: string }) {
   const w = Math.max(0, Math.min(100, pct))
   return (
-    <div className={cn('h-2 w-full overflow-hidden rounded-full bg-[#F3ECF8] dark:bg-[#6D4091]/20', className)}>
-      <div className="h-full rounded-full bg-gradient-to-r from-[#6D4091] to-[#824FAB]" style={{ width: `${w}%` }} />
+    <div className={cn('h-2 w-full overflow-hidden rounded-full bg-accent', className)}>
+      <div className="h-full rounded-full bg-gradient-to-r from-primary to-sash" style={{ width: `${w}%` }} />
     </div>
   )
 }
@@ -256,7 +257,7 @@ function Sparkline({ series, compact }: { series: WeekPoint[]; compact?: boolean
         {series.map((p) => (
           <div key={p.week_start} className="flex h-full flex-1 flex-col justify-end" title={`Week of ${p.label}: ${fmtBhd(p.value)}${p.partial ? ' (so far)' : ''}`}>
             <div
-              className={cn('w-full rounded-t-sm', p.partial ? 'bg-[#824FAB]/45' : 'bg-[#6D4091]')}
+              className={cn('w-full rounded-t-sm', p.partial ? 'bg-sash/45' : 'bg-primary')}
               style={{ height: `${Math.max(2, (p.value / max) * 100)}%` }}
             />
           </div>
@@ -283,7 +284,7 @@ function DayStrip({ days }: { days: DayPoint[] }) {
         {days.map((p) => (
           <div key={p.day} className="flex h-full flex-1 flex-col justify-end" title={`${say(p)} · ${invoicesText(p.invoices)}`}>
             <div
-              className={cn('w-full rounded-t-sm', p.business_day ? 'bg-[#6D4091]' : 'bg-[#6D4091]/45 dark:bg-[#6D4091]/60')}
+              className={cn('w-full rounded-t-sm', p.business_day ? 'bg-primary' : 'bg-primary/45')}
               style={{ height: `${Math.max(2, (p.value / max) * 100)}%` }}
             />
           </div>
@@ -337,7 +338,7 @@ function MiniList({ rows }: { rows: ListRow[] }) {
           <span className="flex items-baseline justify-between gap-3">
             <span className="min-w-0 truncate font-medium" title={r.label}>{r.label}</span>
             <span className={cn('shrink-0 font-semibold tabular-nums',
-              r.tone === 'up' && 'text-emerald-600 dark:text-emerald-400', r.tone === 'down' && 'text-rose-600 dark:text-rose-400')}>
+              r.tone === 'up' && 'text-success', r.tone === 'down' && 'text-destructive')}>
               {r.value}
             </span>
           </span>
@@ -371,7 +372,7 @@ function TileBody({ t }: { t: Tile }) {
               <p className="mt-1.5 text-[12px] text-muted-foreground">
                 {fmtBhd(t.mtd_bhd)} of {fmtBhd(target)} ({fmtPct(t.pct_of_target)}) · {t.business_days_done} of {t.business_days_total} business days
               </p>
-              <p className={cn('mt-1 text-[12px] font-semibold', t.on_track ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400')}>
+              <p className={cn('mt-1 text-[12px] font-semibold', t.on_track ? 'text-success' : 'text-warning')}>
                 {t.on_track ? 'On track for the target' : t.business_days_left
                   ? `Needs ${fmtBhd(t.needed_per_business_day_bhd)} a business day for the last ${t.business_days_left}`
                   : 'Short of the target this month'}
@@ -392,14 +393,14 @@ function TileBody({ t }: { t: Tile }) {
         <>
           <ol className="mt-2 grid grid-cols-3 gap-2">
             {(t.stages || []).map((s, i) => (
-              <li key={s.key} className="relative rounded-xl bg-[#F3ECF8] p-2.5 dark:bg-[#6D4091]/15">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6D4091] dark:text-[#c7a6e6]">{s.label}</div>
+              <li key={s.key} className="relative rounded-xl bg-accent p-2.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-primary">{s.label}</div>
                 <div className="mt-0.5 font-display text-[1.35rem] font-bold tabular-nums">{fmtCount(s.orders)}</div>
                 <div className="text-[11px] text-muted-foreground">
                   {fmtCount(s.units)} units{s.units_added ? ` · +${fmtCount(s.units_added)} added by the rep` : ''}
                 </div>
                 <div className="text-[11px] font-medium tabular-nums">{fmtBhd(s.bhd)} <span className="font-normal text-muted-foreground">ex-VAT</span></div>
-                {i < 2 && <ArrowRight size={14} className="absolute -right-2 top-1/2 hidden -translate-y-1/2 text-[#824FAB] sm:block" aria-hidden="true" />}
+                {i < 2 && <ArrowRight size={14} className="absolute -right-2 top-1/2 hidden -translate-y-1/2 text-sash sm:block" aria-hidden="true" />}
               </li>
             ))}
           </ol>
@@ -490,11 +491,11 @@ function TileBody({ t }: { t: Tile }) {
       return (
         <div className="grid gap-3 sm:grid-cols-2">
           <div>
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">Rising</div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-success">Rising</div>
             <MiniList rows={(t.rising || []).map((m) => ({ label: m.item, value: `+${fmtBhd(m.delta_bhd)}`, sub: `${m.qty_prev} → ${m.qty_30} units`, tone: 'up' as const }))} />
           </div>
           <div>
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-rose-700 dark:text-rose-400">Losing momentum</div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-destructive">Losing momentum</div>
             <MiniList rows={(t.falling || []).map((m) => ({ label: m.item, value: fmtBhd(m.delta_bhd), sub: `${m.qty_prev} → ${m.qty_30} units`, tone: 'down' as const }))} />
           </div>
         </div>
@@ -529,9 +530,9 @@ function TileBody({ t }: { t: Tile }) {
           <BigValue t={t} suffix="at cost" />
           {t.chips && (
             <>
-              <div className="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-[#F3ECF8] dark:bg-[#6D4091]/20" aria-hidden="true">
-                <div className="h-full bg-[#6D4091]" style={{ width: `${t.chips[0]?.share_pct ?? 0}%` }} />
-                <div className="h-full bg-amber-500" style={{ width: `${t.chips[1]?.share_pct ?? 0}%` }} />
+              <div className="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-accent" aria-hidden="true">
+                <div className="h-full bg-primary" style={{ width: `${t.chips[0]?.share_pct ?? 0}%` }} />
+                <div className="h-full bg-target" style={{ width: `${t.chips[1]?.share_pct ?? 0}%` }} />
               </div>
               <ChipRow chips={t.chips} />
             </>
@@ -565,7 +566,7 @@ function TileBody({ t }: { t: Tile }) {
         <>
           <BigValue t={t} />
           <p className="mt-1 text-[12px] text-muted-foreground">{fmtCount(t.accounts)} accounts · {t.source === 'focus_total' ? "Focus's Grand Total" : 'sum of the account rows'}</p>
-          {t.note && <p className="mt-1.5 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11.5px] text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">{t.note}</p>}
+          {t.note && <p className="mt-1.5 rounded-lg bg-warning/10 px-2.5 py-1.5 text-[11.5px] text-warning">{t.note}</p>}
         </>
       )
     case 'ar.over90':
@@ -620,7 +621,7 @@ function DailyDetail({ t }: { t: Tile }) {
         </p>
       </div>
       <div className="min-w-0">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6D4091] dark:text-[#c7a6e6]">Last seven days</div>
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-primary">Last seven days</div>
         <MiniList rows={days.slice(-7).reverse().map((p) => ({
           label: `${p.weekday} ${p.label} · ${invoicesText(p.invoices)}`, value: fmtBhd(p.value),
         }))} />
@@ -633,7 +634,7 @@ function BigValue({ t, suffix, tone }: { t: Tile; suffix?: string; tone?: 'alert
   return (
     <div className="flex flex-wrap items-baseline gap-x-2">
       <span className={cn('font-display text-[1.6rem] font-bold leading-tight tabular-nums tracking-tight',
-        tone === 'alert' && 'text-rose-600 dark:text-rose-400', tone === 'warn' && 'text-amber-700 dark:text-amber-400')}>
+        tone === 'alert' && 'text-destructive', tone === 'warn' && 'text-warning')}>
         {fmtValue(t)}
       </span>
       {suffix && t.value != null && <span className="text-[12px] text-muted-foreground">{suffix}</span>}
@@ -643,10 +644,10 @@ function BigValue({ t, suffix, tone }: { t: Tile; suffix?: string; tone?: 'alert
 
 function TileCard({ t, me, wide, full }: { t: Tile; me: Me | null; wide?: boolean; full?: boolean }) {
   return (
-    <article aria-labelledby={`tile-${t.key}`} className={cn('flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm',
+    <article aria-labelledby={`tile-${t.key}`} className={cn('flex min-w-0 flex-col card-luxe rounded-xl p-4',
       wide && 'md:col-span-2', full && 'md:col-span-2 xl:col-span-3')}>
       <div className="flex items-start justify-between gap-2">
-        <h3 id={`tile-${t.key}`} className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6D4091] dark:text-[#c7a6e6]">{t.label}</h3>
+        <h3 id={`tile-${t.key}`} className="text-[12px] font-semibold uppercase tracking-[0.08em] text-primary">{t.label}</h3>
         <DrillLink drill={t.drill} me={me} className="shrink-0" />
       </div>
       <div className="mt-1.5 min-w-0 flex-1">
@@ -670,9 +671,9 @@ function ModuleSection({ m, me, children }: { m: Module; me: Me | null; children
     <section aria-labelledby={`mod-${m.key}`} className="mt-7">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 id={`mod-${m.key}`} className="flex items-center gap-2 font-display text-[1.15rem] font-bold">
-          <span className="h-4 w-1 rounded-full bg-gradient-to-b from-[#6D4091] to-[#824FAB]" aria-hidden="true" />
+          <span className="h-4 w-1 rounded-full bg-gradient-to-b from-primary to-sash" aria-hidden="true" />
           {m.title}
-          {m.live && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">Live</span>}
+          {m.live && <span className="rounded-full bg-success/10 px-2 py-0.5 text-[10.5px] font-semibold text-success">Live</span>}
         </h2>
         <DrillLink drill={m.drill} me={me} />
       </div>
@@ -693,7 +694,7 @@ function Attention({ m, me }: { m: Module; me: Me | null }) {
   const items = m.items || []
   if (!items.length) {
     return (
-      <div className="flex items-center gap-2.5 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-[13.5px] font-medium text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200">
+      <div className="flex items-center gap-2.5 rounded-xl border border-success/25 bg-success/10 px-4 py-3 text-[13.5px] font-medium text-success">
         <CheckCircle2 size={18} aria-hidden="true" /> Nothing needs attention right now.
       </div>
     )
@@ -702,11 +703,10 @@ function Attention({ m, me }: { m: Module; me: Me | null }) {
     // two balanced columns on a wide screen (ranked order reads down the first, then the second)
     <ul className="gap-3 lg:columns-2">
       {items.map((it) => (
-        <li key={it.key} className={cn('mb-3 flex min-w-0 break-inside-avoid flex-col rounded-2xl border border-l-4 bg-card p-4 shadow-sm',
-          it.tone === 'alert' ? 'border-l-rose-500' : it.tone === 'warn' ? 'border-l-amber-500' : 'border-l-[#6D4091]')}>
+        <li key={it.key} className="card-luxe mb-3 flex min-w-0 break-inside-avoid flex-col rounded-xl p-4">
           <div className="flex items-start gap-2.5">
             <AlertTriangle size={17} aria-hidden="true" className={cn('mt-0.5 shrink-0',
-              it.tone === 'alert' ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400')} />
+              it.tone === 'alert' ? 'text-destructive' : 'text-warning')} />
             <div className="min-w-0 flex-1">
               <h3 className="text-[14px] font-bold leading-snug">{it.title}</h3>
               <p className="mt-0.5 text-[12.5px] text-muted-foreground">{it.detail}</p>
@@ -727,7 +727,7 @@ function Attention({ m, me }: { m: Module; me: Me | null }) {
                 return (
                   <li key={`${r.label}-${i}`} className="py-1.5 text-[12.5px]">
                     {r.to && mayOpen(me, r.to)
-                      ? <Link to={r.to} className="flex items-baseline justify-between gap-3 hover:text-[#6D4091]">{inner}</Link>
+                      ? <Link to={r.to} className="flex items-baseline justify-between gap-3 hover:text-primary">{inner}</Link>
                       : <div className="flex items-baseline justify-between gap-3">{inner}</div>}
                   </li>
                 )
@@ -750,10 +750,10 @@ function TeamTable({ t, full }: { t: Tile; full: boolean }) {
   const rows = (t.rows || []).slice(0, full ? undefined : 8)
   if (!rows.length) return <p className="text-[13px] text-muted-foreground">No rep has a target or a sale this month yet.</p>
   return (
-    <div className="overflow-x-auto rounded-2xl border bg-card shadow-sm">
+    <div className="card-luxe overflow-x-auto rounded-xl">
       <table className="w-full min-w-[720px] text-left text-[12.5px]">
         <caption className="sr-only">Reps this month</caption>
-        <thead className="bg-[#F3ECF8] text-[11px] uppercase tracking-wide text-[#6D4091] dark:bg-[#6D4091]/15 dark:text-[#c7a6e6]">
+        <thead className="bg-accent text-[11px] uppercase tracking-wide text-primary">
           <tr>
             <th scope="col" className="px-3 py-2 font-semibold">Rep</th>
             <th scope="col" className="px-3 py-2 text-right font-semibold">Sales ex-VAT</th>
@@ -783,7 +783,7 @@ function TeamTable({ t, full }: { t: Tile; full: boolean }) {
                 <td className="px-3 py-2 text-right tabular-nums">{r.gap_to_next_bhd != null ? fmtBhd(r.gap_to_next_bhd) : r.no_target ? '—' : 'Top tier'}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtPct(r.named_share_pct)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtCount(r.marketplace_orders)}{r.marketplace_orders ? <span className="ml-1 text-muted-foreground">· {fmtBhd(r.marketplace_bhd)}</span> : null}</td>
-                <td className={cn('px-3 py-2', silent && 'font-semibold text-amber-700 dark:text-amber-400')}>
+                <td className={cn('px-3 py-2', silent && 'font-semibold text-warning')}>
                   {fmtDay(r.last_invoice)}{silent ? ` · ${r.business_days_since_invoice} business days` : ''}
                 </td>
               </tr>
@@ -798,10 +798,10 @@ function TeamTable({ t, full }: { t: Tile; full: boolean }) {
 function DormantTable({ rows }: { rows: Row[] }) {
   if (!rows.length) return <p className="text-[13px] text-muted-foreground">No dormant account with BHD 100 or more in the last 12 months.</p>
   return (
-    <div className="overflow-x-auto rounded-2xl border bg-card shadow-sm">
+    <div className="card-luxe overflow-x-auto rounded-xl">
       <table className="w-full min-w-[520px] text-left text-[12.5px]">
         <caption className="sr-only">Dormant accounts</caption>
-        <thead className="bg-[#F3ECF8] text-[11px] uppercase tracking-wide text-[#6D4091] dark:bg-[#6D4091]/15 dark:text-[#c7a6e6]">
+        <thead className="bg-accent text-[11px] uppercase tracking-wide text-primary">
           <tr>
             <th scope="col" className="px-3 py-2 font-semibold">Account</th>
             <th scope="col" className="px-3 py-2 font-semibold">Last invoice</th>
@@ -829,10 +829,10 @@ function DormantTable({ rows }: { rows: Row[] }) {
 // days (one caption); how it is counted is in its tooltip. Anything longer lives in Details below.
 
 const PILL = {
-  up: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
-  down: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
-  warn: 'bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300',
-  plum: 'bg-[#F3ECF8] text-[#6D4091] dark:bg-[#6D4091]/20 dark:text-[#e6d6f5]',
+  up: 'bg-success/10 text-success',
+  down: 'bg-destructive/10 text-destructive',
+  warn: 'bg-warning/10 text-warning',
+  plum: 'bg-accent text-primary',
   muted: 'bg-muted text-muted-foreground',
 } as const
 
@@ -855,27 +855,16 @@ function DeltaPill({ pct }: { pct?: number | null }) {
   )
 }
 
-function KpiCard({ label, value, exact, chip, caption, basis, drill, me, children }: {
+/** A first-screen figure: the portal's one tile (components/ui/kpi-tile), its drill arrow in the corner. */
+function Kpi({ label, value, exact, chip, caption, basis, drill, me, children }: {
   label: string; value?: string; exact?: string; chip?: ReactNode; caption: string; basis: string
   drill?: Drill | null; me: Me | null; children?: ReactNode
 }) {
   return (
-    <article title={basis} className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
-      <div className="flex min-h-6 items-center justify-between gap-2">
-        <h3 className="truncate text-[11.5px] font-semibold uppercase tracking-[0.08em] text-[#6D4091] dark:text-[#c7a6e6]">{label}</h3>
-        <DrillLink drill={drill} me={me} iconOnly />
-      </div>
-      {(value != null || chip) && (
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-          {value != null && (
-            <span title={exact} className="font-display text-[1.7rem] font-bold leading-tight tabular-nums tracking-tight">{value}</span>
-          )}
-          {chip}
-        </div>
-      )}
+    <KpiTile label={label} value={value} exact={exact} chip={chip} title={basis} foot={caption}
+      corner={<DrillLink drill={drill} me={me} iconOnly />}>
       {children}
-      <p className="mt-auto pt-2 text-[11.5px] leading-snug text-muted-foreground">{caption}</p>
-    </article>
+    </KpiTile>
   )
 }
 
@@ -906,49 +895,49 @@ function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
   return (
     <div className={cn('grid grid-cols-1 gap-3', KPI_GRID[cards] ?? KPI_GRID[6])}>
       {sales && (
-        <KpiCard label="Accessories sales" value={fmtBhd0(sales.value)} exact={`${fmtBhd(sales.value)} ex-VAT`}
+        <Kpi label="Accessories sales" value={fmtBhd0(sales.value)} exact={`${fmtBhd(sales.value)} ex-VAT`}
           chip={<DeltaPill pct={sales.delta_pct} />} basis={sales.basis} drill={sales.drill} me={me}
           caption={`${span}${sales.compare ? ` vs ${sales.compare.label}` : ''} · ex-VAT`}>
           {!!trend?.series?.length && <Sparkline series={trend.series} compact />}
-        </KpiCard>
+        </Kpi>
       )}
       {pace && (
-        <KpiCard label="Month pace" value={fmtBhd0(pace.projected_bhd)} exact={`${fmtBhd(pace.projected_bhd)} projected`}
+        <Kpi label="Month pace" value={fmtBhd0(pace.projected_bhd)} exact={`${fmtBhd(pace.projected_bhd)} projected`}
           chip={pace.target_bhd ? <Pill tone={pace.on_track ? 'up' : 'warn'}>projected {fmtPct(pace.projected_pct_of_target)} of target</Pill> : null}
           basis={pace.basis} me={me}
           caption={pace.target_bhd
             ? `Projected ${pace.month ?? ''} · target ${fmtBhd0(pace.target_bhd)}`
             : `Projected ${pace.month ?? ''} · no company target set`}>
           {!!pace.target_bhd && <Bar pct={pace.projected_pct_of_target ?? 0} className="mt-2" />}
-        </KpiCard>
+        </Kpi>
       )}
       {funnel && (
-        <KpiCard label="Marketplace orders" basis={funnel.basis} drill={waiting?.drill} me={me}
+        <Kpi label="Marketplace orders" basis={funnel.basis} drill={waiting?.drill} me={me}
           chip={waitingN > 0 ? <Pill tone="down">{fmtCount(waitingN)} waiting &gt;24 business h</Pill> : null}
           caption={`Placed ${ov.period.live.label} · live`}>
           {/* three cells side by side; on the one-row strip (2xl, up to six across) the card is narrow, so three short rows */}
           <dl className="mt-1.5 grid grid-cols-3 gap-1.5 2xl:grid-cols-1 2xl:gap-1">
             {(funnel.stages || []).map((s) => (
-              <div key={s.key} className="min-w-0 rounded-lg bg-[#F3ECF8] px-2 py-1 dark:bg-[#6D4091]/15 2xl:flex 2xl:items-baseline 2xl:justify-between 2xl:py-0.5">
-                <dt className="truncate text-[10.5px] font-semibold text-[#6D4091] dark:text-[#c7a6e6]">{s.label}</dt>
+              <div key={s.key} className="min-w-0 rounded-lg bg-accent px-2 py-1 2xl:flex 2xl:items-baseline 2xl:justify-between 2xl:py-0.5">
+                <dt className="truncate text-[10.5px] font-semibold text-primary">{s.label}</dt>
                 <dd className="font-display text-[1.2rem] font-bold leading-tight tabular-nums 2xl:text-[1rem]">{fmtCount(s.orders)}</dd>
               </div>
             ))}
           </dl>
-        </KpiCard>
+        </Kpi>
       )}
       {active && (
-        <KpiCard label="Active accounts" value={fmtCount(active.value)} basis={active.basis} me={me}
+        <Kpi label="Active accounts" value={fmtCount(active.value)} basis={active.basis} me={me}
           chip={active.new_30d ? <Pill tone="plum">+{fmtCount(active.new_30d)} new</Pill> : null}
           caption={`Named B2B · 30 days to ${fmtDay(ov.freshness.focus_to)}`} />
       )}
       {margin && (
-        <KpiCard label="Gross margin" value={fmtPct(margin.value)} basis={margin.basis} drill={margin.drill} me={me}
+        <Kpi label="Gross margin" value={fmtPct(margin.value)} basis={margin.basis} drill={margin.drill} me={me}
           exact={`${fmtBhd(margin.gp_bhd)} gross profit on ${fmtBhd(margin.net_ex_vat_bhd)} ex-VAT`}
           caption={`${coversLabel(margin.covers)} · ex-VAT vs Focus COGS`} />
       )}
       {ar && (
-        <KpiCard label="Receivables" value={fmtBhd0(ar.value)} exact={fmtBhd(ar.value)} basis={ar.basis} drill={ar.drill} me={me}
+        <Kpi label="Receivables" value={fmtBhd0(ar.value)} exact={fmtBhd(ar.value)} basis={ar.basis} drill={ar.drill} me={me}
           chip={over90 ? <Pill tone={(over90.value ?? 0) >= 30 ? 'down' : 'muted'}>{fmtPct(over90.value)} over 90 days</Pill> : null}
           caption={`Focus ageing · ${fmtDay(ov.freshness.ar_as_of)}`} />
       )}
@@ -998,18 +987,18 @@ function SalesChartCard({ daily, trend, pace, drill, me }: {
   const span = daily?.days ?? dayPoints(daily).length      // the daily window in days, as the API says it
   return (
     <section aria-labelledby="fs-sales-chart" title={(view === 'daily' ? daily : trend)?.basis}
-      className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+      className="flex min-w-0 flex-col card-luxe rounded-xl p-4">
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <h2 id="fs-sales-chart" className="font-display text-[1rem] font-bold">
           {both ? 'Accessories sales' : view === 'daily' ? 'Daily Accessories sales' : 'Weekly Accessories sales'}
         </h2>
         <div className="flex items-center gap-2">
           {both && (
-            <div role="group" aria-label="Sales by day or by week" className="inline-flex rounded-full bg-[#F3ECF8] p-0.5 dark:bg-[#6D4091]/20">
+            <div role="group" aria-label="Sales by day or by week" className="inline-flex rounded-full bg-accent p-0.5">
               {CHART_VIEWS.map((v) => (
                 <button key={v.key} type="button" aria-pressed={view === v.key} title={v.hint} onClick={() => pick(v.key)}
                   className={cn('h-7 rounded-full px-3 text-[12px] font-semibold transition-colors motion-reduce:transition-none',
-                    view === v.key ? 'bg-[#6D4091] text-white shadow-sm' : 'text-[#6D4091] hover:bg-white/70 dark:text-[#e6d6f5] dark:hover:bg-[#6D4091]/30')}>
+                    view === v.key ? 'bg-primary text-primary-foreground shadow-sm' : 'text-primary hover:bg-card/70')}>
                   {v.label}
                 </button>
               ))}
@@ -1072,7 +1061,7 @@ function DayTick({ x, y, payload, days }: {
 function TargetKey({ children }: { children: ReactNode }) {
   return (
     <p className="pointer-events-none absolute right-4 top-0 z-[1] flex items-center gap-1.5 text-[10.5px] leading-none text-muted-foreground">
-      <span aria-hidden="true" className="w-4 border-t-2 border-dashed border-[#d97706]" />
+      <span aria-hidden="true" className="w-4 border-t-2 border-dashed border-target" />
       {children}
     </p>
   )
@@ -1106,14 +1095,14 @@ function DailyChart({ t, pace, summary }: { t: Tile; pace?: Tile; summary: strin
             contentStyle={TOOLTIP_STYLE} />
           {/* ifOverflow: at some widths (390, 768) the last band lands a rounding hair past the plot's edge, and
               the default ("discard") then drops the whole band; clipped to the plot it is always drawn */}
-          {latest && <ReferenceArea x1={latest.day} x2={latest.day} fill="#824FAB" fillOpacity={0.12} ifOverflow="hidden" />}
-          {target != null && <ReferenceLine y={target} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />}
+          {latest && <ReferenceArea x1={latest.day} x2={latest.day} fill="hsl(var(--sash))" fillOpacity={0.12} ifOverflow="hidden" />}
+          {target != null && <ReferenceLine y={target} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain" />}
           {/* minPointSize: a day with no sale still leaves a 2 px mark, so every weekend shows as two lighter ones.
               On the dark card 45 % plum all but disappears: the weekend bars are a little stronger there. */}
           <ChartBar dataKey="value" radius={[3, 3, 0, 0]} maxBarSize={18} minPointSize={2}>
             {days.map((p) => (p.business_day
-              ? <Cell key={p.day} fill="#6D4091" />
-              : <Cell key={p.day} fill="#6D4091" fillOpacity={0.45} className="dark:[fill-opacity:0.6]" />))}
+              ? <Cell key={p.day} fill="hsl(var(--primary))" />
+              : <Cell key={p.day} fill="hsl(var(--primary))" fillOpacity={0.45} className="dark:[fill-opacity:0.6]" />))}
           </ChartBar>
         </ComposedChart>
       </ResponsiveContainer>
@@ -1141,9 +1130,9 @@ function WeeklyChart({ t, pace }: { t: Tile; pace?: Tile }) {
             }}
             contentStyle={TOOLTIP_STYLE} />
           {/* no label on the line: a week that beat the target near the right edge had it printed across its bar */}
-          {weekly != null && <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />}
+          {weekly != null && <ReferenceLine y={weekly} stroke="hsl(var(--target))" strokeDasharray="5 4" ifOverflow="extendDomain" />}
           <ChartBar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={34}>
-            {series.map((p) => <Cell key={p.week_start} fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1} />)}
+            {series.map((p) => <Cell key={p.week_start} fill={p.partial ? 'hsl(var(--sash))' : 'hsl(var(--primary))'} fillOpacity={p.partial ? 0.45 : 1} />)}
           </ChartBar>
         </ComposedChart>
       </ResponsiveContainer>
@@ -1153,19 +1142,19 @@ function WeeklyChart({ t, pace }: { t: Tile; pace?: Tile }) {
 
 // the orders card carries the waiting count and the header chip the data date: not repeated in the list
 const EXCLUDE_ON_CARDS = new Set(['orders_waiting', 'stale_data'])
-const TONE_DOT = { alert: 'bg-rose-500', warn: 'bg-amber-500', info: 'bg-[#6D4091]' } as const
+const TONE_DOT = { alert: 'bg-destructive', warn: 'bg-target', info: 'bg-primary' } as const
 
 function Exceptions({ m, me }: { m?: Module; me: Me | null }) {
   const all = (m?.items || []).filter((i) => !EXCLUDE_ON_CARDS.has(i.key))
   const top = all.slice(0, 5)
   return (
-    <section aria-labelledby="fs-attention" className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+    <section aria-labelledby="fs-attention" className="flex min-w-0 flex-col card-luxe rounded-xl p-4">
       <div className="flex items-baseline justify-between gap-2">
         <h2 id="fs-attention" className="font-display text-[1rem] font-bold">Needs attention</h2>
         {all.length > top.length && <span className="text-[11.5px] text-muted-foreground">{top.length} of {all.length} · the rest in Details</span>}
       </div>
       {!top.length ? (
-        <p className="mt-3 flex items-center gap-2 text-[13px] font-medium text-emerald-700 dark:text-emerald-300">
+        <p className="mt-3 flex items-center gap-2 text-[13px] font-medium text-success">
           <CheckCircle2 size={16} aria-hidden="true" />
           {m?.items?.length ? 'Nothing else needs attention.' : 'Nothing needs attention right now.'}
         </p>
@@ -1192,10 +1181,10 @@ function Exceptions({ m, me }: { m?: Module; me: Me | null }) {
 
 function Panel({ id, title, drill, me, children }: { id: string; title: string; drill?: Drill | null; me: Me | null; children: ReactNode }) {
   return (
-    <section aria-labelledby={id} className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+    <section aria-labelledby={id} className="flex min-w-0 flex-col card-luxe rounded-xl p-4">
       <div className="flex items-center justify-between gap-2">
         <h2 id={id} className="flex items-center gap-2 font-display text-[1rem] font-bold">
-          <span className="h-3.5 w-1 rounded-full bg-gradient-to-b from-[#6D4091] to-[#824FAB]" aria-hidden="true" />
+          <span className="h-3.5 w-1 rounded-full bg-gradient-to-b from-primary to-sash" aria-hidden="true" />
           {title}
         </h2>
         <DrillLink drill={drill} me={me} />
@@ -1208,8 +1197,8 @@ function Panel({ id, title, drill, me, children }: { id: string; title: string; 
 function SubHead({ tone = 'plum', title, children }: { tone?: 'plum' | 'up' | 'down' | 'warn'; title?: string; children: ReactNode }) {
   return (
     <div title={title} className={cn('mt-3 text-[11px] font-semibold uppercase tracking-wide',
-      tone === 'plum' && 'text-[#6D4091] dark:text-[#c7a6e6]', tone === 'up' && 'text-emerald-700 dark:text-emerald-400',
-      tone === 'down' && 'text-rose-700 dark:text-rose-400', tone === 'warn' && 'text-amber-700 dark:text-amber-400')}>
+      tone === 'plum' && 'text-primary', tone === 'up' && 'text-success',
+      tone === 'down' && 'text-destructive', tone === 'warn' && 'text-warning')}>
       {children}
     </div>
   )
@@ -1231,7 +1220,7 @@ function SalesmenPanel({ t, me }: { t: Tile; me: Me | null }) {
       {!reps.length ? <p className="mt-2 text-[12.5px] text-muted-foreground">No rep has a target this month yet.</p> : (
         <>
           <p className="mt-1 text-[12px] text-muted-foreground">
-            <span className={cn('font-semibold', below ? 'text-amber-700 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400')}>
+            <span className={cn('font-semibold', below ? 'text-warning' : 'text-success')}>
               {below} of {reps.length}
             </span> below tier 1 · Accessories ex-VAT this month
           </p>
@@ -1292,7 +1281,7 @@ function ProductsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
       )}
       {soldOut && (
         <p className="mt-3 text-[12.5px]">
-          <span className={cn('font-semibold', (soldOut.value ?? 0) > 0 && 'text-amber-700 dark:text-amber-400')}>
+          <span className={cn('font-semibold', (soldOut.value ?? 0) > 0 && 'text-warning')}>
             {fmtCount(soldOut.value)} sold out with demand
           </span>
           <span className="text-muted-foreground"> · {fmtBhd0(soldOut.bhd)} sold in 60 days</span>
@@ -1439,11 +1428,11 @@ export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' 
   return (
     <div className="mx-auto w-full max-w-[1400px]">
       {/* plum band: title, freshness, period */}
-      <div className="rounded-3xl bg-gradient-to-br from-[#6D4091] via-[#6D4091] to-[#824FAB] p-5 text-white shadow-[0_18px_40px_-18px_rgba(109,64,145,0.65)] sm:p-6">
+      <div className="rounded-3xl bg-gradient-to-br from-plum via-plum to-plum-2 p-5 text-white shadow-[0_18px_40px_-18px_rgba(109,64,145,0.65)] sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="font-display text-[1.6rem] font-bold leading-tight sm:text-[1.85rem]">{title}</h1>
-            <p className="mt-1 max-w-2xl text-[13px] text-white/80">{sub}</p>
+            <h1 className="page-title">{title}</h1>
+            <p className="mt-1 max-w-2xl text-[13px] text-white/90">{sub}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {ov && <FreshnessChip data={ov.freshness} variant="onPlum" />}
@@ -1459,13 +1448,13 @@ export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' 
           {PERIODS.map((p) => (
             <button key={p.key} type="button" aria-pressed={period === p.key} onClick={() => setPeriod(p.key)}
               className={cn('h-8 rounded-full px-3.5 text-[12.5px] font-semibold transition-colors motion-reduce:transition-none',
-                period === p.key ? 'bg-white text-[#6D4091]' : 'bg-white/10 text-white hover:bg-white/20')}>
+                period === p.key ? 'bg-white text-plum' : 'bg-white/10 text-white hover:bg-white/20')}>
               {p.label}
             </button>
           ))}
         </div>
         {ov?.period.focus && (
-          <p className="mt-3 text-[12px] text-white/75">
+          <p className="mt-3 text-[12px] text-white/90">
             Focus figures: {ov.period.focus.label}{ov.period.compare ? ` vs ${ov.period.compare.basis || ov.period.compare.label} (${ov.period.compare.label})` : ''}
             {' · '}Marketplace figures: {ov.period.live.label}
           </p>
@@ -1476,12 +1465,12 @@ export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' 
         <div className="mt-6"><LoadError error={q.error} onRetry={() => q.refetch()} isRetrying={q.isFetching} fallback="Could not load the Command Centre." /></div>
       ) : !ov ? (
         <div className="mt-6 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 9 }).map((_, i) => <Skeleton key={i} className="h-40 rounded-2xl" />)}
+          {Array.from({ length: 9 }).map((_, i) => <Skeleton key={i} className="h-40 rounded-xl" />)}
         </div>
       ) : (
         <div className={cn(q.isFetching && q.isPlaceholderData && 'opacity-70 transition-opacity')}>
           {!!ov.notes.length && (
-            <div role="status" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+            <div role="status" className="mt-4 rounded-xl border border-warning/30 bg-warning/10 px-4 py-2.5 text-[12.5px] text-warning">
               {ov.notes.map((n) => <p key={n}>{n}</p>)}
             </div>
           )}
@@ -1492,9 +1481,9 @@ export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' 
           )}
           {view === 'all' && <FirstScreen ov={ov} me={me} />}
           {view === 'all' ? (
-            <details className="group mt-6 rounded-2xl border bg-card/40 px-4 pb-4 pt-1 sm:px-5">
+            <details className="group mt-6 rounded-xl border bg-card/40 px-4 pb-4 pt-1 sm:px-5">
               <summary className="flex cursor-pointer list-none items-center gap-2 py-3 font-display text-[1rem] font-bold">
-                <ChevronDown size={17} className="text-[#6D4091] transition-transform group-open:rotate-180 motion-reduce:transition-none dark:text-[#c7a6e6]" aria-hidden="true" />
+                <ChevronDown size={17} className="text-primary transition-transform group-open:rotate-180 motion-reduce:transition-none" aria-hidden="true" />
                 Details · every module
                 <span className="font-sans text-[12px] font-normal text-muted-foreground">each tile with its basis</span>
               </summary>

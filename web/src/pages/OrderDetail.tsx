@@ -172,7 +172,7 @@ export default function OrderDetail() {
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
                     {l.landed_unit == null ? '—' : <>{l.cost_estimated && <span title="estimated from the VFAN invoice" className="text-amber-600">~</span>}{rate(l.landed_unit)}</>}
-                    {l.flags.includes('cost_overrun') && <span title="costs more than ordered" className="ml-1 text-rose-500">▲</span>}</td>
+                    {l.flags.includes('cost_overrun') && <span title="costs more than ordered" className="ml-1 inline-flex align-[-2px] text-destructive"><TriangleAlert size={13} aria-label="costs more than ordered" /></span>}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{rate(l.sell_unit)}</td>
                   <td className={cn('px-4 py-2.5 text-right font-semibold tabular-nums', marginCls(l.margin_pct))}>
                     {l.margin_pct == null ? '—' : <>{l.cost_estimated && <span className="text-amber-600">~</span>}{l.margin_pct}%</>}

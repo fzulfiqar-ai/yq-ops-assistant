@@ -1031,7 +1031,7 @@ export default function ShopRules() {
 
   return (
     <div>
-      <PageHeader title="Offers & Rules" subtitle="Discount rules, coupons, marketplace campaigns and the live health of every margin behind the shop" />
+      <PageHeader title="Offers & rules" subtitle="Discount rules, coupons, marketplace campaigns and the live health of every margin behind the shop" />
 
       <div className="mb-5 flex gap-1.5 overflow-x-auto pb-1">
         {SECTIONS.map((s) => (

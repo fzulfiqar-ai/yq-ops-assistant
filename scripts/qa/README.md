@@ -374,6 +374,14 @@ the chains) is about half an hour: narrow it with `--only`, `--widths` and `--th
 `smooth.py` is used when this checkout has it; without it the document-scroller halves of S1 and S4
 are skipped with a note. `--no-smooth` and `--no-nav` skip S1/S4 and S8.
 
+**Contrast (WCAG 2.x AA).** Every replayed page is scanned for the colour of its text against the colour behind it (`CONTRAST_JS`,
+one round trip): the text's own alpha and the opacity chain are applied, and the background is every ancestor's background colour
+composited up to the first opaque layer. Body text under 4.5:1 is a hard `contrast` failure, large text (24 px, or 18.66 px bold)
+under 3:1 a `contrast-large` warning, the worst 8 of each in `results.json`. Text on a gradient or background image, or over a
+picture or video, is *unknown* (counted, never scored; `contrast_check(..., gradients="stops")` scores a gradient by its worst
+stop); hidden, `aria-hidden`, clipped, disabled and placeholder text is skipped; SVG `<text>` is read from `fill`. A decorative
+overlay that is not an ancestor is not modelled. `--no-contrast` skips the scan; `--selftest` proves it on two pages of its own.
+
 ## Self-test
 
 ```bash

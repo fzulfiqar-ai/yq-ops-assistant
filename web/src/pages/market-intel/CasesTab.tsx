@@ -77,7 +77,7 @@ export function CasesTab({ lists }: { lists: MiLists | null }) {
         <button
           type="button"
           onClick={() => { setTab('safety'); setOffset(0) }}
-          className="mb-4 flex w-full items-center gap-3 rounded-2xl border border-[#f3c4cf] bg-[#fdecef] px-4 py-3 text-left text-[13.5px] text-[#9f1239] transition hover:bg-[#fbdbe1]"
+          className="mb-4 flex w-full items-center gap-3 rounded-2xl border border-destructive/25 bg-destructive/10 px-4 py-3 text-left text-[13.5px] text-destructive transition hover:bg-destructive/15"
         >
           <Siren size={18} className="shrink-0" aria-hidden="true" />
           <span className="flex-1">
@@ -187,7 +187,7 @@ export function CaseCard({ r, compact = false }: { r: MiCaseRow; compact?: boole
         <div className="line-clamp-2 text-[14px] font-semibold leading-snug text-foreground">{r.title || 'Not named yet'}</div>
         <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-muted-foreground">
           {target != null && <span className="tabular-nums">Case {target}</span>}
-          {r.yq_item_code ? <span className="tabular-nums">YQ {r.yq_item_code}</span> : <span className="font-semibold text-[#96600d]">No product linked</span>}
+          {r.yq_item_code ? <span className="tabular-nums">YQ {r.yq_item_code}</span> : <span className="font-semibold text-warning">No product linked</span>}
           {(brand || supplier) && <span>{[brand, supplier].filter(Boolean).join(' · ')}</span>}
           {r.obs_count != null && (
             <span>

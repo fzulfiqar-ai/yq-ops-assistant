@@ -57,7 +57,7 @@ export function Cover({ url, alt, className }: { url?: string | null; alt: strin
   return url ? (
     <img src={url} alt={alt} loading="lazy" decoding="async" className={cn('h-full w-full object-cover', className)} />
   ) : (
-    <span className={cn('grid h-full w-full place-items-center bg-gradient-to-br from-[#F3EDF8] to-[#E6DAF0] text-[#824FAB]', className)}>
+    <span className={cn('grid h-full w-full place-items-center bg-gradient-to-br from-accent/50 to-accent text-sash', className)}>
       <ImageOff size={22} aria-hidden="true" />
     </span>
   )
@@ -94,7 +94,7 @@ export function Tabs<T extends string>({
           {t.icon}
           {t.label}
           {t.count ? (
-            <span className={cn('rounded-full px-1.5 text-[11px] tabular-nums', t.urgent ? 'bg-[#9f1239] text-white' : 'bg-primary/10 text-primary')}>{t.count}</span>
+            <span className={cn('rounded-full px-1.5 text-[11px] tabular-nums', t.urgent ? 'bg-destructive text-destructive-foreground' : 'bg-primary/10 text-primary')}>{t.count}</span>
           ) : null}
         </button>
       ))}

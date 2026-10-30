@@ -11,9 +11,10 @@ needed: before/after design reviews, failure injection, smoothness timings.
                 --api https://api.yqmarketplace.com --out business_data/design_review/<date>/portal [--rep "<Focus name>"]
   replay    python scripts/qa/portal_qa.py --replay --dist web/dist --rec business_data/design_review/<date>/portal \
                 --out business_data/design_review/<date>/after [--as admin|salesman] [--widths 390,1024,1440] \
-                [--themes light,dark] [--only receivables,margins] [--port 5175] [--fail-api]
-  selftest  python scripts/qa/portal_qa.py --selftest        (the record mode's write guard, then the committed
-                                                              SYNTHETIC fixture against web/dist)
+                [--themes light,dark] [--only receivables,margins] [--port 5175] [--fail-api] [--no-contrast]
+  selftest  python scripts/qa/portal_qa.py --selftest        (the record mode's write guard, the contrast scanner on
+                                                              two pages of its own, then the committed SYNTHETIC
+                                                              fixture against web/dist; --dist <folder> --port <n>)
   pages     python scripts/qa/portal_qa.py --list
 
 Exit: replay and selftest exit 1 when a hard check fails (warnings never fail a run); record exits 0
@@ -903,8 +904,8 @@ def wait_http(url: str, seconds: float) -> bool:
     return False
 
 
-def port_busy(port: int) -> bool:
-    for host in ("127.0.0.1", "::1"):
+def port_busy(port: int, hosts: tuple[str, ...] = ("127.0.0.1", "::1")) -> bool:
+    for host in hosts:
         try:
             with socket.create_connection((host, port), timeout=0.4):
                 return True
@@ -926,14 +927,21 @@ class Preview:
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "Preview":
-        if port_busy(self.port):
+        v4, v6 = port_busy(self.port, ("127.0.0.1",)), port_busy(self.port, ("::1",))
+        if v4 and v6:
             raise SystemExit("port " + str(self.port) + " is busy — stop whatever serves it or pass --port")
+        host = ""
+        if v4 != v6:
+            # a stray server holds ONE loopback address (an old preview on 127.0.0.1, say): vite can still bind the other, but
+            # `localhost` might then resolve to the stray, so vite is given the free address and the page is opened on it
+            host = "::1" if v4 else "127.0.0.1"
+            self.base = "http://" + ("[::1]" if v4 else "127.0.0.1") + ":" + str(self.port)
         self.log.parent.mkdir(parents=True, exist_ok=True)
         fh = open(self.log, "w", encoding="utf-8")  # noqa: SIM115 — closed with the process
-        self.proc = subprocess.Popen("npx vite preview --outDir " + json.dumps(str(self.dist)) + " --port " + str(self.port) + " --strictPort",
-                                     shell=True, cwd=str(WEB), stdout=fh, stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen("npx vite preview --outDir " + json.dumps(str(self.dist)) + " --port " + str(self.port) + " --strictPort"
+                                     + (" --host " + host if host else ""), shell=True, cwd=str(WEB), stdout=fh, stderr=subprocess.STDOUT)
         atexit.register(self.__exit__, None, None, None)   # a crash or Ctrl+C never leaves it serving
-        if not wait_http(self.base + "/", 90):
+        if not wait_http(self.base + "/", 150):
             self.__exit__(None, None, None)
             raise SystemExit("vite preview did not come up on " + self.base + " (see " + str(self.log) + ")")
         want = re.search(r'src="(/assets/index-[^"]+\.js)"', (self.dist / "index.html").read_text(encoding="utf-8"))
@@ -1049,6 +1057,7 @@ class ReplayCfg:
     nav: bool = True
     canaries: bool = False
     probe_miss: bool = False
+    contrast: bool = True
 
 
 class Replayer:
@@ -1441,6 +1450,288 @@ CHROME = r"""
 }
 """
 
+# Contrast (WCAG 2.x AA): the text colour of every visible text run against the colour behind it. One round
+# trip; the page's DOM and computed styles are the only input. The text colour carries its own alpha and the
+# opacity of the element and its ancestors; the background is every ancestor's background-color composited
+# (with that ancestor's own opacity chain) up to the first opaque layer, else the canvas. A background-image
+# or gradient in that chain, or a picture / video under the text, makes the run `unknown` (counted, never
+# scored); `gradients: "stops"` scores a lone gradient against its WORST colour stop instead. Skipped: hidden,
+# zero-size, clipped away (sr-only, a collapsed panel), aria-hidden / inert, opacity ~0, disabled controls and
+# placeholders (not text nodes). Text off-screen inside a scroller is scored. SVG <text> uses `fill`. Large text
+# (>= 24 px, or >= 18.66 px and bold) needs 3:1, the rest 4.5:1. `runs: true` also returns the unknown runs with their boxes and
+# colours (`unknownRuns`) for a caller that scores them from pixels. Not modelled: overlays that are not ancestors
+# (a faint decorative glow), blend modes, filters, hover and focus states.
+CONTRAST_JS = r"""
+(opts) => {
+  const o = Object.assign({ root: null, gradients: 'unknown', limit: 1000, runs: false }, opts || {});
+  const D = document;
+  const scope = (o.root && D.querySelector(o.root)) || D.body;
+  const AA_BODY = 4.5, AA_LARGE = 3;
+
+  /* colours: rgb() / rgba() / color(srgb) are read as they come; any other form goes through a 1x1 canvas */
+  const cvs = D.createElement('canvas');
+  cvs.width = 1; cvs.height = 1;
+  const g2 = cvs.getContext('2d', { willReadFrequently: true });
+  const seen = new Map();
+  const frac = (t) => (t.endsWith('%') ? parseFloat(t) / 100 : parseFloat(t));
+  const parse = (s) => {
+    if (!s) return null;
+    if (seen.has(s)) return seen.get(s);
+    let v = null, m;
+    if ((m = /^rgba?\(\s*([\d.+-]+%?)[\s,]+([\d.+-]+%?)[\s,]+([\d.+-]+%?)(?:\s*[,/]\s*([\d.+-]+%?))?\s*\)$/i.exec(s))) {
+      const ch = (t) => (t.endsWith('%') ? parseFloat(t) * 2.55 : parseFloat(t));
+      v = [ch(m[1]), ch(m[2]), ch(m[3]), m[4] === undefined ? 1 : frac(m[4])];
+    } else if ((m = /^color\(\s*srgb\s+([\d.+-]+%?)\s+([\d.+-]+%?)\s+([\d.+-]+%?)(?:\s*\/\s*([\d.+-]+%?))?\s*\)$/i.exec(s))) {
+      v = [frac(m[1]) * 255, frac(m[2]) * 255, frac(m[3]) * 255, m[4] === undefined ? 1 : frac(m[4])];
+    } else if (s === 'transparent') {
+      v = [0, 0, 0, 0];
+    } else if (g2) {
+      try {
+        g2.clearRect(0, 0, 1, 1);
+        g2.fillStyle = '#010203';
+        g2.fillStyle = s;
+        if (g2.fillStyle !== '#010203') {
+          g2.fillRect(0, 0, 1, 1);
+          const d = g2.getImageData(0, 0, 1, 1).data;
+          v = [d[0], d[1], d[2], d[3] / 255];
+        }
+      } catch (e) { v = null; }
+    }
+    seen.set(s, v);
+    return v;
+  };
+  const lin = (c) => { const x = Math.min(255, Math.max(0, c)) / 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+  const ratioOf = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const over = (f, b) => [f[0] * f[3] + b[0] * (1 - f[3]), f[1] * f[3] + b[1] * (1 - f[3]), f[2] * f[3] + b[2] * (1 - f[3])];
+  const hex = (c) => '#' + c.slice(0, 3).map((x) => Math.round(Math.min(255, Math.max(0, x))).toString(16).padStart(2, '0')).join('');
+  const scheme = getComputedStyle(D.documentElement).colorScheme || '';
+  const canvas = /\bdark\b/.test(scheme) && !/\blight\b/.test(scheme) ? [18, 18, 18] : [255, 255, 255];
+
+  /* names, for the report */
+  const klass = (el) => (typeof el.className === 'string' ? el.className : (el.getAttribute('class') || ''));
+  const tagOf = (el) => {
+    let s = el.localName;
+    if (el.id) s += '#' + el.id;
+    const c = klass(el).trim().split(/\s+/).filter(Boolean).slice(0, 2);
+    if (c.length) s += '.' + c.map((x) => x.slice(0, 28)).join('.');
+    return s;
+  };
+  const pathOf = (el) => {
+    const parts = [];
+    for (let n = el, i = 0; n && n.nodeType === 1 && n !== D.body && i < 4; n = n.parentElement, i++) parts.unshift(tagOf(n));
+    return parts.join(' > ');
+  };
+  const regionOf = (el) => {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const t = n.localName;
+      if (n.getAttribute('role') === 'dialog') { const h = n.querySelector('h1,h2,h3'); return 'dialog' + (h ? ': ' + h.textContent.trim().slice(0, 30) : ''); }
+      if (t === 'aside') return 'sidebar';
+      if (t === 'header') return 'header';
+      if (t === 'nav') return 'nav';
+      if (t === 'footer') return 'footer';
+      const by = n.getAttribute('aria-labelledby');
+      const lab = n.getAttribute('aria-label') || (by ? ((D.getElementById(by.split(' ')[0]) || {}).textContent || '') : '');
+      if (lab && /^(section|article|form|table|ul|ol|div|li|dl)$/.test(t)) return t + ': ' + lab.trim().slice(0, 30);
+    }
+    return 'page';
+  };
+
+  /* what is behind a run of text */
+  const opac = new Map();
+  const eff = (el) => {                       // opacity of this element and every ancestor
+    if (!el || el.nodeType !== 1) return 1;
+    let v = opac.get(el);
+    if (v === undefined) { v = eff(el.parentElement) * Number(getComputedStyle(el).opacity); opac.set(el, v); }
+    return v;
+  };
+  const layers = new Map();
+  const layerOf = (el) => {
+    let L = layers.get(el);
+    if (!L) {
+      const cs = getComputedStyle(el);
+      const bg = parse(cs.backgroundColor);
+      L = { bg: bg && bg[3] > 0.004 ? bg : null, img: cs.backgroundImage && cs.backgroundImage !== 'none' ? cs.backgroundImage : '' };
+      layers.set(el, L);
+    }
+    return L;
+  };
+  const media = [];
+  for (const m of D.querySelectorAll('img, video, canvas, picture, iframe, embed, object')) {
+    const r = m.getBoundingClientRect();
+    if (r.width > 1 && r.height > 1) media.push([m, r]);
+  }
+  const area = (r) => Math.max(0, r.width) * Math.max(0, r.height);
+  const overlap = (a, b) => {
+    const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return w > 0 && h > 0 ? w * h : 0;
+  };
+  const STOP = /rgba?\([^)]*\)|color\([^)]*\)|hsla?\([^)]*\)|oklch\([^)]*\)|oklab\([^)]*\)|lab\([^)]*\)|lch\([^)]*\)|#[0-9a-f]{3,8}\b/gi;
+  /* → { rgbs: [colour behind the text, or one per gradient stop] } or { unknown: why } */
+  const backdrop = (el, tr) => {
+    const hits = media.length ? media.filter(([, r]) => overlap(tr, r) / (area(tr) || 1) >= 0.25).map((x) => x[0]) : [];
+    const stack = [];
+    let opaque = false, grad = null;
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      if (hits.length && hits.some((m) => m !== n && n.contains(m) && !m.contains(el) && !el.contains(m))) return { unknown: 'text over an image or video' };
+      const L = layerOf(n);
+      if (L.img) {
+        if (o.gradients !== 'stops' || grad || /url\(/.test(L.img) || !/gradient\(/.test(L.img)) return { unknown: 'background-image on ' + tagOf(n) };
+        const stops = (L.img.match(STOP) || []).map(parse).filter(Boolean);
+        if (!stops.length) return { unknown: 'gradient with no readable stops on ' + tagOf(n) };
+        grad = { stops, k: eff(n), at: stack.length };
+      }
+      if (L.bg) {
+        const a = L.bg[3] * eff(n);
+        stack.push([L.bg, a]);
+        if (a >= 0.995) { opaque = true; break; }
+      }
+    }
+    const flat = (from) => {
+      let base = opaque ? stack[stack.length - 1][0].slice(0, 3) : canvas.slice();
+      for (let i = stack.length - (opaque ? 2 : 1); i >= from; i--) base = over([stack[i][0][0], stack[i][0][1], stack[i][0][2], stack[i][1]], base);
+      return base;
+    };
+    if (!grad) return { rgbs: [flat(0)] };
+    // a gradient painted over the layers beneath it (those after `at` in the stack), under the ones above
+    const under = flat(grad.at);
+    return { rgbs: grad.stops.map((s) => {
+      let base = over([s[0], s[1], s[2], s[3] * grad.k], under);
+      for (let i = grad.at - 1; i >= 0; i--) base = over([stack[i][0][0], stack[i][0][1], stack[i][0][2], stack[i][1]], base);
+      return base;
+    }) };
+  };
+
+  /* is the run visible: an ancestor that hides its overflow must leave a few px of it (sr-only, a closed panel) */
+  const ovf = new Map();
+  const clipsOf = (n) => {
+    let v = ovf.get(n);
+    if (!v) { const s = getComputedStyle(n); v = [s.overflowX === 'hidden' || s.overflowX === 'clip', s.overflowY === 'hidden' || s.overflowY === 'clip']; ovf.set(n, v); }
+    return v;
+  };
+  const shown = (el, tr) => {
+    let l = tr.left, t = tr.top, r = tr.right, b = tr.bottom;
+    for (let n = el; n && n.nodeType === 1 && n !== D.documentElement; n = n.parentElement) {
+      const [hx, hy] = clipsOf(n);
+      if (!hx && !hy) continue;
+      const q = n.getBoundingClientRect();
+      if (hx) { l = Math.max(l, q.left); r = Math.min(r, q.right); }
+      if (hy) { t = Math.max(t, q.top); b = Math.min(b, q.bottom); }
+      if (r - l < 4 || b - t < 4) return false;
+    }
+    return true;
+  };
+
+  const SKIP = new Set(['script', 'style', 'noscript', 'template', 'head', 'meta', 'link', 'title', 'option', 'optgroup', 'datalist',
+    'iframe', 'canvas', 'object', 'embed', 'audio', 'video', 'source', 'track', 'defs', 'clippath', 'mask', 'pattern', 'lineargradient',
+    'radialgradient', 'symbol', 'marker', 'filter', 'desc']);
+  const NOTEXT = ['hidden', 'checkbox', 'radio', 'range', 'file', 'color', 'image'];
+  const failures = [], samples = [], unknownBy = {}, unknownRuns = [];
+  let checked = 0, unknown = 0, candidates = 0, bodyFail = 0, largeFail = 0;
+  /* is a run inside every ancestor that clips or scrolls (a table's own scroller hides its far rows from a render) */
+  const onScreen = (el, tr) => {
+    let l = tr.left, t = tr.top, r = tr.right, b = tr.bottom;
+    const full = (r - l) * (b - t) || 1;
+    for (let n = el; n && n.nodeType === 1 && n !== D.documentElement; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      const cx = s.overflowX !== 'visible', cy = s.overflowY !== 'visible';
+      if (!cx && !cy) continue;
+      const q = n.getBoundingClientRect();
+      if (cx) { l = Math.max(l, q.left); r = Math.min(r, q.right); }
+      if (cy) { t = Math.max(t, q.top); b = Math.min(b, q.bottom); }
+      if (r <= l || b <= t) return false;
+    }
+    return ((r - l) * (b - t)) / full > 0.6;
+  };
+  /* a run that cannot be scored: counted by what hid its background, with a few samples (and, on request, its box) */
+  const unsure = (el, text, why, run) => {
+    unknown++;
+    const k = (regionOf(el) + ': ' + why).slice(0, 90);
+    unknownBy[k] = (unknownBy[k] || 0) + 1;
+    if (samples.length < 6 && !samples.some((x) => x.why === k)) samples.push({ p: pathOf(el), t: text, why: k });
+    if (o.runs && run && unknownRuns.length < 4000 && onScreen(el, run.tr)) {
+      unknownRuns.push({ box: [run.tr.left + scrollX, run.tr.top + scrollY, run.tr.right + scrollX, run.tr.bottom + scrollY], fg: [run.fg[0], run.fg[1], run.fg[2], run.a],
+        fs: Math.round(run.fs * 10) / 10, w: run.wt, large: run.large, p: pathOf(el), t: text, g: regionOf(el), c: klass(el).trim().replace(/\s+/g, ' ').slice(0, 110), why: k });
+    }
+  };
+
+  for (const el of [scope, ...scope.querySelectorAll('*')]) {
+    const ln = el.localName;
+    if (SKIP.has(ln)) continue;
+    let text = '';
+    for (const c of el.childNodes) if (c.nodeType === 3) text += c.nodeValue;
+    let control = false;
+    if (!text.trim()) {                       // text typed or picked in a control shows in the control's own colour
+      if (ln !== 'input' && ln !== 'select' && ln !== 'textarea') continue;
+      if (NOTEXT.includes((el.type || '').toLowerCase())) continue;
+      text = ln === 'select' ? ((el.selectedOptions && el.selectedOptions[0] && el.selectedOptions[0].text) || '') : (el.value || '');
+      if (!text.trim()) continue;
+      control = true;
+    }
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') continue;
+    if (el.checkVisibility && !el.checkVisibility()) continue;        // display:none above, content-visibility:hidden (a closed <details>)
+    if (el.closest('[aria-hidden="true"], [inert]')) continue;
+    if (el.closest('[disabled], [aria-disabled="true"]') || (el.matches && el.matches(':disabled'))) continue;
+    const eo = eff(el);
+    if (eo < 0.05) continue;
+    if (cs.position === 'absolute' && /rect\(\s*0(px)?[, ]+0(px)?[, ]+0(px)?[, ]+0(px)?\s*\)/.test(cs.clip || '')) continue;
+    if (cs.clipPath && /inset\(\s*50%/.test(cs.clipPath)) continue;
+    let tr;
+    if (control) tr = el.getBoundingClientRect();
+    else {
+      const rg = D.createRange();
+      let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+      for (const c of el.childNodes) {
+        if (c.nodeType !== 3 || !c.nodeValue.trim()) continue;
+        rg.selectNodeContents(c);
+        for (const q of rg.getClientRects()) {
+          if (q.width <= 0 || q.height <= 0) continue;
+          l = Math.min(l, q.left); t = Math.min(t, q.top); r = Math.max(r, q.right); b = Math.max(b, q.bottom);
+        }
+      }
+      if (!isFinite(l)) continue;
+      tr = { left: l, top: t, right: r, bottom: b, width: r - l, height: b - t };
+    }
+    if (tr.width < 1 || tr.height < 1 || !shown(el, tr)) continue;
+    candidates++;
+    const say = () => text.replace(/\s+/g, ' ').trim().slice(0, 40);
+    const svg = el instanceof SVGElement;
+    let fg, fo = 1;
+    if (svg) {
+      if (!cs.fill || cs.fill === 'none' || /^url\(/.test(cs.fill)) { unsure(el, say(), 'svg fill is a paint server'); continue; }
+      fg = parse(cs.fill); fo = Number(cs.fillOpacity);
+    } else {
+      fg = parse(cs.webkitTextFillColor || cs.color);
+    }
+    if (!fg || fg[3] * fo * eo < 0.05) { unsure(el, say(), 'transparent or unreadable text colour'); continue; }
+    const a = fg[3] * fo * eo;
+    const fs = parseFloat(cs.fontSize) || 16;
+    const wt = cs.fontWeight === 'bold' ? 700 : (parseInt(cs.fontWeight, 10) || 400);
+    const large = fs >= 24 || (fs >= 18.66 && wt >= 700);
+    const bd = backdrop(el, tr);
+    if (bd.unknown) { unsure(el, say(), bd.unknown, { tr, fg, a, fs, wt, large }); continue; }
+    let worst = null, back = null;
+    for (const bg of bd.rgbs) {
+      const eff2 = over([fg[0], fg[1], fg[2], a], bg);
+      const rr = ratioOf(eff2, bg);
+      if (!worst || rr < worst.r) { worst = { r: rr, fg: eff2 }; back = bg; }
+    }
+    checked++;
+    if (worst.r >= (large ? AA_LARGE : AA_BODY)) continue;
+    if (large) largeFail++; else bodyFail++;
+    const rec = { p: pathOf(el), t: say(), r: Math.round(worst.r * 100) / 100, need: large ? AA_LARGE : AA_BODY, fg: hex(worst.fg), bg: hex(back),
+      fs: Math.round(fs * 10) / 10, w: wt, large, g: regionOf(el), c: klass(el).trim().replace(/\s+/g, ' ').slice(0, 110) };
+    if (a < 0.995) rec.a = Math.round(a * 100) / 100;
+    if (bd.rgbs.length > 1) rec.gradient = true;
+    failures.push(rec);
+  }
+  failures.sort((x, y) => x.r - y.r);
+  return { checked, unknown, candidates, failureCount: failures.length, bodyFail, largeFail, failures: failures.slice(0, o.limit), unknownSamples: samples, unknownBy, unknownRuns };
+}
+"""
+
 # S8: from a menu click to the new page's heading, counting the loaders on the way
 NAV_HOP = r"""
 async ({ href, loaders, timeout }) => {
@@ -1642,6 +1933,128 @@ def common_checks(run: Run, p: dict) -> None:
             finding(run, "warn", "tap-target", "below 44px: " + size + " · " + who, values)
     for i in p["smallInputs"]:
         finding(run, "fail", "input-font-size", str(i["fontSize"]) + "px < 16px on touch · " + i["sel"], i)
+
+
+def contrast_summary(res: dict, worst: int = 8) -> dict:
+    """The scan's answer (CONTRAST_JS) as numbers: how many runs were scored, how many fall below AA
+    (body text under 4.5:1, large text under 3:1), and the `worst` cases of each, lowest ratio first.
+    brand_shots.py stores this per screenshot."""
+    fails = res.get("failures") or []
+    body = [f for f in fails if not f.get("large")]
+    large = [f for f in fails if f.get("large")]
+    # the same colours, size and classes on many runs are ONE offender: counted, with its worst ratio and a sample
+    groups: dict[tuple, dict] = {}
+    for f in fails:
+        key = (f["fg"], f["bg"], f["fs"], f["large"], f["c"][:90])
+        g = groups.setdefault(key, {"n": 0, "r": f["r"], "fg": f["fg"], "bg": f["bg"], "fs": f["fs"], "large": f["large"], "t": f["t"], "g": f["g"], "c": f["c"], "p": f["p"]})
+        g["n"] += 1
+        g["r"] = min(g["r"], f["r"])
+    offenders = sorted(groups.values(), key=lambda g: (-g["n"], g["r"]))[:12]
+    return {"checked": res.get("checked", 0), "unknown": res.get("unknown", 0), "candidates": res.get("candidates", 0),
+            "body_fail": res.get("bodyFail", len(body)), "large_fail": res.get("largeFail", len(large)),
+            "worst_body": body[:worst], "worst_large": large[:worst], "offenders": offenders, "unknown_samples": (res.get("unknownSamples") or [])[:worst],
+            "unknown_by": dict(sorted((res.get("unknownBy") or {}).items(), key=lambda kv: -kv[1])[:worst])}
+
+
+def _worst_line(rows: list[dict]) -> str:
+    return "; ".join("“" + r["t"] + "” " + str(r["r"]) + ":1 " + r["fg"] + " on " + r["bg"] + " " + str(r["fs"]) + "px (" + r["g"] + ")" for r in rows[:3])
+
+
+def contrast_check(run: Run, page: Page, label: str = "", root: str | None = None, gradients: str = "unknown") -> dict:
+    """WCAG 2.x AA contrast of the text on the page (CONTRAST_JS), recorded through finding(): a hard `contrast`
+    failure when body text (under 24 px, not bold-large) is below 4.5:1, a `contrast-large` warning when large
+    text is below 3:1; the worst 8 of each are in the values. `root` limits the scan to a CSS selector (an open
+    dialog); `gradients="stops"` scores a lone gradient against its worst stop. Returns contrast_summary()."""
+    try:
+        res = page.evaluate(CONTRAST_JS, {"root": root, "gradients": gradients})
+    except PWError as exc:
+        finding(run, "warn", "contrast", (label + ": " if label else "") + "the contrast scan did not run — " + str(exc)[:160])
+        return {}
+    s = contrast_summary(res)
+    run.metrics["contrast"] = {k: s[k] for k in ("checked", "unknown", "body_fail", "large_fail")}
+    tag = (label + ": ") if label else ""
+    if s["body_fail"]:
+        finding(run, "fail", "contrast", tag + str(s["body_fail"]) + " of " + str(s["checked"]) + " text runs below 4.5:1 (WCAG AA) — worst " + _worst_line(s["worst_body"]),
+                {"count": s["body_fail"], "checked": s["checked"], "unknown": s["unknown"], "worst": s["worst_body"]})
+    if s["large_fail"]:
+        finding(run, "warn", "contrast-large", tag + str(s["large_fail"]) + " large text runs below 3:1 (WCAG AA) — worst " + _worst_line(s["worst_large"]),
+                {"count": s["large_fail"], "checked": s["checked"], "unknown": s["unknown"], "worst": s["worst_large"]})
+    return s
+
+
+# --selftest: a page the scanner must read exactly. (a) one passing and one failing line → only the failing one is
+# flagged; (b) the rules in one page: what is scored, what is skipped, what is unknown.
+CONTRAST_PAGE_A = ('<!doctype html><html><body style="margin:0;background:#fff"><main>'
+                   '<p id="passes" style="color:#1a1428">Readable line</p><p id="fails" style="color:#aaaaaa">Faint line</p></main></body></html>')
+CONTRAST_PAGE_B = """<!doctype html><html><head><style>
+body{margin:0;background:#fff;color:#1a1428;font:16px/1.4 sans-serif}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;color:#ccc}
+.grad{background-image:linear-gradient(90deg,#222,#444);color:#fff}
+.stage{position:relative;width:200px;height:60px}.stage img{position:absolute;inset:0;width:200px;height:60px}
+.stage span{position:absolute;left:8px;top:8px;color:#eee}
+</style></head><body><main>
+<p id="ok">Dark ink on white</p>
+<p id="bad" style="color:#aaa">Light grey on white</p>
+<p id="alpha-bad" style="color:rgba(0,0,0,.3)">Translucent ink</p>
+<p id="alpha-ok" style="color:rgba(0,0,0,.8)">Mostly opaque ink</p>
+<div style="opacity:.4"><p id="opacity-bad" style="color:#222">Faded by its parent</p></div>
+<div style="background:rgba(0,0,0,.6)"><p id="tint-ok" style="color:#fff">White on a dark tint</p></div>
+<div style="background:rgba(0,0,0,.3)"><p id="tint-bad" style="color:#fff">White on a light tint</p></div>
+<p id="large-ok" style="font-size:24px;color:#888">Large text at 3.5:1</p>
+<p id="large-bad" style="font-size:24px;color:#bbb">Large text at 1.9:1</p>
+<p id="bold-large-ok" style="font-size:19px;font-weight:700;color:#888">Bold 19px at 3.5:1</p>
+<p id="bold-small-bad" style="font-size:17px;font-weight:700;color:#888">Bold 17px at 3.5:1</p>
+<p id="grad" class="grad">Text on a gradient</p>
+<div class="stage"><img id="pic" alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><span id="over-pic">Text over a picture</span></div>
+<p id="hidden-1" style="display:none;color:#ddd">Not displayed</p>
+<p id="hidden-2" style="visibility:hidden;color:#ddd">Not visible</p>
+<p id="hidden-3" style="opacity:0;color:#ddd">Fully transparent</p>
+<p id="hidden-4" aria-hidden="true" style="color:#ddd">Hidden from assistive tech</p>
+<span id="hidden-5" class="sr">Screen reader only</span>
+<button id="hidden-6" disabled style="color:#ccc;background:#fff">Disabled button</button>
+<input id="hidden-7" placeholder="A placeholder" style="color:#ccc">
+<details><summary>More</summary><p id="hidden-8" style="color:#ddd">Inside a closed panel</p></details>
+<svg width="220" height="40"><text id="svg-ok" x="4" y="16" fill="#222">Chart label</text><text id="svg-bad" x="4" y="34" fill="#bbb">Chart label faint</text></svg>
+</main></body></html>"""
+CONTRAST_B_FAILS = {"bad", "alpha-bad", "opacity-bad", "tint-bad", "large-bad", "bold-small-bad", "svg-bad"}
+CONTRAST_B_UNKNOWN = {"grad", "over-pic"}
+
+
+def contrast_selftest() -> list[tuple[bool, str]]:
+    """Proves the scanner on two pages of its own in a headless Chromium: nothing is served, nothing leaves the machine."""
+    def ids(res: dict) -> list[str]:
+        found = []
+        for f in res["failures"]:
+            m = re.search(r"#([\w-]+)", f["p"].split(" > ")[-1])
+            found.append(m.group(1) if m else f["p"])
+        return found
+
+    out: list[tuple[bool, str]] = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 480, "height": 640})
+            page.set_content(CONTRAST_PAGE_A)
+            a = page.evaluate(CONTRAST_JS, {})
+            out.append((ids(a) == ["fails"] and a["checked"] == 2, "contrast scan: one passing and one failing line → only the failing one is flagged ("
+                        + str(ids(a)) + " of " + str(a["checked"]) + " checked)"))
+            page.set_content(CONTRAST_PAGE_B)
+            b = page.evaluate(CONTRAST_JS, {})
+            got = set(ids(b))
+            out.append((got == CONTRAST_B_FAILS, "contrast scan rules: alpha, opacity chain, translucent backgrounds, large and bold-large text, SVG text flagged exactly "
+                        + str(sorted(CONTRAST_B_FAILS)) + (" — got " + str(sorted(got)) if got != CONTRAST_B_FAILS else "")))
+            skipped = [s["p"] for s in b["unknownSamples"]]
+            out.append((b["unknown"] == len(CONTRAST_B_UNKNOWN) and all(any("#" + u in s for s in skipped) for u in CONTRAST_B_UNKNOWN),
+                        "contrast scan: a gradient and text over a picture are unknown, not scored (" + str(b["unknown"]) + " unknown)"))
+            hidden_scored = [f for f in b["failures"] if "hidden" in f["p"]]
+            out.append((not hidden_scored and b["candidates"] == b["checked"] + b["unknown"],
+                        "contrast scan: hidden, aria-hidden, sr-only, disabled, placeholder and closed-panel text is skipped (" + str(b["checked"]) + " scored)"))
+            s = page.evaluate(CONTRAST_JS, {"gradients": "stops"})
+            out.append((s["unknown"] == 1 and s["checked"] == b["checked"] + 1, "contrast scan: gradients=stops scores the gradient against its worst stop ("
+                        + str(s["checked"]) + " scored, " + str(s["unknown"]) + " unknown)"))
+        finally:
+            browser.close()
+    return out
 
 
 def s9_scroller(run: Run, p: dict) -> dict:
@@ -2030,6 +2443,9 @@ def walk_page(browser_ctx, rp: Replayer, cfg: ReplayCfg, report: Report, vp: Vie
         if pg.key not in CANARIES:
             info["s9"] = s9_scroller(run, p)
         lap("probe")
+        if cfg.contrast and not cfg.fail_api and pg.key not in CANARIES:
+            contrast_check(run, page, pg.key + " · " + vp.name + " · " + theme)
+            lap("contrast")
         shot(run, page, cfg.out, vp, theme)
         lap("shot")
         if cfg.fail_api:
@@ -2373,6 +2789,8 @@ def selftest(args) -> int:
     checks.append((len(guard["blocked"]) >= 8, "--record: every write was answered inside the browser (" + str(len(guard["blocked"])) + " blocked)"))
     checks.append((guard["saved"] and guard["masked"] and not guard["leaked_headers"], "--record: the GET was saved under its sorted key, its signed-URL"
                    " token and JWT masked, no request header in any file"))
+    print("— 0b/3 the contrast scanner, on two pages of its own", flush=True)
+    checks.extend(contrast_selftest())
     with Preview(dist, args.port, out / "preview.log") as pv:
         print("— 1/3 replay as admin, 1440, light + dark", flush=True)
         normal = replay(ReplayCfg(dist=dist, rec_dir=FIXTURE, out=out / "replay", widths=[1440], themes=["light", "dark"], only=set(pages),
@@ -2423,6 +2841,10 @@ def selftest(args) -> int:
     checks.append((len(rep_hops) >= 1, "S8 measured the salesman tab bar: " + "; ".join(h["from"] + "→" + h["to"] + " " + str(h["paint_ms"]) + " ms" for h in rep_hops)))
     rep_crash = [f for f in rep.fails if f["check"] in ("page-crash", "harness-error", "page-error")]
     checks.append((not rep_crash, "no crash in the salesman pass" + ("" if not rep_crash else ": " + rep_crash[0]["detail"][:120])))
+    scanned = [r for r in normal.runs if r.page in pages and r.metrics.get("contrast")]
+    checks.append((len(scanned) == len(pages) * 2 and all(r.metrics["contrast"]["checked"] > 0 for r in scanned),
+                   "the contrast scan ran on every fixture page in both themes (" + str(len(scanned)) + " scans, "
+                   + str(sum(r.metrics["contrast"]["checked"] for r in scanned)) + " text runs scored)"))
 
     print("")
     print("SELFTEST — " + str(round(time.time() - t0)) + " s · output " + str(out))
@@ -2432,6 +2854,12 @@ def selftest(args) -> int:
     print("what the replay found (fixture pages, 1440, light + dark):")
     for f in normal.fails + normal.warns:
         print("  " + f["level"].upper().ljust(5) + " " + f["check"] + " · " + f["page"] + " · " + f["theme"] + " · " + f["detail"][:150])
+    print("contrast (WCAG AA) on the fixture pages, 1440:")
+    for r in normal.runs:
+        c = r.metrics.get("contrast")
+        if c:
+            print("  " + r.page.ljust(12) + r.theme.ljust(6) + str(c["checked"]).rjust(4) + " scored, " + str(c["unknown"]).rjust(3) + " unknown, "
+                  + str(c["body_fail"]).rjust(3) + " body text below 4.5:1, " + str(c["large_fail"]) + " large below 3:1")
     print("what --fail-api found:")
     for r in failing.runs:
         if r.page in pages or r.page in CANARIES:
@@ -2461,7 +2889,7 @@ def main() -> int:
     ap.add_argument("--rep", default="", help="--record: also fetch the endpoints that take ?rep= as this rep (a Focus name or a salesman id), for --as salesman")
     ap.add_argument("--wait-min", type=float, default=10, help="--record: minutes to wait for the sign-in (default 10)")
     ap.add_argument("--out", default="", help="output folder: --record writes <out>/rec/; --replay writes results.json, index.md, misses.json, shots/")
-    ap.add_argument("--dist", default="", help="--replay: a built portal folder (web/dist)")
+    ap.add_argument("--dist", default="", help="--replay / --selftest: a built portal folder (default for --selftest: web/dist)")
     ap.add_argument("--rec", default="", help="--replay: the folder that holds rec/ (what --record wrote)")
     ap.add_argument("--as", dest="as_role", choices=("admin", "salesman"), default="admin", help="--replay: who the fake /me says you are")
     ap.add_argument("--widths", default="390,1024,1440", help="--replay: comma-separated widths; under 768 is a touch phone (390x844)")
@@ -2472,6 +2900,7 @@ def main() -> int:
     ap.add_argument("--clock", choices=("recorded", "real"), default="recorded", help="--replay: the page's date — the recording's (default) or today")
     ap.add_argument("--no-smooth", action="store_true", help="--replay: skip S1 scroll jank and S4 Back")
     ap.add_argument("--no-nav", action="store_true", help="--replay: skip the S8 menu chain")
+    ap.add_argument("--no-contrast", action="store_true", help="--replay: skip the WCAG AA contrast scan of every page")
     args = ap.parse_args()
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -2506,7 +2935,7 @@ def main() -> int:
     cfg = ReplayCfg(dist=dist, rec_dir=Path(args.rec).resolve(), out=out, as_role=args.as_role,
                     widths=[int(w) for w in args.widths.split(",") if w.strip()], themes=themes or ["light"],
                     only={k.strip() for k in args.only.split(",") if k.strip()}, port=args.port, fail_api=args.fail_api,
-                    clock=args.clock, smooth=not args.no_smooth, nav=not args.no_nav)
+                    clock=args.clock, smooth=not args.no_smooth, nav=not args.no_nav, contrast=not args.no_contrast)
     report = replay(cfg)
     print_summary(report)
     return 1 if report.fails else 0

@@ -394,7 +394,7 @@ export default function Salesmen() {
 
   return (
     <div>
-      <PageHeader title="Salesmen" subtitle="Referral links, QR codes, Focus mapping, monthly attainment and kickback statements"
+      <PageHeader title="Reps & statements" subtitle="Referral links, QR codes, Focus mapping, monthly attainment and kickback statements"
         actions={tab === 'reps' ? <Button size="sm" onClick={() => setEdit({})}><Plus size={15} /> Add salesman</Button> : undefined} />
 
       <div role="tablist" aria-label="Salesmen views" className="mb-4 inline-grid auto-cols-fr grid-flow-col rounded-xl border border-border bg-card p-1">
