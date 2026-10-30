@@ -24,7 +24,7 @@ import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { KpiTile, type KpiTone } from '@/components/ui/kpi-tile'
-import { firstNameOf, greeting } from '@/lib/greeting'
+import { firstNameOf, greeting as greetingFor } from '@/lib/greeting'
 import { Skeleton } from '@/components/ui/skeleton'
 
 interface Kpis {
@@ -422,7 +422,7 @@ export default function Dashboard() {
 
   const nActions = data?.actions?.length ?? 0
   // the top bar's greeting, word for word (lib/greeting: one helper, one set of hours)
-  const hello = greeting(firstNameOf(me?.full_name, me?.email))
+  const greeting = greetingFor(firstNameOf(me?.full_name, me?.email))
   const focus = nActions > 0
     ? `${nActions} thing${nActions === 1 ? '' : 's'} need${nActions === 1 ? 's' : ''} your attention today`
     : 'All clear — nothing needs your attention right now'
@@ -431,7 +431,7 @@ export default function Dashboard() {
     <div>
       {/* the scope pill: what the page counts, in the API's own sentence on hover — quiet, the look of the
           header's freshness chip */}
-      <PageHeader title={hello} subtitle={state === 'ready' ? focus : 'Mobile Accessories Intelligence'}
+      <PageHeader title={greeting} subtitle={state === 'ready' ? focus : 'Mobile Accessories Intelligence'}
         actions={accOnly ? (
           <span title={data?.scope?.text}
             className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">

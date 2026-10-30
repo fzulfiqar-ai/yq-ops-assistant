@@ -40,7 +40,7 @@ function ok(v, what = '') {
 const css = read('index.css')
 const cssCode = code(css)
 const tw = readWeb('tailwind.config.js')
-const root = (cssCode.match(/:root\s*\{([\s\S]*?)\}/) || [])[1] || ''
+const root = (cssCode.match(/:root[^{]*\{([\s\S]*?)\}/) || [])[1] || ''
 const dark = (cssCode.match(/\[data-theme='dark'\]\s*\{([\s\S]*?)\}/) || [])[1] || ''
 const token = (block, name) => ((block.match(new RegExp(`--${name}:\\s*([^;]+);`)) || [])[1] || '').trim()
 
@@ -68,7 +68,8 @@ check('the radius scale climbs: 2xl is never smaller than xl', () => {
   const rem = Number((root.match(/--radius:\s*([\d.]+)rem/) || [])[1])
   ok(rem > 0, '--radius in rem')
   const px = (name) => {
-    const v = (tw.match(new RegExp(`['"]?${name}['"]?:\\s*'([^']+)'`)) || [])[1]
+    // the key alone: 'xl' must not match inside '2xl'
+    const v = (tw.match(new RegExp(`(?<![\\w'"])['"]?${name}['"]?:\\s*'([^']+)'`)) || [])[1]
     if (!v) return null
     if (v === 'var(--radius)') return rem * 16
     const m = v.match(/^calc\(var\(--radius\)\s*([+-])\s*(\d+)px\)$/)
@@ -153,7 +154,8 @@ check('one greeting helper: the top bar and the Dashboard read lib/greeting', ()
 check('the shortcut hint says Ctrl K on Windows and ⌘K only on a Mac', () => {
   const shell = code(read('components/AppShell.tsx'))
   ok(!/>⌘K</.test(shell), 'no hard-coded ⌘K in the top bar')
-  const helper = code(read('lib/greeting.ts'))
+  ok(/from '@\/lib\/shortcut'/.test(shell) && /shortcutHint\(\)/.test(shell), 'the top bar prints shortcutHint()')
+  const helper = code(read('lib/shortcut.ts'))
   ok(/Mac|iPhone|iPad/.test(helper) && /Ctrl/.test(helper), 'the hint is chosen by the platform')
 })
 
