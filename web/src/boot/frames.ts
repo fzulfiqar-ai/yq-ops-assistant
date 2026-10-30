@@ -61,6 +61,14 @@ export const PORTAL_BOOT_CSS = [
   `@keyframes yqb-out{to{opacity:0;visibility:hidden}}`,
   `html:not([data-boot]) #yq-boot,html[data-boot=off] #yq-boot{display:none}`,
   `html[data-boot=plain] #yq-boot{z-index:-1;animation:none}`,
+  // The frame's base on <body> itself, so a frame the browser paints while it is still parsing — after
+  // <body>, before the node (seen once at 4x CPU on a loaded machine) — is the night or the shell's
+  // sidebar and bars, never the bare canvas. boot/handoff.ts drops html[data-boot] with the node.
+  `html[data-boot=night] body,html[data-boot=plain] body{background:#140F24}`,
+  `html[data-boot=shell] body{background:linear-gradient(${LINE},${LINE}) 0 64px/100% 1px no-repeat,${BG}}`,
+  `html[data-boot=sales] body{background:linear-gradient(#fff,#fff) 0 0/100% 56px no-repeat,linear-gradient(${S_LINE},${S_LINE}) 0 56px/100% 1px no-repeat,${S_BG}}`,
+  `@media(min-width:1024px){html[data-boot=shell] body{background:${SIDE} 0 0/260px 100% no-repeat,linear-gradient(${LINE},${LINE}) 260px 64px/100% 1px no-repeat,${BG}}html[data-boot=shell][data-boot-rail=narrow] body{background-size:76px 100%,100% 1px,auto;background-position:0 0,76px 64px,0 0}html[data-boot=sales] body{background:linear-gradient(#fff,#fff) 0 0/64px 100% no-repeat,linear-gradient(${S_LINE},${S_LINE}) 64px 0/1px 100% no-repeat,${S_BG}}}`,
+  `@media(min-width:1280px){html[data-boot=sales]:not([data-boot-rail=narrow]) body{background-size:240px 100%,1px 100%,auto;background-position:0 0,240px 0,0 0}}`,
   // a frame: hidden unless it is the one portal-boot.js picked, or React's copy of it (data-on)
   `.yqb{display:none;position:fixed;inset:0;overflow:hidden;pointer-events:none}`,
   `html[data-boot=night] #yq-boot>.yqb-night,html[data-boot=plain] #yq-boot>.yqb-plain,html[data-boot=shell] #yq-boot>.yqb-shell,html[data-boot=sales] #yq-boot>.yqb-sales,.yqb[data-on]{display:block}`,

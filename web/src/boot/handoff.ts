@@ -14,6 +14,8 @@ import { BOOT_ID } from './frames'
  */
 export function releaseBoot(): void {
   document.getElementById(BOOT_ID)?.remove()
+  // the frame's base painted on <body> (frames.ts) goes with it: the page's own background is back
+  document.documentElement.removeAttribute('data-boot')
 }
 
 export function useReleaseBoot(): void {
