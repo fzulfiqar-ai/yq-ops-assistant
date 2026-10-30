@@ -408,3 +408,52 @@ cart priced locally. It prints PASS or FAIL per check and what the replay found 
   a miss (listed), not an answer.
 - Only page loads, the menu and Back are driven: dialogs, forms and sheets are not opened.
 - iOS safe-area insets cannot be simulated in Chromium.
+
+# Salesman render check
+
+`web/scripts/sales_render_check.py` drives what `portal_qa.py` does not: the reps' flows in the
+salesman app (SalesmanShell, `pages/sales/*`, `pages/shop/*`), on **invented** data, with no
+recording, no account and no network. It is the salesman twin of `web/scripts/admin_render_check.py`:
+a fake session and a cached salesman `/me` in localStorage, every API call answered inside the
+browser from fixtures (or a 500, a delay, a hold), Supabase answered `{}`, everything else aborted.
+
+```bash
+# web/: npm run build && npx vite preview --outDir dist --port 5187 --strictPort   (web/.env must be present)
+python web/scripts/sales_render_check.py --url http://localhost:5187 --out <dir>
+python web/scripts/sales_render_check.py --list                          # the cases
+python web/scripts/sales_render_check.py --url … --only order,chrome@390 # some cases, or one width
+python web/scripts/sales_render_check.py --url … --allow-pending        # a base build without the shell's per-tab restore
+```
+
+Every case runs at a 390 × 844 touch phone and a 1366 × 768 desktop and prints one JSON line
+(`ok`, `fails`, `warnings`, `notes`, `shots`, the API calls and any call no fixture answered), then a
+summary line; screenshots go to `--out`. Exit 1 when any case fails. Screens are found by role, label
+and visible text, never by CSS class, so a restyle does not break a check — only a change in what a
+rep sees or can do does.
+
+| case | what must hold |
+|---|---|
+| `today`, `today_no_catalog` | the 5-tab shell renders Today and lights only Today; a tab the rep may not open (no Catalog feature) is not shown |
+| `catalog` | 180 lines, search narrows them (40 of 180), the list draws 48 at a time and keeps up with a scroll; S13 on the phone: inputs ≥ 16 px, primary tap targets ≥ 44 px |
+| `order` | pick a shop, add lines: "Checking prices…" and Place order off until the quote answers (S14, the quote is held); a double tap sends ONE order; Orders, the catalog's stock and the shop's usual basket are read again; the order is on the Orders list |
+| `quote_failed` | a failed quote offers Retry, never BHD 0.000 or "Free", Place order off; Retry prices the cart |
+| `shop_kept` | the shop and its cart survive a reload and the app being closed and opened again (a new tab: localStorage kept, sessionStorage gone); 11 h after the pick it is kept, 13 h after it is gone (the 12-hour rule) |
+| `sign_out` | asks first and says what is in progress; "Stay signed in" keeps everything; then the rep's carts, the shop and the catalog search are cleared, the device's list/grid choice and a customer's share-link cart stay |
+| `toast_over_sheet` | S11: a toast while a sheet is open is the top element at its own centre (the checkout's Undo, the order sheet's "Delivered."); Undo puts the removed line back |
+| `chrome` | S12 on the phone: fixed and stuck chrome ≤ 200 px while scrolling the catalog with a cart (portal_qa's measure); on the desktop the docked order slip stays in view |
+| `today_failed`, `customers_failed`, `catalog_failed`, `orders_failed` | a failed load says so with Try again, never an empty "nothing here"; Try again asks again and the page comes back |
+| `back_keeps_place` | S4: closing a product keeps the list's place; Back from another tab returns to it (warns when Back with a product open leaves the catalog) |
+| `tab_keeps_place` | S4 per tab: Catalog → Orders tab → Catalog tab returns to where the list was — **pending** on the 2307ac4 base (it lands at the top until the shell's per-tab restore); `--allow-pending` keeps a pending failure out of the exit code. Run integrated builds without it. |
+
+Warnings never fail the run: they are design residuals for the owner (on 2307ac4: at rest, the
+floating Spotted button sits on a catalog line's Qty and "+"; Back with a product open leaves the
+catalog, as the product sheet takes no history entry).
+
+Proved both ways: on `0c6776b` (before the salesman field-proofing merge) it fails on the defects
+the audit listed (the Catalog tab without permission, all 180 lines at once, 15 px search, 0.000 /
+"Free" before the quote, no Retry, the shop lost when the app closes, a one-tap sign-out, toasts
+under sheets, no Undo, 385 px of chrome); on `2307ac4` every case passes but `tab_keeps_place`.
+
+Limits: the data is invented (180 lines, 8 shops, 2 orders), so this proves the flows, not the
+numbers; timings are not measured (`portal_qa.py` and `smooth.py` do that); iOS keyboards and safe
+areas cannot be simulated in Chromium.
