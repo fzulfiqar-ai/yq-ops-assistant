@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDownRight, ArrowUpRight, History, LineChart, X } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight, History, LineChart } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, fmtDate } from '@/lib/format'
-import { BodyPortal } from '@/components/BodyPortal'
+import { Sheet } from '@/components/ui/sheet'
 import { PageHeader } from '@/components/PageHeader'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DataTable, type Column } from '@/components/DataTable'
@@ -49,18 +49,10 @@ function HistoryDialog({ row, onClose }: { row: Row; onClose: () => void }) {
     queryKey: ['price-history', row.sku_code],
     queryFn: () => apiGet<HistData>(`/prices/history?sku=${encodeURIComponent(row.sku_code)}`),
   })
+  // a portal sheet (ship 2): Esc, a focus trap, the slide in and out; a bottom sheet on a phone
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border bg-card p-5 shadow-luxe"
-        onClick={(e) => e.stopPropagation()}>
-        <div className="mb-1 flex items-start justify-between gap-3">
-          <div>
-            <div className="font-display text-lg font-bold">{row.sku_code}</div>
-            <div className="text-xs text-muted-foreground">{row.item_name}</div>
-          </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60"><X size={16} /></button>
-        </div>
+    <Sheet open onClose={onClose} size="lg" title={row.sku_code} subtitle={row.item_name || undefined}>
+      <div className="p-4 sm:p-5">
         <div className="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-[13px]">
           {row.sell_now != null && <span className="text-muted-foreground">Selling <b className="text-foreground tabular-nums">{bhd(Number(row.sell_now), 3)}</b></span>}
           {row.cost_now != null && <span className="text-muted-foreground">Cost now <b className="text-foreground tabular-nums">{bhd(Number(row.cost_now), 3)}</b></span>}
@@ -119,8 +111,7 @@ function HistoryDialog({ row, onClose }: { row: Row; onClose: () => void }) {
           </>
         )}
       </div>
-    </div>
-    </BodyPortal>
+    </Sheet>
   )
 }
 

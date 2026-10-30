@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Search, CornerDownLeft, User, Package, BadgeCheck, Loader2 } from 'lucide-react'
@@ -75,11 +76,12 @@ export function CommandPalette() {
 
   function go(to: string) { setOpen(false); nav(to) }
 
-  return (
+  // Portalled to <body> (ship 2, 30-Oct-2026): the portal's drawers and dialogs are sheets there now
+  // (components/ui/sheet, z-50, outside the intro's isolated app layer), so z-[60] keeps the palette above an
+  // open one, as before; still under the toasts (z-[100], also in <body>)
+  return createPortal(
     <AnimatePresence>
       {open && (
-        // z-[60]: above a page's own drawer or dialog (BodyPortal puts those, z-50, beside <main> — later in
-        // the DOM, so a tie at z-50 would paint them over the palette); still under the toasts (z-[100])
         <motion.div
           className="fixed inset-0 z-[60] flex items-start justify-center bg-black/50 p-4 pt-[12vh] backdrop-blur-md"
           initial={still ? false : { opacity: 0 }} animate={{ opacity: 1 }}
@@ -155,6 +157,7 @@ export function CommandPalette() {
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   )
 }

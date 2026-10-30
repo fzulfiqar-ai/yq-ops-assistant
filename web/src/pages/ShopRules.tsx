@@ -1,15 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, X, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes, Megaphone, Archive, ArchiveRestore, BarChart3, Info } from 'lucide-react'
+import { Plus, Pencil, Trash2, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes, Megaphone, Archive, ArchiveRestore, BarChart3, Info } from 'lucide-react'
 import { CampaignsSection } from '@/pages/shop-ops/CampaignsSection'
 import { apiGet, apiPost, apiPatch, apiDelete } from '@/lib/api'
 import { errorText } from '@/lib/errorText'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd, num } from '@/lib/format'
-import { BodyPortal } from '@/components/BodyPortal'
+import { Sheet } from '@/components/ui/sheet'
 import { PageHeader } from '@/components/PageHeader'
-import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -477,17 +476,22 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
     }
   }
 
+  // a portal sheet (ship 2): Esc, a focus trap, the slide in and out; the actions stay pinned under
+  // the scrolling form (on a phone, above the keyboard)
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-start justify-center py-4 sm:items-center sm:py-8">
-        <Card className="w-full max-w-2xl p-0" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center justify-between border-b px-5 py-4">
-            <div className="font-display text-base font-semibold">{isNew ? 'New rule' : `Edit ${rule?.name || 'rule'}`}</div>
-            <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={18} /></button>
-          </div>
-
-          <div className="max-h-[65vh] space-y-4 overflow-y-auto px-5 py-4">
+    <Sheet open onClose={onClose} title={isNew ? 'New rule' : `Edit ${rule?.name || 'rule'}`}
+      footer={
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="button" variant="outline" onClick={doPreview} disabled={busy !== null}>
+            {busy === 'preview' ? <Loader2 className="animate-spin" size={15} /> : <Eye size={15} />} Preview impact
+          </Button>
+          <Button type="button" onClick={doSave} disabled={busy !== null}>
+            {busy === 'save' ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save
+          </Button>
+        </div>
+      }>
+          <div className="space-y-4 px-4 py-4 sm:px-5">
             {formError && (
               <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-[13px] text-rose-700">
                 <AlertTriangle size={15} className="mt-0.5 shrink-0" />
@@ -664,20 +668,7 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
               </div>
             )}
           </div>
-
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t px-5 py-4">
-            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="button" variant="outline" onClick={doPreview} disabled={busy !== null}>
-              {busy === 'preview' ? <Loader2 className="animate-spin" size={15} /> : <Eye size={15} />} Preview impact
-            </Button>
-            <Button type="button" onClick={doSave} disabled={busy !== null}>
-              {busy === 'save' ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save
-            </Button>
-          </div>
-        </Card>
-      </div>
-    </div>
-    </BodyPortal>
+    </Sheet>
   )
 }
 

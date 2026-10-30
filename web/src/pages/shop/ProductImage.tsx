@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type SyntheticEvent } from 'react'
 import { Package } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -7,7 +7,42 @@ import { cn } from '@/lib/utils'
  * needs), then the full product shot, then an honest "Photo coming soon" card.
  * ~21 of the 182 items have no photo yet, so the empty state is a first-class
  * state, not an error.
+ *
+ * Photo fade-in (ship 2, 30-Oct-2026; the marketplace's market/ui/ProductImage pattern): until the
+ * photo decodes, a soft tint lies over the white tile; then the tint fades away (200 ms) and the
+ * photo is there. The state is the tile's `data-state`, flipped by the image's own load event: no
+ * React render per photo, so a fast flick past forty rows costs nothing but the fades. A photo already
+ * in the cache, or one that decodes while the list is scrolling, shows at once (`data-instant`).
+ * The tint sits above the photo (::after), so a card's own hover zoom on the <img> keeps its transition.
  */
+
+/* Smart fade: only a photo that lands on a page at rest fades; one that decodes mid-scroll shows at
+ * once over its tint. One passive capture listener for the whole page (the catalog's own scrollers
+ * included); nothing per photo. */
+let lastScroll = -1e9
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'scroll',
+    () => {
+      lastScroll = performance.now()
+    },
+    { passive: true, capture: true },
+  )
+}
+const SETTLE_MS = 150
+
+/** the photo decoded: its tile drops the tint (at once, mid-scroll) */
+function shown(img: HTMLImageElement | null, instant = false) {
+  const tile = img?.parentElement
+  if (!tile || tile.dataset.state === 'in') return
+  if (instant || performance.now() - lastScroll < SETTLE_MS) tile.dataset.instant = ''
+  tile.dataset.state = 'in'
+}
+
+/** a photo already complete when it mounts (memory cache) shows at once, before the first paint */
+function cached(img: HTMLImageElement | null) {
+  if (img && img.complete && img.naturalWidth > 0) shown(img, true)
+}
 
 export interface ProductImageProps {
   srcs: (string | null | undefined)[]
@@ -21,6 +56,10 @@ export interface ProductImageProps {
   showCaption?: boolean
   eager?: boolean
 }
+
+// the tint: a light plum-grey wash over the white tile while the photo decodes; opacity only
+const TINT =
+  "after:pointer-events-none after:absolute after:inset-0 after:bg-[#F1EDF5] after:content-[''] after:transition-opacity after:duration-200 after:ease-[cubic-bezier(.22,1,.36,1)] data-[state=in]:after:opacity-0 data-[instant]:after:transition-none"
 
 export function ProductImage({
   srcs,
@@ -56,8 +95,10 @@ export function ProductImage({
   }
 
   return (
-    <div className={cn('bg-white', className)}>
+    // keyed to the photo: another photo in the same tile starts again from the tint
+    <div key={src} className={cn('relative bg-white', TINT, className)} data-state="wait">
       <img
+        ref={cached}
         src={src}
         alt={alt}
         width={width}
@@ -67,6 +108,7 @@ export function ProductImage({
         // the above-the-fold photos are the largest paint: ask the browser for them first
         fetchPriority={eager ? 'high' : undefined}
         draggable={false}
+        onLoad={(e: SyntheticEvent<HTMLImageElement>) => shown(e.currentTarget)}
         onError={() => setFailed({ key, idx: idx + 1 })}
         className={cn('h-full w-full object-contain', imgClassName)}
       />

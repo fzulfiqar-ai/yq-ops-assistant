@@ -601,7 +601,10 @@ export default function Orders() {
             )}
           </div>
           <Card className="overflow-hidden">
-            <div className="max-h-[360px] overflow-y-auto">
+            {/* a phone scrolls the table sideways inside the card, with the edge hint (the other three tables'
+                ScrollX); the box that scrolls it down is as wide as the table, so its header still sticks */}
+            <ScrollX>
+            <div className="max-h-[360px] w-max min-w-full overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-card">
                   <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -634,6 +637,7 @@ export default function Orders() {
                 </tbody>
               </table>
             </div>
+            </ScrollX>
           </Card>
           <div className="mt-2 px-1 text-[11px] text-muted-foreground">From your VFAN proforma invoices (after 18% discount). Drop a new invoice above to update.</div>
         </div>

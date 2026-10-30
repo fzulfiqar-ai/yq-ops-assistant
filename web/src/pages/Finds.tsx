@@ -9,7 +9,7 @@ import { apiGet, apiPost, apiPatch, apiDelete, apiUpload, apiSend } from '@/lib/
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
-import { BodyPortal } from '@/components/BodyPortal'
+import { Sheet } from '@/components/ui/sheet'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -166,26 +166,25 @@ function PromoteDialog({ f, onClose, onDone }: { f: Find; onClose: () => void; o
       onDone()
     } catch { toast('Promote failed.', 'error') } finally { setBusy(false) }
   }
+  // portal sheets (ship 2), all three dialogs here: Esc, a focus trap, the slide in and out; the
+  // code field keeps its autoFocus (lib/sheet initialFocus), and Enter promotes
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-1 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">Promote to catalog</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
+    <Sheet open onClose={onClose} size="sm" title="Promote to catalog"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={go} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Promote</Button>
         </div>
+      }>
+      <div className="p-4 sm:p-5">
         <p className="mb-3 text-[13px] text-muted-foreground">
           Creates a catalog item (with this photo) as <b>hidden</b>. It goes live automatically once its
           SKU appears in your MA price-book upload.
         </p>
-        <Input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="Item code / SKU (e.g. X21)" autoFocus />
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={go} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Promote</Button>
-        </div>
-      </Card>
-    </div>
-    </BodyPortal>
+        <Input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="Item code / SKU (e.g. X21)" autoFocus
+          onKeyDown={(e) => { if (e.key === 'Enter' && !busy) { e.preventDefault(); void go() } }} />
+      </div>
+    </Sheet>
   )
 }
 
@@ -211,14 +210,14 @@ function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void;
   }
 
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center">
-        <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-3 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">Edit find</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
+    <Sheet open onClose={onClose} size="md" title="Edit find"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
         </div>
+      }>
+      <div className="p-4 sm:p-5">
         {f.image_url && <img src={f.image_url} alt="" className="mx-auto mb-3 max-h-32 rounded-xl border object-contain p-2" />}
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
@@ -234,14 +233,8 @@ function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void;
               placeholder="Price details, where it was seen, MOQ, competitor…"
               className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm outline-none transition focus:border-primary/50" /></label>
         </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
-        </div>
-        </Card>
       </div>
-    </div>
-    </BodyPortal>
+    </Sheet>
   )
 }
 
@@ -318,13 +311,8 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
   })
   const url = data?.url?.startsWith('http') ? data.url : data ? `${window.location.origin}${data.url}` : ''
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-1 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">Share the finds board</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
-        </div>
+    <Sheet open onClose={onClose} size="md" title="Share the finds board">
+      <div className="p-4 sm:p-5">
         <p className="mb-4 text-sm text-muted-foreground">
           Anyone with this link can browse the product finds — <b>no login</b>. Rotate it any time to revoke old links.
         </p>
@@ -346,9 +334,8 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
             </div>
           </>
         ) : <Skeleton className="h-10" />}
-      </Card>
-    </div>
-    </BodyPortal>
+      </div>
+    </Sheet>
   )
 }
 

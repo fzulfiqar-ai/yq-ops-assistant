@@ -1,13 +1,13 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Radar, Loader2, Phone, Globe, MapPin, Target, ClipboardCopy, ChevronRight, Sparkles,
-  Pencil, Wand2, Mail, X, Check, UserRound,
+  Pencil, Wand2, Mail, Check, UserRound,
 } from 'lucide-react'
 import { apiGet, apiPost, apiSend } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { panelState } from '@/lib/dataState'
-import { BodyPortal } from '@/components/BodyPortal'
+import { Sheet } from '@/components/ui/sheet'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { useToast } from '@/components/Toast'
@@ -65,6 +65,7 @@ function LeadEditDialog({ lead, onClose, onSaved }: { lead: Lead; onClose: () =>
   const [f, setF] = useState<Record<string, string>>(
     Object.fromEntries(EDIT_FIELDS.map(({ key }) => [key, String(lead[key] ?? '')])))
   const [busy, setBusy] = useState(false)
+  const formId = useId()
   async function save(e: FormEvent) {
     e.preventDefault()
     setBusy(true)
@@ -76,30 +77,26 @@ function LeadEditDialog({ lead, onClose, onSaved }: { lead: Lead; onClose: () =>
     } catch { toast('Could not save.', 'error') }
     finally { setBusy(false) }
   }
+  // a portal sheet (ship 2): Esc, a focus trap, the slide in and out; on a phone a bottom sheet whose
+  // Save stays pinned above the keyboard (the footer's submit belongs to the form through form=)
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-3 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">Edit {lead.name}</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
+    <Sheet open onClose={onClose} size="md" title={`Edit ${lead.name}`}
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="submit" form={formId} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
         </div>
-        <form onSubmit={save} className="space-y-2.5">
-          {EDIT_FIELDS.map(({ key, label, placeholder }) => (
-            <label key={key} className="block">
-              <span className="mb-1 block text-xs font-semibold text-muted-foreground">{label}</span>
-              <Input value={f[key]} placeholder={placeholder}
-                onChange={(e) => setF((s) => ({ ...s, [key]: e.target.value }))} />
-            </label>
-          ))}
-          <div className="flex justify-end gap-2 pt-1">
-            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
-          </div>
-        </form>
-      </Card>
-    </div>
-    </BodyPortal>
+      }>
+      <form id={formId} onSubmit={save} className="space-y-2.5 p-4 sm:p-5">
+        {EDIT_FIELDS.map(({ key, label, placeholder }) => (
+          <label key={key} className="block">
+            <span className="mb-1 block text-xs font-semibold text-muted-foreground">{label}</span>
+            <Input value={f[key]} placeholder={placeholder}
+              onChange={(e) => setF((s) => ({ ...s, [key]: e.target.value }))} />
+          </label>
+        ))}
+      </form>
+    </Sheet>
   )
 }
 

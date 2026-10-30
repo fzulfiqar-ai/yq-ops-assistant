@@ -1,14 +1,13 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useId, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Copy, ExternalLink, QrCode, X, Check, Loader2, UserX, ChevronDown } from 'lucide-react'
+import { Plus, Pencil, Trash2, Copy, ExternalLink, QrCode, Check, Loader2, UserX, ChevronDown } from 'lucide-react'
 import { apiGet, apiPost, apiPatch, apiDelete, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { num } from '@/lib/format'
-import { BodyPortal } from '@/components/BodyPortal'
+import { Sheet } from '@/components/ui/sheet'
 import { PageHeader } from '@/components/PageHeader'
-import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -155,14 +154,10 @@ function sanitizeCode(s: string): string {
 
 function QrDialog({ salesman, onClose }: { salesman: Salesman; onClose: () => void }) {
   const { blobUrl, loading } = useAuthedBlob(`/shop/salesmen/${salesman.id}/qr.png`)
+  // portal sheets (ship 2), both dialogs here: Esc, a focus trap, the slide in and out
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="w-full max-w-xs p-5 text-center" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-3 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">{salesman.name}'s QR</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
-        </div>
+    <Sheet open onClose={onClose} size="xs" title={`${salesman.name}'s QR`}>
+      <div className="p-4 text-center sm:p-5">
         {loading ? (
           <Skeleton className="mx-auto h-48 w-48" />
         ) : blobUrl ? (
@@ -171,9 +166,8 @@ function QrDialog({ salesman, onClose }: { salesman: Salesman; onClose: () => vo
           <p className="py-12 text-sm text-muted-foreground">Could not load the QR code.</p>
         )}
         <p className="mt-3 text-[12px] text-muted-foreground">Customers scan this to open {salesman.name}'s catalog link.</p>
-      </Card>
-    </div>
-    </BodyPortal>
+      </div>
+    </Sheet>
   )
 }
 
@@ -190,6 +184,7 @@ function SalesmanDialog({
   const [f, setF] = useState<Partial<Salesman>>({ is_active: true, notify_email: true, notify_whatsapp: true, ...s })
   const [codeTouched, setCodeTouched] = useState(!isNew)
   const [busy, setBusy] = useState(false)
+  const formId = useId()
   const set = (k: keyof Salesman, v: unknown) => setF((prev) => ({ ...prev, [k]: v }))
 
   function onNameChange(v: string) {
@@ -229,16 +224,16 @@ function SalesmanDialog({
     }
   }
 
+  // Save sits in the pinned footer (above a phone's keyboard) and submits the form through form=
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center">
-        <Card className="w-full max-w-lg p-5" onClick={(e) => e.stopPropagation()}>
-          <div className="mb-4 flex items-center justify-between">
-            <div className="font-display text-base font-semibold">{isNew ? 'Add salesman' : `Edit ${f.name}`}</div>
-            <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
-          </div>
-          <form onSubmit={save} className="space-y-3">
+    <Sheet open onClose={onClose} size="lg" title={isNew ? 'Add salesman' : `Edit ${f.name}`}
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="submit" form={formId} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
+        </div>
+      }>
+          <form id={formId} onSubmit={save} className="space-y-3 p-4 sm:p-5">
             <div className="grid grid-cols-2 gap-3">
               <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Name *</span>
                 <Input value={f.name || ''} onChange={(e) => onNameChange(e.target.value)} placeholder="Full name" /></label>
@@ -290,15 +285,8 @@ function SalesmanDialog({
             <p className="rounded-lg bg-secondary/50 px-3 py-2 text-[12px] text-muted-foreground">
               Contact details are stored in the database only — never committed to the repo.
             </p>
-            <div className="flex justify-end gap-2 pt-1">
-              <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-              <Button type="submit" disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
-            </div>
           </form>
-        </Card>
-      </div>
-    </div>
-    </BodyPortal>
+    </Sheet>
   )
 }
 

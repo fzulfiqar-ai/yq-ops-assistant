@@ -1,8 +1,8 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useId, useMemo, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'motion/react'
 import {
-  Search, Download, Share2, Plus, Pencil, X, Loader2, Check,
+  Search, Download, Share2, Plus, Pencil, Loader2, Check,
   ImagePlus, Copy, MessageCircle, RefreshCw, Package, Camera, FileText, FileSpreadsheet,
 } from 'lucide-react'
 import { apiGet, apiPost, apiUpload, apiDownload, apiSend } from '@/lib/api'
@@ -11,7 +11,7 @@ import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { panelState } from '@/lib/dataState'
 import { LoadError } from '@/components/LoadError'
-import { BodyPortal } from '@/components/BodyPortal'
+import { Sheet } from '@/components/ui/sheet'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -164,19 +164,15 @@ function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => voi
     ['B2B · trade price', item.standard_rate],
     ['B2C · Causeway & Roadshow', item.b2c_rate],
   ] as const
+  // portal sheets (ship 2), all three dialogs here: Esc, a focus trap, the slide in and out
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="max-h-[90vh] w-full max-w-md overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-3 flex items-center justify-between">
-          <div>
-            <div className="font-display text-lg font-bold">{item.item_code}</div>
-            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.brand || 'VFAN'} · {(item.category || '').toLowerCase()}</div>
-            {item.stock_status && <div className="mt-1"><StockPill status={item.stock_status} /></div>}
-            <ReservedLine it={item} />
-          </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
-        </div>
+    <Sheet open onClose={onClose} size="md" title={item.item_code}
+      subtitle={`${item.brand || 'VFAN'} · ${(item.category || '').toLowerCase()}`}
+      header={<>
+        {item.stock_status && <div className="mt-1.5"><StockPill status={item.stock_status} /></div>}
+        <ReservedLine it={item} />
+      </>}>
+      <div className="p-4 sm:p-5">
         <div className="relative rounded-xl border bg-white">
           {img ? <img src={img} alt={item.item_code} className="mx-auto max-h-72 object-contain p-4" />
             : <div className="grid h-48 w-full place-items-center text-muted-foreground"><Package size={44} strokeWidth={1} /></div>}
@@ -196,9 +192,8 @@ function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => voi
             </div>
           ))}
         </div>
-      </Card>
-    </div>
-    </BodyPortal>
+      </div>
+    </Sheet>
   )
 }
 
@@ -207,6 +202,7 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
   const isNew = !item.item_code
   const [f, setF] = useState<Partial<CatalogItem>>({ brand: 'VFAN', is_active: true, ...item })
   const [busy, setBusy] = useState(false)
+  const formId = useId()
   const set = (k: keyof CatalogItem, v: unknown) => setF((s) => ({ ...s, [k]: v }))
 
   async function save(e: FormEvent) {
@@ -245,15 +241,16 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
     }
   }
 
+  // Save sits in the pinned footer (above a phone's keyboard) and submits the form through form=
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="max-h-[90vh] w-full max-w-lg overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-4 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">{isNew ? 'Add catalog item' : `Edit ${f.item_code}`}</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
+    <Sheet open onClose={onClose} size="lg" title={isNew ? 'Add catalog item' : `Edit ${f.item_code}`}
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="submit" form={formId} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
         </div>
-        <form onSubmit={save} className="space-y-3">
+      }>
+        <form id={formId} onSubmit={save} className="space-y-3 p-4 sm:p-5">
           <div className="grid grid-cols-2 gap-3">
             <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Item code *</span>
               <Input value={f.item_code || ''} disabled={!isNew} onChange={(e) => set('item_code', e.target.value)} placeholder="e.g. X21" /></label>
@@ -288,14 +285,8 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
             <input type="checkbox" checked={f.is_active !== false} onChange={(e) => set('is_active', e.target.checked)} />
             Visible in the catalog
           </label>
-          <div className="flex justify-end gap-2 pt-1">
-            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
-          </div>
         </form>
-      </Card>
-    </div>
-    </BodyPortal>
+    </Sheet>
   )
 }
 
@@ -311,13 +302,8 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
   const url = data?.url?.startsWith('http') ? data.url : data ? `${window.location.origin}${data.url}` : ''
   const waText = encodeURIComponent(`Hello! Here is the latest YQ Bahrain VFAN accessories catalog with prices: ${url}`)
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-1 flex items-center justify-between">
-          <div className="font-display text-base font-semibold">Share with customers</div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
-        </div>
+    <Sheet open onClose={onClose} size="md" title="Share with customers">
+      <div className="p-4 sm:p-5">
         <p className="mb-4 text-sm text-muted-foreground">
           Customers see items, photos, the <b>B2B trade price</b> and the <b>B2C price</b> — always
           current, straight from your latest price-book upload.
@@ -348,9 +334,8 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
         ) : (
           <Skeleton className="h-10" />
         )}
-      </Card>
-    </div>
-    </BodyPortal>
+      </div>
+    </Sheet>
   )
 }
 

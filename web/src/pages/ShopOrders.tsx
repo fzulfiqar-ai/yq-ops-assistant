@@ -23,7 +23,6 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
-import { BodyPortal } from '@/components/BodyPortal'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import {
   AssignBox, AssignmentQueue, CancelReasonPicker, FocusExceptionsPanel, FocusLinkBox, ReturnBox,
@@ -778,17 +777,74 @@ function OrderDrawer({
   const stamp = data?.stamp_label || (data ? STAMP_LABEL[data.status] : null)
   const hasFooter = Boolean(data) && !readOnly && !editing && (flow.actions.some((a) => a !== 'tell_shop') || flow.tellFirst)
 
-  // BodyPortal: left inside AppShell's <main> the drawer opened under the sticky top bar (R7e);
-  // the header sticks inside the drawer's own scroll so Close never scrolls away
+  // the actions, pinned under the scrolling order (the sheet's footer)
+  const actions = data && hasFooter ? (
+          <div className="space-y-2">
+            {mode === 'cancel' ? (
+              <div className="space-y-2 rounded-xl border border-[#f3c9d2] bg-[#fff7f8] p-3">
+                <CancelReasonPicker value={flow.cancel.reason_code} note={flow.cancel.note} onChange={flow.setCancel} />
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" variant="outline" className="h-11 flex-1 sm:h-9" onClick={() => { flow.setMode('view'); flow.setCancel({ reason_code: '', note: '' }) }} disabled={busy !== null}>Keep it</Button>
+                  <Button type="button" size="sm" variant="destructive" className="h-11 flex-1 sm:h-9" onClick={flow.cancelNow} disabled={busy !== null || !cancelReady(flow.cancel.reason_code, flow.cancel.note)}>
+                    {busy === 'cancel' ? <Loader2 className="animate-spin" size={14} /> : <X size={14} />} Yes, cancel {data.order_no}
+                  </Button>
+                </div>
+              </div>
+            ) : mode === 'reopen' ? (
+              <ReopenBox orderId={id} status={data.status} until={data.reopen_until}
+                onCancel={() => flow.setMode('view')} onDone={() => { flow.setMode('view'); flow.refetch() }} />
+            ) : (
+              <>
+                {flow.tellFirst && <TellShopButton orderId={id} url={flow.tellUrl} variant="primary" legacy={flow.legacy} onTapped={flow.clearStep} />}
+                {/* The forward step only (R7c). Received: Confirm first (it opens the editor), Cancel
+                   second — never just Cancel on its own (item 2, R7a). Confirmed: Delivered is one tap. */}
+                <div className="flex flex-wrap gap-2">
+                  {can('confirm') && (
+                    <Button type="button" onClick={() => flow.setMode('confirm')} disabled={unassigned || busy !== null} className="h-11 flex-1 sm:h-10">
+                      <Check size={14} /> Confirm order
+                    </Button>
+                  )}
+                  {can('deliver') && (
+                    <Button type="button" variant={flow.tellFirst ? 'outline' : 'default'} onClick={flow.deliverNow} disabled={busy !== null} className="h-11 flex-1 sm:h-10">
+                      {busy === 'deliver' ? <Loader2 className="animate-spin" size={14} /> : <Truck size={14} />} Delivered
+                    </Button>
+                  )}
+                  {can('reopen') && (
+                    <Button type="button" variant="outline" onClick={() => flow.setMode('reopen')} disabled={busy !== null} className="h-11 sm:h-10">
+                      <RotateCcw size={14} /> Reopen
+                    </Button>
+                  )}
+                  {can('cancel') && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => flow.setMode('cancel')} disabled={busy !== null}
+                      className="h-11 border-[#f3c9d2] text-[#9f1239] hover:bg-[#fff7f8] hover:text-[#9f1239] sm:h-10">
+                      <X size={14} /> Cancel order
+                    </Button>
+                  )}
+                </div>
+                {can('deliver') && (
+                  <div className="flex flex-wrap gap-x-4 text-[12.5px]">
+                    {!flow.legacy && (
+                      <button type="button" onClick={() => flow.setMode('deliver')} className="min-h-11 font-semibold text-primary hover:underline sm:min-h-0">Deliver with changes</button>
+                    )}
+                    {can('amend') && (
+                      <button type="button" onClick={() => flow.setMode('amend')} className="min-h-11 font-semibold text-primary hover:underline sm:min-h-0">Amend</button>
+                    )}
+                  </div>
+                )}
+                {unassigned && data.status === 'new' && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
+              </>
+            )}
+          </div>
+  ) : undefined
+
+  // A portal sheet (ship 2; it was hand-made under BodyPortal): Esc, a focus trap, the slide in and out,
+  // above the top bar and under the toasts. The order number, its chips and the stage track sit in the
+  // fixed header and the actions in the pinned footer, so Close and the next step never scroll away.
   return (
-    <BodyPortal>
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex h-full w-full flex-col overflow-y-auto bg-card shadow-lift sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b bg-card px-5 py-4">
-          <div className="min-w-0 flex-1">
-            <div className="font-display text-base font-semibold">{data?.order_no || 'Order'}</div>
-            {data && (
-              <div className="mt-1 flex flex-wrap items-center gap-1.5">
+    <Sheet open onClose={onClose} variant="drawer" size="lg" title={data?.order_no || 'Order'} footer={actions}
+      header={data ? (
+          <>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <StatusPill status={data.status} />
                 {stamp && <Badge tone="grey" title="The storekeeper's pick-list stamp — the order reads Confirmed">Pick list: {stamp}</Badge>}
                 <NotToldChip o={data} />
@@ -796,22 +852,19 @@ function OrderDrawer({
                 {!!data.returned_bhd && <Badge tone="rose">Returned {bhd(data.returned_bhd, 3)}</Badge>}
                 <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
               </div>
-            )}
-            {data && <div className="mt-3"><StageTrack order={data} /></div>}
-            {cancelled && data?.status === 'cancelled' && <div className="mt-1 text-[12px] text-muted-foreground">Cancelled · {cancelled}</div>}
+            <div className="mt-3"><StageTrack order={data} /></div>
+            {cancelled && data.status === 'cancelled' && <div className="mt-1 text-[12px] text-muted-foreground">Cancelled · {cancelled}</div>}
             {gap && <div className="mt-1 text-[12px] font-medium text-amber-700">{gap}</div>}
-          </div>
-          <button onClick={onClose} aria-label="Close" className="grid h-11 w-11 shrink-0 place-items-center rounded-lg hover:bg-accent sm:h-9 sm:w-9"><X size={18} /></button>
-        </div>
-
+          </>
+        ) : null}>
         {flow.isError && !data ? (
-          <div className="p-5">
+          <div className="p-4 sm:p-5">
             <LoadError error={flow.error} onRetry={() => flow.reread()} isRetrying={flow.isFetching} fallback="Could not load this order." />
           </div>
         ) : isLoading || !data ? (
-          <div className="space-y-2 p-5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
+          <div className="space-y-2 p-4 sm:p-5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
         ) : (
-          <div className="flex-1 space-y-5 p-5">
+          <div className="space-y-5 p-4 sm:p-5">
             <section>
               <div className="mb-1.5 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 <span>Salesman</span>
@@ -932,68 +985,7 @@ function OrderDrawer({
             )}
           </div>
         )}
-
-        {data && hasFooter && (
-          <div className="sticky bottom-0 space-y-2 border-t bg-card p-4">
-            {mode === 'cancel' ? (
-              <div className="space-y-2 rounded-xl border border-[#f3c9d2] bg-[#fff7f8] p-3">
-                <CancelReasonPicker value={flow.cancel.reason_code} note={flow.cancel.note} onChange={flow.setCancel} />
-                <div className="flex gap-2">
-                  <Button type="button" size="sm" variant="outline" className="h-11 flex-1 sm:h-9" onClick={() => { flow.setMode('view'); flow.setCancel({ reason_code: '', note: '' }) }} disabled={busy !== null}>Keep it</Button>
-                  <Button type="button" size="sm" variant="destructive" className="h-11 flex-1 sm:h-9" onClick={flow.cancelNow} disabled={busy !== null || !cancelReady(flow.cancel.reason_code, flow.cancel.note)}>
-                    {busy === 'cancel' ? <Loader2 className="animate-spin" size={14} /> : <X size={14} />} Yes, cancel {data.order_no}
-                  </Button>
-                </div>
-              </div>
-            ) : mode === 'reopen' ? (
-              <ReopenBox orderId={id} status={data.status} until={data.reopen_until}
-                onCancel={() => flow.setMode('view')} onDone={() => { flow.setMode('view'); flow.refetch() }} />
-            ) : (
-              <>
-                {flow.tellFirst && <TellShopButton orderId={id} url={flow.tellUrl} variant="primary" legacy={flow.legacy} onTapped={flow.clearStep} />}
-                {/* The forward step only (R7c). Received: Confirm first (it opens the editor), Cancel
-                   second — never just Cancel on its own (item 2, R7a). Confirmed: Delivered is one tap. */}
-                <div className="flex flex-wrap gap-2">
-                  {can('confirm') && (
-                    <Button type="button" onClick={() => flow.setMode('confirm')} disabled={unassigned || busy !== null} className="h-11 flex-1 sm:h-10">
-                      <Check size={14} /> Confirm order
-                    </Button>
-                  )}
-                  {can('deliver') && (
-                    <Button type="button" variant={flow.tellFirst ? 'outline' : 'default'} onClick={flow.deliverNow} disabled={busy !== null} className="h-11 flex-1 sm:h-10">
-                      {busy === 'deliver' ? <Loader2 className="animate-spin" size={14} /> : <Truck size={14} />} Delivered
-                    </Button>
-                  )}
-                  {can('reopen') && (
-                    <Button type="button" variant="outline" onClick={() => flow.setMode('reopen')} disabled={busy !== null} className="h-11 sm:h-10">
-                      <RotateCcw size={14} /> Reopen
-                    </Button>
-                  )}
-                  {can('cancel') && (
-                    <Button type="button" size="sm" variant="outline" onClick={() => flow.setMode('cancel')} disabled={busy !== null}
-                      className="h-11 border-[#f3c9d2] text-[#9f1239] hover:bg-[#fff7f8] hover:text-[#9f1239] sm:h-10">
-                      <X size={14} /> Cancel order
-                    </Button>
-                  )}
-                </div>
-                {can('deliver') && (
-                  <div className="flex flex-wrap gap-x-4 text-[12.5px]">
-                    {!flow.legacy && (
-                      <button type="button" onClick={() => flow.setMode('deliver')} className="min-h-11 font-semibold text-primary hover:underline sm:min-h-0">Deliver with changes</button>
-                    )}
-                    {can('amend') && (
-                      <button type="button" onClick={() => flow.setMode('amend')} className="min-h-11 font-semibold text-primary hover:underline sm:min-h-0">Amend</button>
-                    )}
-                  </div>
-                )}
-                {unassigned && data.status === 'new' && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-    </BodyPortal>
+    </Sheet>
   )
 }
 
