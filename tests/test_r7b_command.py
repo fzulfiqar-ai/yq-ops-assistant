@@ -1433,7 +1433,9 @@ def _():
 def _():
     page = _web("pages/CommandCentre.tsx")
     assert "/management/overview?period=" in page and "t.basis" in page
-    assert "#6D4091" in page, "the plum marketplace look, not the grey one"
+    # the plum marketplace look, not the grey one (ship 2: on the tokens - the band is the logo plum, --primary is it)
+    assert "from-plum via-plum to-plum-2" in page and "text-primary" in page, "the plum marketplace look, not the grey one"
+    assert "--primary: 273 39% 41%;" in _web("index.css") and "--plum: 273 39% 41%;" in _web("index.css")
     # review: marketplace money is labelled ex-VAT beside the ex-VAT sales; the match tile splits its rest
     assert "Marketplace orders (ex-VAT)" in page and "ex-VAT</span>" in page
     assert "awaiting acceptance" in page and "no Focus invoice found" in page and "added by the rep" in page
@@ -1445,7 +1447,7 @@ def _():
 def _():
     page = _web("pages/CommandCentre.tsx")
     for needle in ("function FirstScreen(", "EXCLUDE_ON_CARDS", ".slice(0, 5)", "ReferenceLine", "<details",
-                   "products.price_drops", "function findTile(", "function KpiCard(", "Details · every module"):
+                   "products.price_drops", "function findTile(", "function Kpi(", "<KpiTile ", "Details · every module"):
         assert needle in page, needle
     assert "{ key: 'today', label: 'Latest day' }" in page and "label: 'Today'" not in page
     # the orders card already carries the waiting count and the header chip the data date: not repeated
@@ -1459,7 +1461,8 @@ def _():
     assert "findTile(ov, 'profit.thin_drops')" in page
     assert "AI Head" not in page and "Market Intel" not in page
     # a KPI card: whole BHD on the card, the exact figure in its tooltip
-    assert "maximumFractionDigits: 0" in page and "title={exact" in page
+    # (ship 2: the tooltip is the one KPI tile's, components/ui/kpi-tile.tsx; the page hands it the exact figure)
+    assert "maximumFractionDigits: 0" in page and "exact={exact" in page and "title={exact}" in _web("components/ui/kpi-tile.tsx")
 
 
 @test("review: the first screen's price rows say which price they show, the counts their window, the pace chip 'projected'")
