@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import { installPreloadReload } from './lib/preloadReload'
+import { isWarming } from './lib/warmState'
 import './index.css'
 
 /**
@@ -22,8 +23,9 @@ import './index.css'
 // the R6 Worker it is a real 404, and either way Vite reports it as `vite:preloadError`. One reload
 // fetches the new index.html and its chunks. One per BUILD (28-Oct-2026, lib/preloadReload): the old
 // once-per-session flag was never cleared, so the second deploy a rep's open tab lived through left
-// it on "Something went wrong". A broken build still cannot loop, and offline it never reloads.
-installPreloadReload()
+// it on "Something went wrong". A broken build still cannot loop, and offline it never reloads. A page-code
+// warm-up's failure is left alone (lib/warmState): a deploy mid warm-up never reloads under a half-filled form.
+installPreloadReload(isWarming)
 
 const root = createRoot(document.getElementById('root')!)
 

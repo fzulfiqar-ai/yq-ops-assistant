@@ -125,5 +125,15 @@ check('every Orders table scrolls sideways inside its card on a phone, with the 
   ok(tables > 0 && scrolls >= tables, `${scrolls} ScrollX for ${tables} tables`)
 })
 
+check('a deploy landing mid warm-up never reloads the tab (the reload rule asks lib/warmState, not listener order)', () => {
+  const reload = code(read('lib/preloadReload.ts'))
+  const handler = reload.split("addEventListener('vite:preloadError'", 2)[1] || ''
+  ok(/skip\?\.\(\)/.test(handler) && handler.indexOf('skip?.()') < handler.indexOf('shouldReload'), 'the rule leaves a skipped failure alone before it spends the build\'s one reload')
+  ok(/installPreloadReload\(isWarming\)/.test(read('main.tsx')), 'the portal passes its warm-up state')
+  ok(/installPreloadReload\(\)/.test(read('main.market.tsx')), 'the marketplace calls the rule as before')
+  const pre = code(read('lib/prefetch.ts'))
+  ok(/warmStarted\(\)/.test(pre) && /warmEnded\(\)/.test(pre) && !/stopImmediatePropagation/.test(pre), 'warm-ups count themselves in lib/warmState (no capture listener racing the rule)')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

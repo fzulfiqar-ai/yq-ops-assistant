@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { warmEnded, warmStarted } from './warmState'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { apiGet } from './api'
 import { codeFor, type Warmable } from './pageCode'
@@ -41,24 +42,15 @@ export const HOVER_INTENT_MS = 60
 /** the idle warm-up starts this long after the shell mounts */
 export const WARM_START_MS = 1500
 
-// ── the reload rule stays out of warm-ups ───────────────────────────────────────────────────────
-
-let warming = 0
-if (typeof window !== 'undefined') {
-  // A capture listener on the window runs before the reload rule's own (registered at boot, not
-  // capturing): while a warm-up is in flight, a missing chunk is that warm-up's failure only.
-  window.addEventListener('vite:preloadError', (event) => {
-    if (warming > 0) event.stopImmediatePropagation()
-  }, { capture: true })
-}
+// ── the reload rule stays out of warm-ups (lib/warmState; src/main.tsx asks it) ────────────────
 
 async function warm(code: readonly Warmable[]): Promise<void> {
   if (!code.length) return
-  warming += 1
+  warmStarted()
   try {
     await Promise.all(code.map((c) => c.preload()))
   } finally {
-    warming -= 1
+    warmEnded()
   }
 }
 

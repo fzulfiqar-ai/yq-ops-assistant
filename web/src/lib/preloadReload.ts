@@ -38,8 +38,10 @@ function tabStore(): TabStore | null {
   }
 }
 
-export function installPreloadReload(): void {
+/** `skip`: a failure the rule must leave alone (the portal's page-code warm-ups, lib/warmState) */
+export function installPreloadReload(skip?: () => boolean): void {
   window.addEventListener('vite:preloadError', (event) => {
+    if (skip?.()) return
     // offline the chunk is missing because there is no network, not because of a deploy: a reload
     // would land on the browser's "No internet" page. Let the page's own error boundary say so.
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return
