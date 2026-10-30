@@ -1,13 +1,17 @@
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Link, Navigate, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search, Menu, KeyRound } from 'lucide-react'
+import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Settings, ChevronDown, Search, Menu, KeyRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiGet } from '@/lib/api'
 import { mustResetOf, passwordScreenFor, useAuth, type Me } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { navFor, NAV } from '@/lib/nav'
+import { useShellScroll } from '@/lib/shellScroll'
+import { useCodeWarm, useWarmOnIntent } from '@/lib/prefetch'
+import { PageErrorBoundary, PageGlide, PageSkeleton } from '@/lib/pageFrame'
+import { lockScroll } from '@/lib/sheet'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
 import { FreshnessChip } from './FreshnessChip'
@@ -51,6 +55,29 @@ function usePrefetchPages(me: Me | null, enabled: boolean) {
   }, [enabled, qc, role, features])
 }
 
+/**
+ * The window scrolls (ship 2, item 12; S9) — it used to be an inner box (`h-screen overflow-hidden`
+ * around a scrolling <main>): a phone's address bar never hid, tap-to-top was dead, every `sticky`
+ * inside a page sat still, and a new page opened at the old one's scroll position. While the office
+ * is on screen it publishes its top bar's height, so a page's sticky bar hangs just under it (the
+ * same variable the salesman shell publishes; pages/shop/StaffCatalog reads it), and the page keeps
+ * a stable scrollbar gutter, so a short page and a long one line up instead of shifting sideways by
+ * the scrollbar's width (a classic Windows scrollbar; phones have none). lib/sheet's lock knows it.
+ */
+const TOPBAR_PX = 64
+function useWindowFrame() {
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const gutter = root.style.scrollbarGutter
+    root.style.setProperty('--yq-topbar', `${TOPBAR_PX}px`)
+    root.style.scrollbarGutter = 'stable'
+    return () => {
+      root.style.removeProperty('--yq-topbar')
+      root.style.scrollbarGutter = gutter
+    }
+  }, [])
+}
+
 function greeting() {
   const h = new Date().getHours()
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
@@ -77,10 +104,17 @@ export function AppShell() {
   // answers 403, so keep the member on Settings and say why instead of a page full of errors.
   const mustReset = mustResetOf(me, session)
   usePrefetchPages(me, !!me && me.role !== 'salesman' && !mustReset)
+  useWindowFrame()
+  // a new page at the top, Back where the page was (lib/shellScroll)
+  useShellScroll()
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem('yq-collapsed') === '1',
   )
   const items = navFor(me)
+  // the code of every page this login can open, at idle once the page in front has its answers; a
+  // hover, a press or a focus on a menu item fetches that page's code and its main read at once
+  useCodeWarm([...items.map((n) => n.to), '/settings'], loc.pathname, !!me && !mustReset)
+  const warmOn = useWarmOnIntent()
   // Longest match wins, on segment boundaries only — otherwise /shop-orders would be
   // labelled "Catalog" just because it starts with /shop. The user's own menu first (management
   // names its pages differently: Inventory is "Products & stock"), then every page.
@@ -98,12 +132,37 @@ export function AppShell() {
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [])
-  // close the mobile drawer whenever the route changes (adjusted during render, not in an effect)
+  // close the mobile drawer whenever the route changes (adjusted during render, not in an effect); from
+  // the first page change on, each new page glides in (never the shell's first page: the boot did that)
   const [drawerPath, setDrawerPath] = useState(loc.pathname)
+  const [navigated, setNavigated] = useState(false)
+  // The menu item just clicked, lit at once while its page renders (a chart page can take a few hundred
+  // ms of the CPU: the click is acknowledged on the next frame, not when the page is ready).
+  const [pendingTo, setPendingTo] = useState<string | null>(null)
   if (drawerPath !== loc.pathname) {
     setDrawerPath(loc.pathname)
     setMobileOpen(false)
+    setNavigated(true)
+    setPendingTo(null)
   }
+  // a plain click that React Router turns into a navigation (a Ctrl/⌘ or middle click opens a tab instead)
+  const markPending = (to: string) => (e: ReactMouseEvent) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || to === loc.pathname) return
+    setPendingTo(to)
+  }
+  // the open drawer holds the page still behind it (phones and tablets; it is the static sidebar from 1024 px)
+  useEffect(() => {
+    if (!mobileOpen) return
+    const lg = window.matchMedia('(min-width: 1024px)')
+    if (lg.matches) return
+    const release = lockScroll()
+    const onWide = () => { if (lg.matches) setMobileOpen(false) }
+    lg.addEventListener('change', onWide)
+    return () => {
+      lg.removeEventListener('change', onWide)
+      release()
+    }
+  }, [mobileOpen])
 
   function toggleCollapse() {
     setCollapsed((c) => {
@@ -118,16 +177,23 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex h-screen w-full overflow-hidden">
+    <div className="flex min-h-screen w-full">
       <CommandPalette />
-      {/* Mobile backdrop */}
+      {/* Ambient luxe canvas — soft violet glows + faint grid behind everything. Pinned to the window, so
+          it stays the window's size however long the page is (the window scrolls, not a box). */}
+      <div className="pointer-events-none fixed inset-0 z-0" aria-hidden>
+        <div className="luxe-canvas" />
+      </div>
+      {/* Mobile backdrop (no blur: a full-screen blur on a phone, recomputed while the drawer slides) */}
       {mobileOpen && (
-        <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm lg:hidden" onClick={() => setMobileOpen(false)} />
+        <div className="fixed inset-0 z-40 bg-black/50 lg:hidden" onClick={() => setMobileOpen(false)} />
       )}
-      {/* Sidebar (static on lg, slide-in drawer on mobile) */}
+      {/* Sidebar: a slide-in drawer below 1024 px; from 1024 px it sticks to the window while the page
+          scrolls (h-dvh). Collapsing swaps its width at once — no width animation, which reflowed the
+          page and redrew every chart on each frame of it (item 23). */}
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col text-white transition-transform duration-300 lg:static lg:z-auto lg:transition-[width]',
+          'fixed inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col text-white transition-transform duration-300 lg:sticky lg:top-0 lg:bottom-auto lg:z-auto lg:h-dvh lg:transition-none',
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
           collapsed ? 'lg:w-[76px]' : 'lg:w-[260px]',
         )}
@@ -143,7 +209,7 @@ export function AppShell() {
           )}
         </Link>
 
-        <nav className="mt-2 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 [scrollbar-color:rgba(255,255,255,.2)_transparent] [scrollbar-width:thin]">
+        <nav className="mt-2 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain px-3 [scrollbar-color:rgba(255,255,255,.2)_transparent] [scrollbar-width:thin]">
           {items.map((n, i) => {
             const Icon = n.icon
             const newSection = i === 0 || items[i - 1].section !== n.section
@@ -164,10 +230,12 @@ export function AppShell() {
                 <NavLink
                   to={n.to}
                   end={n.to === '/'}
+                  {...warmOn(n.to)}
+                  onClick={markPending(n.to)}
                   className={({ isActive }) =>
                     cn(
-                      'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/70 transition-all hover:bg-white/10 hover:text-white',
-                      isActive && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
+                      'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white',
+                      (pendingTo ? pendingTo === n.to : isActive) && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
                       collapsed && 'justify-center px-0',
                     )
                   }
@@ -218,10 +286,9 @@ export function AppShell() {
 
       {/* Main column */}
       <div className="relative flex min-w-0 flex-1 flex-col">
-        {/* Ambient luxe canvas — soft violet glows + faint grid behind everything */}
-        <div className="luxe-canvas" aria-hidden />
-        {/* Top bar */}
-        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-border/60 bg-background/70 px-5 backdrop-blur-xl">
+        {/* Top bar: sticks to the window on a solid surface (a 24 px blur over the moving canvas used to be
+            recomputed on every scrolled frame) */}
+        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-border/60 bg-background px-5">
           <button
             onClick={() => setMobileOpen(true)}
             className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground lg:hidden"
@@ -306,29 +373,23 @@ export function AppShell() {
           </div>
         )}
 
-        {/* Page content with cross-fade. --yq-capture-room: the floating Spotted button's height while it
-            shows (MarketCapture, office mount below), so a page's last line can scroll out from under it */}
-        <main className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={loc.pathname}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-              className="w-full min-w-0 max-w-full overflow-x-hidden px-4 py-6 pb-[calc(1.5rem+var(--yq-capture-room,0px))] sm:px-5 md:px-7 lg:px-8"
-            >
-              <Suspense
-                fallback={
-                  <div className="grid h-[60vh] place-items-center text-muted-foreground">
-                    <Loader2 className="animate-spin" size={22} />
-                  </div>
-                }
-              >
-                {outlet}
-              </Suspense>
-            </motion.div>
-          </AnimatePresence>
+        {/* The page (lib/pageFrame). It no longer waits for the old page to leave (AnimatePresence
+            mode="wait": a 280 ms exit before the next page could even start): the new page glides in as
+            soon as it is there; while its code downloads, one page-shaped skeleton; a page that breaks
+            shows its own error with Reload, the shell stays. overflow-x CLIP, not hidden: hidden made
+            this box a scroll container, so nothing `sticky` inside a page ever stuck.
+            --yq-capture-room: the floating Spotted button's height while it shows (MarketCapture, office
+            mount below), so a page's last line can scroll out from under it */}
+        <main className="relative z-10 flex-1">
+          <PageGlide
+            key={loc.pathname}
+            glide={navigated}
+            className="w-full min-w-0 max-w-full overflow-x-clip px-4 py-6 pb-[calc(1.5rem+var(--yq-capture-room,0px))] sm:px-5 md:px-7 lg:px-8"
+          >
+            <PageErrorBoundary resetKey={loc.pathname}>
+              <Suspense fallback={<PageSkeleton />}>{outlet}</Suspense>
+            </PageErrorBoundary>
+          </PageGlide>
         </main>
       </div>
       {/* Market Intel v2 (r8m): the office reports what it sees too — Spotted on the Market Intel pages
