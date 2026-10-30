@@ -306,6 +306,12 @@ jobs:
       # tabs keep their place, the next page's code is fetched ahead, one skeleton, an error boundary per route
       - name: Portal shells (node, no browser)
         run: node scripts/portal_shell_test.mjs
+      # ship 2 (30-Oct-2026): the first seconds - the served frame (never white), "Connecting" only after 4 s, the weekly intro
+      - name: Portal boot (node, no browser)
+        run: node scripts/portal_boot_test.mjs
+      # ship 2: the plum identity on the portal's tokens (one tile, one card, no off-token hex on the newest pages)
+      - name: Portal brand (node, no browser)
+        run: node scripts/portal_brand_test.mjs
       # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
       # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
       # does not. Type errors fail it too: tsc -b runs inside `npm run build`.
