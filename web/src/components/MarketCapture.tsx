@@ -125,10 +125,10 @@ const TILE_KIND: Record<CaptureTile, MiKind> = {
 const ISSUE_KIND: Partial<Record<CaptureTile, 'quality' | 'packaging'>> = { quality: 'quality', packaging: 'packaging' }
 
 const RESULT: Record<MiCard['result'], { icon: ReactNode; tone: string }> = {
-  already_in_yq: { icon: <PackageCheck size={22} aria-hidden="true" />, tone: 'bg-[#e8f7ee] text-[#137a48]' },
-  seen_before: { icon: <Copy size={22} aria-hidden="true" />, tone: 'bg-[#EEE8F4] text-[#6D4091]' },
-  new_find: { icon: <Sparkles size={22} aria-hidden="true" />, tone: 'bg-[#6D4091] text-white' },
-  saved_for_review: { icon: <CheckCircle2 size={22} aria-hidden="true" />, tone: 'bg-[#f4f3f8] text-[#4B2C66]' },
+  already_in_yq: { icon: <PackageCheck size={22} aria-hidden="true" />, tone: 'bg-success/10 text-success' },
+  seen_before: { icon: <Copy size={22} aria-hidden="true" />, tone: 'bg-accent text-primary' },
+  new_find: { icon: <Sparkles size={22} aria-hidden="true" />, tone: 'bg-primary text-primary-foreground' },
+  saved_for_review: { icon: <CheckCircle2 size={22} aria-hidden="true" />, tone: 'bg-muted text-accent-foreground' },
 }
 
 /**
@@ -154,15 +154,15 @@ const TUCKED = 'pointer-events-none translate-y-4 opacity-0 ease-[cubic-bezier(.
 const SHOWN = 'ease-[cubic-bezier(.22,1,.36,1)]'
 
 const CHIP =
-  'inline-flex h-11 items-center gap-1.5 rounded-full px-4 text-[13.5px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60 disabled:cursor-default'
-const CHIP_OFF = 'bg-[#F3EDF8] text-[#4B2C66] hover:bg-[#EADFF3]'
-const CHIP_ON = 'bg-[#6D4091] text-white shadow-sm'
+  'inline-flex h-11 items-center gap-1.5 rounded-full px-4 text-[13.5px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:cursor-default'
+const CHIP_OFF = 'bg-accent text-accent-foreground hover:bg-primary/15'
+const CHIP_ON = 'bg-primary text-primary-foreground shadow-sm'
 /** 16 px text on a touch screen (an iPhone zooms into a field under 16 px on focus); 14 px with a mouse */
 const FIELD =
-  'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[16px] text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25 [@media(pointer:fine)]:text-[14px]'
+  'h-11 w-full rounded-xl border border-border bg-card px-3 text-[16px] text-foreground placeholder:text-muted-foreground focus:border-sash focus:outline-none focus:ring-2 focus:ring-sash/25 [@media(pointer:fine)]:text-[14px]'
 /** Arabic labels: no letter-spacing (it breaks the joined letters on iPhones) and a size Arabic reads at */
-const LABEL = 'mb-1.5 block text-[11.5px] font-semibold uppercase tracking-[0.06em] text-[#6b6480] rtl:text-[13px] rtl:tracking-normal'
-const PANEL = 'space-y-4 rounded-2xl border border-[#EFE9F5] bg-[#FCFAFE] p-3'
+const LABEL = 'mb-1.5 block text-[11.5px] font-semibold uppercase tracking-[0.06em] text-muted-foreground rtl:text-[13px] rtl:tracking-normal'
+const PANEL = 'space-y-4 rounded-2xl border border-accent bg-accent/50 p-3'
 
 interface Shop {
   name: string
@@ -443,15 +443,15 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
   const footer =
     stage === 'result' || stage === 'queued' ? (
       <div className="flex gap-2">
-        <button type="button" onClick={() => { reset(); cameraRef.current?.click() }} className="flex h-12 flex-1 items-center justify-center gap-2 rounded-xl border border-[#E2DCEA] bg-white text-[14px] font-semibold text-[#4B2C66] hover:bg-[#F7F3FA]">
+        <button type="button" onClick={() => { reset(); cameraRef.current?.click() }} className="flex h-12 flex-1 items-center justify-center gap-2 rounded-xl border border-border bg-card text-[14px] font-semibold text-accent-foreground hover:bg-accent/50">
           <Camera size={17} aria-hidden="true" /> {S.spotAnother}
         </button>
-        <button type="button" onClick={() => { setOpen(false); reset() }} className="flex h-12 flex-1 items-center justify-center rounded-xl bg-[#6D4091] text-[14px] font-semibold text-white hover:bg-[#5A3478]">
+        <button type="button" onClick={() => { setOpen(false); reset() }} className="flex h-12 flex-1 items-center justify-center rounded-xl bg-primary text-[14px] font-semibold text-primary-foreground hover:bg-primary-deep">
           {S.done}
         </button>
       </div>
     ) : (
-      <button type="button" onClick={save} disabled={!canSave} className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[15px] font-semibold text-white transition hover:bg-[#5A3478] disabled:opacity-45">
+      <button type="button" onClick={save} disabled={!canSave} className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[15px] font-semibold text-primary-foreground transition hover:bg-primary-deep disabled:opacity-45">
         {busy ? <Loader2 size={18} className="animate-spin" aria-hidden="true" /> : <CheckCircle2 size={18} aria-hidden="true" />}
         {busy ? S.saving : preparing ? S.preparing : S.save}
       </button>
@@ -468,13 +468,13 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
           type="button"
           onClick={start}
           aria-label={waiting ? S.buttonWaiting(waiting) : S.buttonAria}
-          className={`fixed z-30 flex h-[52px] items-center gap-2 rounded-full bg-gradient-to-br from-[#824FAB] to-[#6D4091] pl-4 pr-5 text-[14px] font-bold text-white shadow-[0_12px_28px_-10px_rgba(109,64,145,.75)] ring-1 ring-white/20 transition-[transform,opacity] duration-200 active:scale-[.97] active:duration-[120ms] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#824FAB]/40 motion-reduce:transition-none [--yq-capture-edge:16px] lg:[--yq-capture-edge:32px]${office ? ' [--yq-tabbar:0px]' : ''} ${tucked ? TUCKED : SHOWN}`}
+          className={`fixed z-30 flex h-[52px] items-center gap-2 rounded-full bg-gradient-to-br from-sash to-primary pl-4 pr-5 text-[14px] font-bold text-primary-foreground shadow-[0_12px_28px_-10px_rgba(109,64,145,.75)] ring-1 ring-primary-foreground/20 transition-[transform,opacity] duration-200 active:scale-[.97] active:duration-[120ms] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sash/40 motion-reduce:transition-none [--yq-capture-edge:16px] lg:[--yq-capture-edge:32px]${office ? ' [--yq-tabbar:0px]' : ''} ${tucked ? TUCKED : SHOWN}`}
           style={CAPTURE_POSITION}
         >
           <Camera size={20} strokeWidth={2.2} aria-hidden="true" />
           {S.spotted}
           {waiting > 0 && (
-            <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-[#F4B740] px-1 text-[11px] font-bold text-[#1A1428] ring-2 ring-white">{waiting}</span>
+            <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-target px-1 text-[11px] font-bold text-night ring-2 ring-card">{waiting}</span>
           )}
         </button>
       )}
@@ -494,7 +494,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
               type="button"
               onClick={toggleLang}
               aria-label={S.switchAria}
-              className="inline-flex h-10 items-center gap-1.5 rounded-full border border-[#E2DCEA] bg-white px-3.5 text-[13px] font-semibold text-[#4B2C66] hover:bg-[#F7F3FA]"
+              className="inline-flex h-10 items-center gap-1.5 rounded-full border border-border bg-card px-3.5 text-[13px] font-semibold text-accent-foreground hover:bg-accent/50"
             >
               <Languages size={14} aria-hidden="true" />
               <span lang={lang === 'en' ? 'ar' : 'en'}>{S.switchTo}</span>
@@ -505,13 +505,13 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
 
           {stage === 'queued' && (
             <div className="space-y-2">
-              <div className="flex gap-3 rounded-2xl bg-[#fdf3e3] p-4 text-[#7a4d0a]">
+              <div className="flex gap-3 rounded-2xl bg-warning/10 p-4 text-warning">
                 <WifiOff size={22} className="mt-0.5 shrink-0" aria-hidden="true" />
                 <p className="text-[13.5px] leading-snug">
                   <span className="font-bold">{S.queuedTitle}</span> {S.queuedBody}
                 </p>
               </div>
-              {savedSafety && <p className="rounded-xl bg-[#fdecef] px-3 py-2.5 text-[13px] font-semibold text-[#9f1239]">{S.safetyQueued}</p>}
+              {savedSafety && <p className="rounded-xl bg-destructive/10 px-3 py-2.5 text-[13px] font-semibold text-destructive">{S.safetyQueued}</p>}
             </div>
           )}
 
@@ -521,34 +521,34 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
               <div className="flex gap-2 overflow-x-auto pb-1 pt-2">
                 {photos.map((p, i) => (
                   <div key={p.url} className="relative shrink-0">
-                    <img src={p.url} alt={S.photoAlt(i + 1)} className="h-24 w-24 rounded-xl border border-[#E2DCEA] object-cover" />
+                    <img src={p.url} alt={S.photoAlt(i + 1)} className="h-24 w-24 rounded-xl border border-border object-cover" />
                     {p.role === 'label_batch' && (
-                      <span className="absolute bottom-1 start-1 rounded-full bg-[#1A1428]/75 px-1.5 py-0.5 text-[10px] font-bold text-white">{S.labelBadge}</span>
+                      <span className="absolute bottom-1 start-1 rounded-full bg-foreground/75 px-1.5 py-0.5 text-[10px] font-bold text-white">{S.labelBadge}</span>
                     )}
-                    <button type="button" onClick={() => removePhoto(i)} aria-label={S.removePhoto(i + 1)} className="absolute -end-1.5 -top-1.5 grid h-7 w-7 place-items-center rounded-full bg-[#1A1428] text-white shadow ring-2 ring-white after:absolute after:-inset-2">
+                    <button type="button" onClick={() => removePhoto(i)} aria-label={S.removePhoto(i + 1)} className="absolute -end-1.5 -top-1.5 grid h-7 w-7 place-items-center rounded-full bg-foreground text-background shadow ring-2 ring-card after:absolute after:-inset-2">
                       <X size={13} aria-hidden="true" />
                     </button>
                   </div>
                 ))}
                 {preparing > 0 && (
-                  <div className="grid h-24 w-24 shrink-0 place-items-center rounded-xl border border-dashed border-[#C9B7DA] text-[#824FAB]">
+                  <div className="grid h-24 w-24 shrink-0 place-items-center rounded-xl border border-dashed border-primary/30 text-sash">
                     <Loader2 size={20} className="animate-spin" aria-label={S.preparingPhoto} />
                   </div>
                 )}
                 {photos.length + preparing < MAX_PHOTOS && (
                   <>
-                    <button type="button" onClick={() => cameraRef.current?.click()} className="grid h-24 w-24 shrink-0 place-items-center rounded-xl border-2 border-dashed border-[#C9B7DA] bg-[#FAF7FC] text-[#6D4091] hover:bg-[#F3EDF8]">
+                    <button type="button" onClick={() => cameraRef.current?.click()} className="grid h-24 w-24 shrink-0 place-items-center rounded-xl border-2 border-dashed border-primary/30 bg-accent/50 text-primary hover:bg-accent">
                       <span className="flex flex-col items-center gap-1 text-[12px] font-semibold">
                         <Camera size={22} aria-hidden="true" /> {photos.length ? S.another : S.camera}
                       </span>
                     </button>
-                    <button type="button" onClick={() => galleryRef.current?.click()} className="grid h-24 w-20 shrink-0 place-items-center rounded-xl border border-[#E2DCEA] bg-white text-[#6b6480] hover:bg-[#F7F3FA]">
+                    <button type="button" onClick={() => galleryRef.current?.click()} className="grid h-24 w-20 shrink-0 place-items-center rounded-xl border border-border bg-card text-muted-foreground hover:bg-accent/50">
                       <span className="flex flex-col items-center gap-1 text-[11.5px] font-semibold">
                         <ImagePlus size={19} aria-hidden="true" /> {S.gallery}
                       </span>
                     </button>
                     {quality && (
-                      <button type="button" onClick={() => labelRef.current?.click()} className="grid h-24 w-20 shrink-0 place-items-center rounded-xl border border-[#E2DCEA] bg-white text-[#6b6480] hover:bg-[#F7F3FA]">
+                      <button type="button" onClick={() => labelRef.current?.click()} className="grid h-24 w-20 shrink-0 place-items-center rounded-xl border border-border bg-card text-muted-foreground hover:bg-accent/50">
                         <span className="flex flex-col items-center gap-1 px-1 text-center text-[11.5px] font-semibold leading-tight">
                           <Tag size={19} aria-hidden="true" /> {S.labelPhoto}
                         </span>
@@ -572,11 +572,11 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                         aria-checked={on}
                         onClick={() => pickTile(t.value)}
                         className={cn(
-                          'flex min-h-[64px] items-center gap-2.5 rounded-2xl border px-3 py-2 text-start text-[13.5px] font-semibold leading-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60',
-                          on ? 'border-[#6D4091] bg-[#6D4091] text-white shadow-sm' : 'border-[#E2DCEA] bg-white text-[#2A1A3D] hover:bg-[#F7F3FA]',
+                          'flex min-h-[64px] items-center gap-2.5 rounded-2xl border px-3 py-2 text-start text-[13.5px] font-semibold leading-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
+                          on ? 'border-primary bg-primary text-primary-foreground shadow-sm' : 'border-border bg-card text-accent-foreground hover:bg-accent/50',
                         )}
                       >
-                        <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl', on ? 'bg-white/20 text-white' : 'bg-[#F3EDF8] text-[#6D4091]')}>{t.icon}</span>
+                        <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl', on ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-accent text-primary')}>{t.icon}</span>
                         <span className="min-w-0">{S.tiles[t.value]}</span>
                       </button>
                     )
@@ -602,7 +602,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                               role="radio"
                               aria-checked={on}
                               onClick={() => setIssueId(on ? null : t.id)}
-                              className={cn(CHIP, t.safety_default ? (on ? 'bg-[#9f1239] text-white' : 'bg-[#fdecef] text-[#9f1239] hover:bg-[#fbdbe1]') : on ? CHIP_ON : CHIP_OFF)}
+                              className={cn(CHIP, t.safety_default ? (on ? 'bg-destructive text-destructive-foreground' : 'bg-destructive/10 text-destructive hover:bg-destructive/20') : on ? CHIP_ON : CHIP_OFF)}
                             >
                               {t.safety_default && <Flame size={14} aria-hidden="true" />}
                               {issueLabel(t, lang)}
@@ -611,9 +611,9 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                         })}
                       </div>
                     ) : listsQ.isLoading ? (
-                      <p className="text-[12.5px] text-[#6b6480]">{S.loading}</p>
+                      <p className="text-[12.5px] text-muted-foreground">{S.loading}</p>
                     ) : (
-                      <p className="text-[12.5px] text-[#6b6480]">{S.noIssueTypes}</p>
+                      <p className="text-[12.5px] text-muted-foreground">{S.noIssueTypes}</p>
                     )}
                     <button
                       type="button"
@@ -621,11 +621,11 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                       aria-checked={safetyOn}
                       disabled={Boolean(chosen?.safety_default)}
                       onClick={() => setSafety((v) => !v)}
-                      className={cn(CHIP, 'mt-2', safetyOn ? 'bg-[#9f1239] text-white' : 'border border-[#f3c4cf] bg-white text-[#9f1239] hover:bg-[#fdecef]')}
+                      className={cn(CHIP, 'mt-2', safetyOn ? 'bg-destructive text-destructive-foreground' : 'border border-destructive/25 bg-card text-destructive hover:bg-destructive/10')}
                     >
                       <Siren size={15} aria-hidden="true" /> {S.safetyChip}
                     </button>
-                    {safetyOn && <p className="mt-1.5 text-[12px] font-semibold text-[#9f1239]">{S.safetyHint}</p>}
+                    {safetyOn && <p className="mt-1.5 text-[12px] font-semibold text-destructive">{S.safetyHint}</p>}
                   </div>
 
                   {typeFields.includes('qty') && (
@@ -667,7 +667,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                   )}
 
                   {typeFields.includes('label_photo') && !hasLabelPhoto && photos.length + preparing < MAX_PHOTOS && (
-                    <button type="button" onClick={() => labelRef.current?.click()} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-dashed border-[#C9B7DA] bg-white px-3 py-2 text-start text-[13px] font-medium text-[#4B2C66] hover:bg-[#FAF7FC]">
+                    <button type="button" onClick={() => labelRef.current?.click()} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-dashed border-primary/30 bg-card px-3 py-2 text-start text-[13px] font-medium text-accent-foreground hover:bg-accent/50">
                       <Tag size={16} className="shrink-0" aria-hidden="true" /> {S.labelPhotoAsk}
                     </button>
                   )}
@@ -720,7 +720,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
 
               {/* v1's quick fields: competitor, new product / trend, other */}
               {quick && !wantsProduct && kind && (
-                <div className="space-y-3 rounded-2xl border border-[#EFE9F5] bg-[#FCFAFE] p-3">
+                <div className="space-y-3 rounded-2xl border border-accent bg-accent/50 p-3">
                   <div>
                     <label htmlFor="mi-title" className={LABEL}>{S.fieldTitle[kind]}</label>
                     <input id="mi-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={160} className={FIELD} placeholder={S.optional} autoComplete="off" />
@@ -743,7 +743,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                         {/* the amount box is left to right in both languages: the currency and the digits share one side
                             (in Arabic it reads "0.000 د.ب"); rtl right-alignment put the digits under the currency */}
                         <div className="relative" dir="ltr">
-                          <span className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 text-[12px] font-semibold text-[#6b6480]">{S.currency}</span>
+                          <span className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 text-[12px] font-semibold text-muted-foreground">{S.currency}</span>
                           <input id="mi-price" dir="ltr" inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value.replace(/[^0-9.]/g, ''))} maxLength={10} className={cn(FIELD, 'ps-12 tabular-nums')} placeholder="0.000" />
                         </div>
                       </div>
@@ -777,9 +777,9 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                       onClick={() => setVoiceLang((v) => (v === 'en-US' ? 'ar-SA' : 'en-US'))}
                       aria-label={`${S.voiceLang}: ${voiceLang === 'en-US' ? 'English' : 'العربية'}`}
                       title={S.voiceLang}
-                      className="inline-flex h-10 min-w-12 items-center justify-center gap-1.5 rounded-full border border-[#E2DCEA] bg-white px-3 text-[12px] font-bold text-[#4B2C66] hover:bg-[#F7F3FA]"
+                      className="inline-flex h-10 min-w-12 items-center justify-center gap-1.5 rounded-full border border-border bg-card px-3 text-[12px] font-bold text-accent-foreground hover:bg-accent/50"
                     >
-                      <Mic size={13} className="text-[#824FAB]" aria-hidden="true" />
+                      <Mic size={13} className="text-sash" aria-hidden="true" />
                       {voiceLang === 'en-US' ? 'EN' : 'AR'}
                     </button>
                   )}
@@ -800,46 +800,46 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                       onClick={toggleVoice}
                       aria-pressed={dict.listening}
                       aria-label={dict.listening ? S.stopSpeaking : S.speak}
-                      className={cn('absolute bottom-2 end-2 grid h-11 w-11 place-items-center rounded-xl transition-colors', dict.listening ? 'bg-[#e11d48] text-white' : 'bg-[#F3EDF8] text-[#6D4091] hover:bg-[#EADFF3]')}
+                      className={cn('absolute bottom-2 end-2 grid h-11 w-11 place-items-center rounded-xl transition-colors', dict.listening ? 'bg-destructive text-destructive-foreground' : 'bg-accent text-primary hover:bg-primary/15')}
                     >
                       {dict.listening ? <MicOff size={19} aria-hidden="true" /> : <Mic size={19} aria-hidden="true" />}
                     </button>
                   )}
                 </div>
-                {dict.listening && <p className="mt-1 text-[12px] font-semibold text-[#e11d48]" aria-live="polite">{S.listening}</p>}
+                {dict.listening && <p className="mt-1 text-[12px] font-semibold text-destructive" aria-live="polite">{S.listening}</p>}
               </div>
 
               {/* the shop */}
               <div>
                 <span className={LABEL}>{S.shop}</span>
                 {shop && !pickShop ? (
-                  <div className="flex items-center gap-2 rounded-xl border border-[#E2DCEA] bg-white px-3 py-2">
-                    <Store size={16} className="shrink-0 text-[#824FAB]" aria-hidden="true" />
+                  <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+                    <Store size={16} className="shrink-0 text-sash" aria-hidden="true" />
                     {/* bdi: an English shop name inside the Arabic sheet keeps its place (no "Shop Alpha· Manama") */}
-                    <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#1A1428]">
+                    <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">
                       <bdi>{shop.name || S.thisShop}</bdi>
                       {shop.area && (
-                        <span className="ms-1.5 font-normal text-[#6b6480]">
+                        <span className="ms-1.5 font-normal text-muted-foreground">
                           · <bdi>{shop.area}</bdi>
                         </span>
                       )}
                     </span>
-                    <button type="button" onClick={() => setPickShop(true)} className="h-11 rounded-lg px-2 text-[12.5px] font-semibold text-[#6D4091] hover:bg-[#F3EDF8]">{S.changeShop}</button>
-                    <button type="button" onClick={() => setShop(null)} aria-label={S.notAtShop} className="grid h-11 w-11 place-items-center rounded-lg text-[#6b6480] hover:bg-[#F3EDF8]">
+                    <button type="button" onClick={() => setPickShop(true)} className="h-11 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-accent">{S.changeShop}</button>
+                    <button type="button" onClick={() => setShop(null)} aria-label={S.notAtShop} className="grid h-11 w-11 place-items-center rounded-lg text-muted-foreground hover:bg-accent">
                       <X size={15} aria-hidden="true" />
                     </button>
                   </div>
                 ) : pickShop ? (
                   <ShopPicker S={S} onPick={(s) => { setShop(s); setPickShop(false) }} onCancel={() => setPickShop(false)} />
                 ) : (
-                  <button type="button" onClick={() => setPickShop(true)} className="flex h-11 w-full items-center gap-2 rounded-xl border border-dashed border-[#D9CCE6] px-3 text-[13.5px] font-medium text-[#6b6480] hover:bg-[#FAF7FC]">
+                  <button type="button" onClick={() => setPickShop(true)} className="flex h-11 w-full items-center gap-2 rounded-xl border border-dashed border-primary/30 px-3 text-[13.5px] font-medium text-muted-foreground hover:bg-accent/50">
                     <MapPin size={16} aria-hidden="true" /> {S.addShop}
                   </button>
                 )}
               </div>
 
               {error && (
-                <p role="alert" className="rounded-xl bg-[#fdecef] px-3 py-2.5 text-[13px] font-medium text-[#9f1239]">{error}</p>
+                <p role="alert" className="rounded-xl bg-destructive/10 px-3 py-2.5 text-[13px] font-medium text-destructive">{error}</p>
               )}
             </>
           )}
@@ -849,7 +849,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
           )}
 
           {(stage === 'result' || stage === 'queued') && (
-            <Link to="/market-intel" onClick={() => { setOpen(false); reset() }} className="flex min-h-11 items-center justify-center gap-1.5 text-[13px] font-semibold text-[#6D4091] hover:underline">
+            <Link to="/market-intel" onClick={() => { setOpen(false); reset() }} className="flex min-h-11 items-center justify-center gap-1.5 text-[13px] font-semibold text-primary hover:underline">
               <CircleDot size={14} aria-hidden="true" /> {S.seeMine}
             </Link>
           )}
@@ -898,18 +898,18 @@ function ShopPicker({ S, onPick, onCancel }: { S: CaptureStrings; onPick: (s: Sh
 
   if (adding) {
     return (
-      <div className="space-y-2 rounded-xl border border-[#E2DCEA] bg-white p-2.5">
+      <div className="space-y-2 rounded-xl border border-border bg-card p-2.5">
         <input value={name} onChange={(e) => setName(e.target.value)} maxLength={160} placeholder={S.newShopName} aria-label={S.newShopName} className={FIELD} />
         <input value={area} onChange={(e) => setArea(e.target.value)} maxLength={80} placeholder={S.newShopArea} aria-label={S.newShopArea} className={FIELD} />
         <div className="flex gap-2">
-          <button type="button" onClick={() => setAdding(false)} className="h-11 flex-1 rounded-xl border border-[#E2DCEA] bg-white text-[13.5px] font-semibold text-[#4B2C66] hover:bg-[#F7F3FA]">
+          <button type="button" onClick={() => setAdding(false)} className="h-11 flex-1 rounded-xl border border-border bg-card text-[13.5px] font-semibold text-accent-foreground hover:bg-accent/50">
             {S.cancelPick}
           </button>
           <button
             type="button"
             disabled={!name.trim()}
             onClick={() => onPick({ name: name.trim(), area: area.trim(), phone: '' })}
-            className="h-11 flex-1 rounded-xl bg-[#6D4091] text-[13.5px] font-semibold text-white hover:bg-[#5A3478] disabled:opacity-45"
+            className="h-11 flex-1 rounded-xl bg-primary text-[13.5px] font-semibold text-primary-foreground hover:bg-primary-deep disabled:opacity-45"
           >
             {S.useNewShop}
           </button>
@@ -919,36 +919,36 @@ function ShopPicker({ S, onPick, onCancel }: { S: CaptureStrings; onPick: (s: Sh
   }
 
   return (
-    <div className="space-y-2 rounded-xl border border-[#E2DCEA] bg-white p-2.5">
+    <div className="space-y-2 rounded-xl border border-border bg-card p-2.5">
       <div className="flex items-center gap-2">
         <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={S.searchShops} aria-label={S.searchShops} enterKeyHint="search" className={FIELD} />
-        <button type="button" onClick={onCancel} aria-label={S.cancelPick} className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-[#6b6480] hover:bg-[#F3EDF8]">
+        <button type="button" onClick={onCancel} aria-label={S.cancelPick} className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-accent">
           <X size={15} aria-hidden="true" />
         </button>
       </div>
       <button
         type="button"
         onClick={() => { setName(q.trim()); setAdding(true) }}
-        className="flex h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-dashed border-[#D9CCE6] px-3 text-[13.5px] font-semibold text-[#6D4091] hover:bg-[#FAF7FC]"
+        className="flex h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-dashed border-primary/30 px-3 text-[13.5px] font-semibold text-primary hover:bg-accent/50"
       >
         <Plus size={16} className="shrink-0" aria-hidden="true" />
         <span className="min-w-0 truncate">
           {S.newShop}
-          {q.trim() && <span className="font-normal text-[#4B2C66]"> · <bdi>{q.trim()}</bdi></span>}
+          {q.trim() && <span className="font-normal text-accent-foreground"> · <bdi>{q.trim()}</bdi></span>}
         </span>
       </button>
       {loading ? (
-        <p className="px-1 text-[12.5px] text-[#6b6480]">{S.loadingShops}</p>
+        <p className="px-1 text-[12.5px] text-muted-foreground">{S.loadingShops}</p>
       ) : hits.length ? (
         <ul aria-label={S.pickShopAria} className="max-h-64 overflow-y-auto overscroll-contain">
           {hits.slice(0, 200).map((s) => (
             <li key={`${s.name}|${s.phone}`}>
-              <button type="button" onClick={() => onPick(s)} className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-start hover:bg-[#F7F3FA]">
-                <Store size={15} className="shrink-0 text-[#824FAB]" aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#1A1428]">
+              <button type="button" onClick={() => onPick(s)} className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-start hover:bg-accent/50">
+                <Store size={15} className="shrink-0 text-sash" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">
                   <bdi>{s.name}</bdi>
                   {s.area && (
-                    <span className="ms-1.5 font-normal text-[#6b6480]">
+                    <span className="ms-1.5 font-normal text-muted-foreground">
                       · <bdi>{s.area}</bdi>
                     </span>
                   )}
@@ -958,20 +958,20 @@ function ShopPicker({ S, onPick, onCancel }: { S: CaptureStrings; onPick: (s: Sh
           ))}
         </ul>
       ) : (
-        <p className="px-1 text-[12.5px] text-[#6b6480]">{S.noShopMatch}</p>
+        <p className="px-1 text-[12.5px] text-muted-foreground">{S.noShopMatch}</p>
       )}
     </div>
   )
 }
 
 function QtyStepper({ value, onChange, labelledBy, less, more }: { value: number; onChange: (n: number) => void; labelledBy: string; less: string; more: string }) {
-  const btn = 'grid h-11 w-11 place-items-center rounded-xl text-[#6D4091] transition hover:bg-[#EEE8F4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60 disabled:opacity-35'
+  const btn = 'grid h-11 w-11 place-items-center rounded-xl text-primary transition hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-35'
   return (
-    <div role="group" aria-labelledby={labelledBy} className="inline-flex h-12 items-center gap-1 rounded-xl border border-[#E2DCEA] bg-white p-0.5">
+    <div role="group" aria-labelledby={labelledBy} className="inline-flex h-12 items-center gap-1 rounded-xl border border-border bg-card p-0.5">
       <button type="button" disabled={value <= 1} onClick={() => onChange(Math.max(1, value - 1))} aria-label={less} className={btn}>
         <Minus size={17} aria-hidden="true" />
       </button>
-      <span dir="ltr" aria-live="polite" className="min-w-[2.75rem] text-center font-display text-[16px] font-bold tabular-nums text-[#1A1428]">
+      <span dir="ltr" aria-live="polite" className="min-w-[2.75rem] text-center font-display text-[16px] font-bold tabular-nums text-foreground">
         {value}
       </span>
       <button type="button" disabled={value >= 9999} onClick={() => onChange(Math.min(9999, value + 1))} aria-label={more} className={btn}>
@@ -1012,7 +1012,7 @@ function WhichProduct({
         <ProductRow
           p={product}
           action={
-            <button type="button" onClick={onChange} className="h-11 shrink-0 rounded-lg px-2.5 text-[12.5px] font-semibold text-[#6D4091] hover:bg-[#F3EDF8]">
+            <button type="button" onClick={onChange} className="h-11 shrink-0 rounded-lg px-2.5 text-[12.5px] font-semibold text-primary hover:bg-accent">
               {S.change}
             </button>
           }
@@ -1020,7 +1020,7 @@ function WhichProduct({
       ) : notSure ? (
         <div className="space-y-1.5">
           <input value={name} onChange={(e) => onName(e.target.value)} maxLength={160} className={FIELD} placeholder={namePlaceholder} aria-label={namePlaceholder} autoComplete="off" />
-          <button type="button" onClick={onChange} className="h-9 rounded-lg px-1 text-[12.5px] font-semibold text-[#6D4091] hover:underline">
+          <button type="button" onClick={onChange} className="h-9 rounded-lg px-1 text-[12.5px] font-semibold text-primary hover:underline">
             {S.pickFromList}
           </button>
         </div>
@@ -1054,8 +1054,8 @@ function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings
   return (
     <div className="space-y-3" aria-live="polite">
       {card.safety_alerted ? (
-        <div className="flex items-center gap-3 rounded-2xl bg-[#9f1239] p-4 text-white">
-          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white/20">
+        <div className="flex items-center gap-3 rounded-2xl bg-destructive p-4 text-destructive-foreground">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-destructive-foreground/20">
             <Siren size={22} aria-hidden="true" />
           </span>
           <div className="min-w-0">
@@ -1064,11 +1064,11 @@ function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings
           </div>
         </div>
       ) : safety ? (
-        <p className="rounded-xl bg-[#fdecef] px-3 py-2.5 text-[13px] font-semibold text-[#9f1239]">{S.safetyNoted}</p>
+        <p className="rounded-xl bg-destructive/10 px-3 py-2.5 text-[13px] font-semibold text-destructive">{S.safetyNoted}</p>
       ) : null}
       {isCase ? (
-        <div className="flex items-center gap-3 rounded-2xl bg-[#6D4091] p-4 text-white">
-          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white/20">
+        <div className="flex items-center gap-3 rounded-2xl bg-primary p-4 text-primary-foreground">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-primary-foreground/20">
             <CheckCircle2 size={22} aria-hidden="true" />
           </span>
           <div className="min-w-0">
@@ -1078,7 +1078,7 @@ function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings
         </div>
       ) : (
         <div className={cn('flex items-center gap-3 rounded-2xl p-4', meta.tone)}>
-          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white/20">{meta.icon}</span>
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-card/20">{meta.icon}</span>
           <div className="min-w-0">
             <div className="font-display text-[17px] font-bold leading-tight">{S.result[card.result] || S.result.saved_for_review}</div>
             {card.item && card.result !== 'saved_for_review' && (
@@ -1098,9 +1098,9 @@ function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings
       )}
       {/* the server's own sentence is English: the Arabic sheet says the same in its words (a case already said it) */}
       {(lang === 'en' || !isCase) && (
-        <p className="text-[14px] leading-snug text-[#1A1428]">{lang === 'en' ? card.message : S.resultLine[card.result] || S.resultLine.saved_for_review}</p>
+        <p className="text-[14px] leading-snug text-foreground">{lang === 'en' ? card.message : S.resultLine[card.result] || S.resultLine.saved_for_review}</p>
       )}
-      {card.fallback === 'legacy' && <p className="text-[12px] text-[#6b6480]">{S.legacy}</p>}
+      {card.fallback === 'legacy' && <p className="text-[12px] text-muted-foreground">{S.legacy}</p>}
     </div>
   )
 }
@@ -1108,7 +1108,7 @@ function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings
 function PendingList({ S, waiting, failed }: { S: CaptureStrings; waiting: number; failed: { id: string; error: string }[] }) {
   const [retrying, setRetrying] = useState(false)
   return (
-    <div className="space-y-2 rounded-2xl border border-[#F0E3C8] bg-[#FFFBF3] p-3 text-[12.5px] text-[#7a4d0a]">
+    <div className="space-y-2 rounded-2xl border border-warning/25 bg-warning/10 p-3 text-[12.5px] text-warning">
       {waiting > 0 && (
         <div className="flex items-center gap-2">
           <WifiOff size={15} className="shrink-0" aria-hidden="true" />
@@ -1117,16 +1117,16 @@ function PendingList({ S, waiting, failed }: { S: CaptureStrings; waiting: numbe
             type="button"
             disabled={retrying}
             onClick={async () => { setRetrying(true); await retryWaiting(); setRetrying(false) }}
-            className="inline-flex h-11 items-center gap-1 rounded-lg px-2 font-semibold hover:bg-[#fdf3e3]"
+            className="inline-flex h-11 items-center gap-1 rounded-lg px-2 font-semibold hover:bg-warning/20"
           >
             {retrying ? <Loader2 size={13} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={13} aria-hidden="true" />} {S.retryNow}
           </button>
         </div>
       )}
       {failed.map((q) => (
-        <div key={q.id} className="flex items-center gap-2 text-[#9f1239]">
+        <div key={q.id} className="flex items-center gap-2 text-destructive">
           <span className="flex-1">{S.notSaved} {q.error}</span>
-          <button type="button" onClick={() => discardCapture(q.id)} className="h-11 rounded-lg px-2 font-semibold hover:bg-[#fdecef]">{S.discard}</button>
+          <button type="button" onClick={() => discardCapture(q.id)} className="h-11 rounded-lg px-2 font-semibold hover:bg-destructive/10">{S.discard}</button>
         </div>
       ))}
     </div>

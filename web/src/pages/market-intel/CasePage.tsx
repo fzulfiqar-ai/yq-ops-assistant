@@ -215,7 +215,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
           </div>
         )}
         {c.safety && !merged && !['resolved', 'closed', 'not_substantiated'].includes(c.status) && (
-          <p className="mt-3 rounded-xl bg-[#fdecef] px-3 py-2 text-[12.5px] font-semibold text-[#9f1239]">
+          <p className="mt-3 rounded-xl bg-destructive/10 px-3 py-2 text-[12.5px] font-semibold text-destructive">
             Safety case: review it within one business day.{' '}
             {/* only a "sent" outcome says the manager was e-mailed (market_quality.send_safety_alert) */}
             {mail.state === 'sent'
@@ -276,7 +276,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
           {c.verification_method && (
             <section className={CARD}>
               <h2 className="mb-1.5 flex items-center gap-1.5 font-display text-[15px] font-bold">
-                <BadgeCheck size={15} className="text-[#137a48]" aria-hidden="true" /> Verification
+                <BadgeCheck size={15} className="text-success" aria-hidden="true" /> Verification
               </h2>
               <p className="text-[13px] font-semibold">{c.verification_label || VERIFY_METHODS.find((m) => m.value === c.verification_method)?.label || c.verification_method}</p>
               {c.verification_reason && <p className="mt-1 whitespace-pre-line text-[12.5px] text-muted-foreground">{c.verification_reason}</p>}
@@ -362,14 +362,14 @@ function Details({
       ) : (
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
           {/* the code first: a long product name truncates, the code never does */}
-          <Fact label="Product">{c.yq_item_code ? caseProduct(c) : <span className="text-[#96600d]">Not linked yet</span>}</Fact>
+          <Fact label="Product">{c.yq_item_code ? caseProduct(c) : <span className="text-warning">Not linked yet</span>}</Fact>
           <Fact label="Brand">{brand || '—'}</Fact>
           <Fact label="Supplier">{supplier || '—'}</Fact>
           <Fact label="Batch">{c.batch_ref || '—'}</Fact>
           <Fact label="Packaging version">{c.packaging_version || '—'}</Fact>
           <Fact label="Severity">{c.severity ? SEVERITY[c.severity] || c.severity : '—'}</Fact>
           <Fact label="Assignee">{c.assignee || '—'}</Fact>
-          <Fact label="Due">{c.due_date ? <span className={cn(isPast(c.due_date) && !['resolved', 'closed'].includes(c.status) && 'text-[#9f1239]')}>{dayText(c.due_date)}</span> : '—'}</Fact>
+          <Fact label="Due">{c.due_date ? <span className={cn(isPast(c.due_date) && !['resolved', 'closed'].includes(c.status) && 'text-destructive')}>{dayText(c.due_date)}</span> : '—'}</Fact>
           <Fact label="Safety">{c.safety ? 'Yes' : 'No'}</Fact>
         </div>
       )}
@@ -511,7 +511,7 @@ function EditCase({
         </div>
       </div>
       <label className="flex min-h-10 items-center gap-2 text-[13px] font-semibold">
-        <input type="checkbox" checked={safety} onChange={(e) => setSafety(e.target.checked)} className="h-4 w-4 accent-[#9f1239]" />
+        <input type="checkbox" checked={safety} onChange={(e) => setSafety(e.target.checked)} className="h-4 w-4 accent-destructive" />
         Safety case (heat, smoke, swelling, shock)
       </label>
       <div className="flex gap-2">
@@ -632,7 +632,7 @@ function MoveBox({
               key={s.id}
               type="button"
               onClick={() => setTarget(String(s.id))}
-              className={cn('h-9 max-w-full truncate rounded-full px-3 text-[12px] font-semibold', String(s.id) === target ? 'bg-[#6D4091] text-white' : 'bg-[#F3EDF8] text-[#4B2C66] hover:bg-[#EADFF3]')}
+              className={cn('h-9 max-w-full truncate rounded-full px-3 text-[12px] font-semibold', String(s.id) === target ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground hover:bg-primary/15')}
             >
               Case {s.id}: {s.title}
             </button>
@@ -796,12 +796,12 @@ function Timeline({ events }: { events: MiCaseEvent[] }) {
         <History size={15} aria-hidden="true" /> Timeline
       </h2>
       {events.length ? (
-        <ol className="space-y-2.5 border-l-2 border-[#E6DAF0] pl-3">
+        <ol className="space-y-2.5 border-l-2 border-primary/20 pl-3">
           {events.map((e) => {
             const t = eventText(e)
             return (
               <li key={e.id} className="text-[12.5px]">
-                <div className={cn('font-semibold', e.event === 'safety_alert' && 'text-[#9f1239]', t.alarm && '-mx-1 inline-block rounded bg-[#fdecef] px-1')}>{t.title}</div>
+                <div className={cn('font-semibold', e.event === 'safety_alert' && 'text-destructive', t.alarm && '-mx-1 inline-block rounded bg-destructive/10 px-1')}>{t.title}</div>
                 {t.body && <div className="whitespace-pre-line text-foreground/80">{t.quote ? `“${t.body}”` : t.body}</div>}
                 <div className="text-muted-foreground">
                   {who(e.actor)}
@@ -887,7 +887,7 @@ function StatusPanel({
               type="button"
               aria-pressed={to === m.to}
               onClick={() => setTo(to === m.to ? null : m.to)}
-              className={cn('h-10 rounded-full px-3.5 text-[12.5px] font-semibold transition-colors', to === m.to ? 'bg-[#6D4091] text-white' : 'bg-[#F3EDF8] text-[#4B2C66] hover:bg-[#EADFF3]')}
+              className={cn('h-10 rounded-full px-3.5 text-[12.5px] font-semibold transition-colors', to === m.to ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground hover:bg-primary/15')}
             >
               {CASE_STATUS_LABEL[m.to]}
             </button>
@@ -901,7 +901,7 @@ function StatusPanel({
         <div className="mt-3 space-y-2.5 border-t border-border pt-3">
           <p className="text-[12px] text-muted-foreground">{moveHint(move, c.status)}</p>
           {move.blocked ? (
-            <p className="rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12.5px] font-medium text-[#7a4d0a]">{move.blocked}</p>
+            <p className="rounded-xl bg-warning/10 px-3 py-2 text-[12.5px] font-medium text-warning">{move.blocked}</p>
           ) : move.via === 'question' ? (
             <AskRepForm caseId={c.id} onDone={onDone} onError={onError} />
           ) : move.via === 'action' ? (
@@ -971,7 +971,7 @@ function EvidencePanel({ c, canEdit, onDone, onError }: { c: MiCase; canEdit: bo
       <ol className="space-y-1.5">
         {EVIDENCE_LEVELS.map((e) => (
           <li key={e.level} className={cn('flex items-center gap-2 text-[12.5px]', e.level <= cur ? 'font-semibold text-foreground' : 'text-muted-foreground')}>
-            <span className={cn('grid h-5 w-5 shrink-0 place-items-center rounded-full text-[10.5px] font-bold', e.level <= cur ? 'bg-[#6D4091] text-white' : 'bg-muted text-muted-foreground')}>{e.level}</span>
+            <span className={cn('grid h-5 w-5 shrink-0 place-items-center rounded-full text-[10.5px] font-bold', e.level <= cur ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')}>{e.level}</span>
             {e.label}
           </li>
         ))}
@@ -1116,7 +1116,7 @@ function ActionItem({ a, canEdit, onDone, onError }: { a: MiSupplierAction; canE
       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-muted-foreground">
         {supplier && <span>{supplier}</span>}
         {a.owner && <span>Owner {a.owner}</span>}
-        {a.due_date && <span className={cn(overdue && 'font-semibold text-[#9f1239]')}>Due {dayText(a.due_date)}</span>}
+        {a.due_date && <span className={cn(overdue && 'font-semibold text-destructive')}>Due {dayText(a.due_date)}</span>}
         {a.days_open != null && <span>{a.days_open} day{a.days_open === 1 ? '' : 's'} open</span>}
       </div>
       {!edit && (a.supplier_response || a.resolution_check) && (
@@ -1200,7 +1200,7 @@ function MergePanel({
         <div className="mb-3 space-y-2">
           <div className={LABEL}>Open cases like this one</div>
           {suggestions.slice(0, 5).map((s) => (
-            <div key={s.id} className={cn('rounded-2xl ring-2 ring-transparent transition', String(s.id) === target && 'ring-[#6D4091]')}>
+            <div key={s.id} className={cn('rounded-2xl ring-2 ring-transparent transition', String(s.id) === target && 'ring-primary')}>
               <CaseCard r={s} compact />
               <button type="button" onClick={() => { setTarget(String(s.id)); setSure(false) }} className={cn(BTN_GHOST, 'mt-0.5')}>
                 Merge into case {s.id}

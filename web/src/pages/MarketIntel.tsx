@@ -120,7 +120,7 @@ function ClusterCard({ c, onOpen, showMine }: { c: MiCluster; onOpen?: () => voi
         )}
       </div>
       <div className="space-y-1.5 p-3">
-        {showMine && c.mine && <div className="text-[11.5px] font-bold text-[#6D4091]">You spotted this</div>}
+        {showMine && c.mine && <div className="text-[11.5px] font-bold text-primary">You spotted this</div>}
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone="grey">{c.kind_label}</Badge>
           {c.yq_item_code ? <Badge tone="green">YQ {c.yq_item_code}</Badge> : c.kind === 'new_product' ? <Badge tone="amber">Gap</Badge> : null}
@@ -131,7 +131,7 @@ function ClusterCard({ c, onOpen, showMine }: { c: MiCluster; onOpen?: () => voi
           <div className="truncate text-[12px] text-muted-foreground">{[c.brand, c.category].filter(Boolean).join(' · ')}</div>
         )}
         <div className="text-[12px] leading-snug text-muted-foreground">{c.summary}</div>
-        {range && <div className="font-display text-[14px] font-bold tabular-nums text-[#6D4091]">{range}</div>}
+        {range && <div className="font-display text-[14px] font-bold tabular-nums text-primary">{range}</div>}
       </div>
     </>
   )
@@ -224,7 +224,7 @@ function RepSignals() {
         ]}
       />
       {tab === 'mine' && asked > 0 && (
-        <div role="status" className="mb-4 flex items-center gap-3 rounded-2xl border border-[#f1dfb8] bg-[#fdf8ee] px-4 py-3 text-[13.5px] text-[#7a4d0a]">
+        <div role="status" className="mb-4 flex items-center gap-3 rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-[13.5px] text-warning">
           <MessageSquareReply size={18} className="shrink-0" aria-hidden="true" />
           <span>
             <span className="font-bold">The office asked you {asked === 1 ? 'a question' : `${asked} questions`}.</span> Answer below; a photo helps.
@@ -340,8 +340,8 @@ function AnswerBox({ obs }: { obs: MiObservation }) {
   }
 
   return (
-    <div className="mt-3 space-y-2 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] p-3">
-      <p className="text-[13px] leading-snug text-[#7a4d0a]">
+    <div className="mt-3 space-y-2 rounded-xl border border-warning/25 bg-warning/10 p-3">
+      <p className="text-[13px] leading-snug text-warning">
         <span className="font-bold">The office asks:</span> {obs.open_question}
       </p>
       <textarea
@@ -351,19 +351,19 @@ function AnswerBox({ obs }: { obs: MiObservation }) {
         maxLength={1000}
         placeholder="Your answer"
         aria-label="Your answer"
-        className="min-h-[64px] w-full resize-none rounded-xl border border-[#E2DCEA] bg-white px-3 py-2 text-[14px] leading-snug text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25"
+        className="min-h-[64px] w-full resize-none rounded-xl border border-border bg-card px-3 py-2 text-[14px] leading-snug text-foreground placeholder:text-muted-foreground focus:border-sash focus:outline-none focus:ring-2 focus:ring-sash/25"
       />
       <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { void pick(e.target.files); e.target.value = '' }} />
       <div className="flex flex-wrap items-center gap-2">
         {photo ? (
           <span className="relative">
-            <img src={photo.url} alt="Your photo" className="h-14 w-14 rounded-lg border border-[#E2DCEA] object-cover" />
-            <button type="button" onClick={dropPhoto} aria-label="Remove the photo" className="absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full bg-[#1A1428] text-white ring-2 ring-white after:absolute after:-inset-2.5">
+            <img src={photo.url} alt="Your photo" className="h-14 w-14 rounded-lg border border-border object-cover" />
+            <button type="button" onClick={dropPhoto} aria-label="Remove the photo" className="absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full bg-foreground text-background ring-2 ring-card after:absolute after:-inset-2.5">
               <X size={12} aria-hidden="true" />
             </button>
           </span>
         ) : (
-          <button type="button" disabled={preparing} onClick={() => fileRef.current?.click()} className="inline-flex h-11 items-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white px-3 text-[13px] font-semibold text-[#4B2C66] hover:bg-[#F7F3FA] disabled:opacity-50">
+          <button type="button" disabled={preparing} onClick={() => fileRef.current?.click()} className="inline-flex h-11 items-center gap-1.5 rounded-xl border border-border bg-card px-3 text-[13px] font-semibold text-accent-foreground hover:bg-accent/50 disabled:opacity-50">
             {preparing ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <ImagePlus size={15} aria-hidden="true" />} Add a photo
           </button>
         )}
@@ -371,7 +371,7 @@ function AnswerBox({ obs }: { obs: MiObservation }) {
           type="button"
           disabled={busy || preparing || (!text.trim() && !photo)}
           onClick={() => void send()}
-          className="ml-auto inline-flex h-11 items-center gap-1.5 rounded-xl bg-[#6D4091] px-4 text-[13.5px] font-semibold text-white hover:bg-[#5A3478] disabled:opacity-45"
+          className="ml-auto inline-flex h-11 items-center gap-1.5 rounded-xl bg-primary px-4 text-[13.5px] font-semibold text-primary-foreground hover:bg-primary-deep disabled:opacity-45"
         >
           {busy ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Send size={15} aria-hidden="true" />} Send answer
         </button>
@@ -463,9 +463,9 @@ function OfficeBoard() {
                 { label: 'New to review', value: data.queue.new_items, icon: <Inbox size={16} aria-hidden="true" /> },
                 { label: 'Photos to identify', value: data.queue.unassigned, icon: <Camera size={16} aria-hidden="true" /> },
               ].map((k) => (
-                <div key={k.label} className="rounded-2xl border border-[#E6DAF0] bg-gradient-to-br from-[#FAF7FC] to-[#F1E9F7] p-3 sm:p-4">
-                  <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-[#6D4091]">{k.icon}{k.label}</div>
-                  <div className="mt-1 font-display text-[22px] font-bold tabular-nums text-[#1A1428] sm:text-[26px]">{k.value}</div>
+                <div key={k.label} className="rounded-2xl border border-primary/20 bg-gradient-to-br from-accent/50 to-accent p-3 sm:p-4">
+                  <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-primary">{k.icon}{k.label}</div>
+                  <div className="mt-1 font-display text-[22px] font-bold tabular-nums text-foreground sm:text-[26px]">{k.value}</div>
                 </div>
               ))}
             </div>
@@ -675,7 +675,7 @@ function IdentifySheet({ obs, onClose, boardItems }: { obs: MiObservation | null
       title="Identify this sighting"
       subtitle="Put it on an item already on the board, or name a new one."
       footer={
-        <button type="button" disabled={!ok || m.isPending} onClick={() => m.mutate()} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[14px] font-semibold text-white hover:bg-[#5A3478] disabled:opacity-45">
+        <button type="button" disabled={!ok || m.isPending} onClick={() => m.mutate()} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[14px] font-semibold text-primary-foreground hover:bg-primary-deep disabled:opacity-45">
           {m.isPending && <Loader2 size={16} className="animate-spin" aria-hidden="true" />} Save
         </button>
       }
@@ -692,7 +692,7 @@ function IdentifySheet({ obs, onClose, boardItems }: { obs: MiObservation | null
           {obs.note && <p className="text-[13px] text-muted-foreground">{obs.note}</p>}
           <div className="flex gap-2">
             {(['new', 'existing'] as const).map((v) => (
-              <button key={v} type="button" onClick={() => setMode(v)} className={cn('h-10 flex-1 rounded-xl text-[13px] font-semibold', mode === v ? 'bg-[#6D4091] text-white' : 'bg-[#F3EDF8] text-[#4B2C66]')}>
+              <button key={v} type="button" onClick={() => setMode(v)} className={cn('h-10 flex-1 rounded-xl text-[13px] font-semibold', mode === v ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground')}>
                 {v === 'new' ? 'New item' : 'Existing item'}
               </button>
             ))}
@@ -789,8 +789,8 @@ function ItemBody({ d, boardItems, raw, onRaw }: { d: MiItemDetail; boardItems: 
       )}
 
       {c && (
-        <div className="rounded-2xl border border-[#E6DAF0] bg-gradient-to-br from-[#FAF7FC] to-[#F1E9F7] p-4">
-          <div className="text-[13.5px] font-semibold leading-snug text-[#1A1428]">{c.summary}</div>
+        <div className="rounded-2xl border border-primary/20 bg-gradient-to-br from-accent/50 to-accent p-4">
+          <div className="text-[13.5px] font-semibold leading-snug text-foreground">{c.summary}</div>
           <div className="mt-3 grid grid-cols-3 gap-3">
             <Fact label="Sightings">{c.observations}</Fact>
             <Fact label="Shops">{c.shops}</Fact>
@@ -807,16 +807,16 @@ function ItemBody({ d, boardItems, raw, onRaw }: { d: MiItemDetail; boardItems: 
       </div>
 
       {d.yq_item ? (
-        <div className="flex items-center gap-3 rounded-2xl border border-[#cfe9da] bg-[#f3fbf6] p-3">
-          <PackageCheck size={20} className="shrink-0 text-[#137a48]" aria-hidden="true" />
+        <div className="flex items-center gap-3 rounded-2xl border border-success/25 bg-success/10 p-3">
+          <PackageCheck size={20} className="shrink-0 text-success" aria-hidden="true" />
           <span className="min-w-0 text-[13px]">
-            <span className="block font-semibold text-[#0f5a36]">Already in YQ: {d.yq_item.display_name}</span>
-            <span className="text-[#137a48]">Code {d.yq_item.item_code}</span>
+            <span className="block font-semibold text-success">Already in YQ: {d.yq_item.display_name}</span>
+            <span className="text-success">Code {d.yq_item.item_code}</span>
           </span>
         </div>
       ) : (
         d.gap && d.item.kind === 'new_product' && (
-          <div className="rounded-2xl border border-[#f1dfb8] bg-[#fdf8ee] p-3 text-[13px] text-[#7a4d0a]">
+          <div className="rounded-2xl border border-warning/25 bg-warning/10 p-3 text-[13px] text-warning">
             <span className="font-semibold">Gap:</span> not in the YQ catalog.
           </div>
         )
@@ -876,7 +876,7 @@ function ItemBody({ d, boardItems, raw, onRaw }: { d: MiItemDetail; boardItems: 
       {d.decisions && d.decisions.length > 0 && (
         <section>
           <h3 className="mb-2 flex items-center gap-1.5 font-display text-[14px] font-bold"><History size={15} aria-hidden="true" /> Decisions</h3>
-          <ol className="space-y-2 border-l-2 border-[#E6DAF0] pl-3">
+          <ol className="space-y-2 border-l-2 border-primary/20 pl-3">
             {d.decisions.map((x) => (
               <li key={x.id} className="text-[12.5px]">
                 <div className="font-semibold">
@@ -964,14 +964,14 @@ function Decide({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] })
   if (!caps.can_review) {
     if (d.item.status !== 'opportunity') return null
     return (
-      <section className="space-y-2 rounded-2xl border border-[#cfe9da] bg-[#f3fbf6] p-3">
-        <h3 className="font-display text-[14px] font-bold text-[#0f5a36]">Approve an action</h3>
+      <section className="space-y-2 rounded-2xl border border-success/25 bg-success/10 p-3">
+        <h3 className="font-display text-[14px] font-bold text-success">Approve an action</h3>
         <select aria-label="Action" value={action} onChange={(e) => setAction(e.target.value as MiAction)} className={cn(SELECT, 'w-full')}>
           <option value="">Choose what to do</option>
           {ACTIONS.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
         </select>
         <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why (optional)" aria-label="Reason" className={INPUT} />
-        <button type="button" disabled={!action || approve.isPending} onClick={() => approve.mutate()} className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#137a48] text-[13.5px] font-semibold text-white disabled:opacity-45">
+        <button type="button" disabled={!action || approve.isPending} onClick={() => approve.mutate()} className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-success text-[13.5px] font-semibold text-success-foreground disabled:opacity-45">
           {approve.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Approve
         </button>
       </section>
@@ -989,7 +989,7 @@ function Decide({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] })
       {next.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {next.map((s) => (
-            <button key={s} type="button" onClick={() => setTo(to === s ? '' : s)} className={cn('h-9 rounded-full px-3 text-[12.5px] font-semibold', to === s ? 'bg-[#6D4091] text-white' : 'bg-[#F3EDF8] text-[#4B2C66] hover:bg-[#EADFF3]')}>
+            <button key={s} type="button" onClick={() => setTo(to === s ? '' : s)} className={cn('h-9 rounded-full px-3 text-[12.5px] font-semibold', to === s ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground hover:bg-primary/15')}>
               {STATUS_LABEL[s]}
             </button>
           ))}
@@ -1011,7 +1011,7 @@ function Decide({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] })
       )}
       {(to || edit) && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why (kept in the history)" aria-label="Reason" className={INPUT} />}
       {to && (
-        <button type="button" disabled={!needs || move.isPending} onClick={() => move.mutate()} className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[13.5px] font-semibold text-white hover:bg-[#5A3478] disabled:opacity-45">
+        <button type="button" disabled={!needs || move.isPending} onClick={() => move.mutate()} className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[13.5px] font-semibold text-primary-foreground hover:bg-primary-deep disabled:opacity-45">
           {move.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Move to {STATUS_LABEL[to]}
         </button>
       )}
@@ -1028,7 +1028,7 @@ function Decide({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] })
           ).map(([k, label]) => (
             <input key={k} value={fields[k]} onChange={(e) => setFields((cur) => ({ ...cur, [k]: e.target.value }))} placeholder={label} aria-label={label} className={cn(INPUT, k === 'title' && 'col-span-2')} />
           ))}
-          <button type="button" disabled={save.isPending} onClick={() => save.mutate()} className="col-span-2 flex h-10 items-center justify-center gap-2 rounded-xl border border-[#6D4091] text-[13.5px] font-semibold text-[#6D4091] hover:bg-[#F3EDF8] disabled:opacity-45">
+          <button type="button" disabled={save.isPending} onClick={() => save.mutate()} className="col-span-2 flex h-10 items-center justify-center gap-2 rounded-xl border border-primary text-[13.5px] font-semibold text-primary hover:bg-accent disabled:opacity-45">
             {save.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Save details
           </button>
         </div>

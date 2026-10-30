@@ -191,13 +191,13 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
             )}
           </div>
           {existing && (
-            <div role="alert" className="mt-3 space-y-2 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] p-3 text-[12.5px] text-[#7a4d0a]">
+            <div role="alert" className="mt-3 space-y-2 rounded-xl border border-warning/25 bg-warning/10 p-3 text-[12.5px] text-warning">
               <p>
                 <span className="font-bold">A draft for {supplierOf(existing, lists)}, {monthOf(existing)} ({EDITION_LABEL[existing.edition] || existing.edition}) already exists.</span>{' '}
                 Building again replaces its narrative and its row choices from the data: hand edits are lost.
               </p>
               <div className="flex flex-wrap gap-2">
-                <button type="button" disabled={build.isPending} onClick={() => void startBuild()} className={cn(BTN, 'bg-[#96600d] hover:bg-[#7a4d0a]')}>
+                <button type="button" disabled={build.isPending} onClick={() => void startBuild()} className={cn(BTN, 'bg-warning text-warning-foreground hover:bg-warning/90')}>
                   {build.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Build again
                 </button>
                 <button type="button" onClick={() => { setOpenId(existing.id); setExisting(null) }} className={BTN_OUTLINE}>
@@ -420,9 +420,9 @@ function CountsView({ counts, edition }: { counts: Record<string, unknown>; edit
       {tiles.length > 0 && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {tiles.map(([label, n]) => (
-            <div key={label} className="rounded-xl border border-[#E6DAF0] bg-gradient-to-br from-[#FAF7FC] to-[#F1E9F7] p-2.5">
-              <div className="text-[11px] font-semibold text-[#6D4091]">{label}</div>
-              <div className="font-display text-[20px] font-bold tabular-nums text-[#1A1428]">{n}</div>
+            <div key={label} className="rounded-xl border border-primary/20 bg-gradient-to-br from-accent/50 to-accent p-2.5">
+              <div className="text-[11px] font-semibold text-primary">{label}</div>
+              <div className="font-display text-[20px] font-bold tabular-nums text-foreground">{n}</div>
             </div>
           ))}
         </div>
@@ -451,7 +451,7 @@ function CountsView({ counts, edition }: { counts: Record<string, unknown>; edit
                 <li key={`${String(b.label ?? b.code ?? i)}-${String(b.kind ?? '')}`} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
                   <span className="min-w-0 truncate">
                     {String(b.label ?? b.code ?? 'Unspecified')}
-                    {b.recurring ? <span className="ml-1.5 text-[11px] font-semibold text-[#6D4091]">recurring</span> : null}
+                    {b.recurring ? <span className="ml-1.5 text-[11px] font-semibold text-primary">recurring</span> : null}
                   </span>
                   <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
                     <span className="font-semibold text-foreground">{reports}</span> report{reports === 1 ? '' : 's'}
@@ -525,7 +525,7 @@ function FindingRow({
   // a frozen report lists every photo it approved; one no longer fit to show has no thumbnail
   const unshown = photos.filter((p) => !p.thumb_url).length
   return (
-    <li className={cn('rounded-xl border px-3 py-2 text-[12.5px]', changed ? 'border-[#C9B7DA] bg-[#FAF7FC]' : 'border-border', held && 'border-dashed bg-muted/40')}>
+    <li className={cn('rounded-xl border px-3 py-2 text-[12.5px]', changed ? 'border-primary/30 bg-accent/50' : 'border-border', held && 'border-dashed bg-muted/40')}>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11.5px] font-semibold text-muted-foreground">{row.ref || `MI-${row.id}`}</span>
         <span className="text-[11px] text-muted-foreground">{REPORT_SHEET_LABEL[sheet] || humanKey(sheet)}</span>
@@ -539,7 +539,7 @@ function FindingRow({
           <span className="ml-auto flex flex-wrap items-center gap-1">
             {!held && (
               <label className="flex min-h-9 cursor-pointer items-center gap-1.5 px-1 text-[12px] font-semibold">
-                <input type="checkbox" checked={inReport} onChange={onToggle} className="h-4 w-4 accent-[#6D4091]" />
+                <input type="checkbox" checked={inReport} onChange={onToggle} className="h-4 w-4 accent-primary" />
                 In the report{changed ? (inReport ? ' (to add)' : ' (to leave out)') : ''}
               </label>
             )}
@@ -739,7 +739,7 @@ function ReportBody({
         <p className="rounded-xl bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">A newer approved report for the same supplier, month and edition replaced this one. Use that one.</p>
       )}
       {notes.length > 0 && (
-        <div role="alert" className="space-y-1 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] px-3 py-2.5 text-[12.5px] text-[#7a4d0a]">
+        <div role="alert" className="space-y-1 rounded-xl border border-warning/25 bg-warning/10 px-3 py-2.5 text-[12.5px] text-warning">
           <p className="font-semibold">At approval:</p>
           {notes.map((w) => (
             <p key={w} className="flex gap-2">
@@ -749,12 +749,12 @@ function ReportBody({
         </div>
       )}
       {rebuilt && draft && (
-        <p role="status" className="rounded-xl bg-[#EEE8F4] px-3 py-2 text-[12.5px] font-medium text-[#4B2C66]">
+        <p role="status" className="rounded-xl bg-accent px-3 py-2 text-[12.5px] font-medium text-accent-foreground">
           Just rebuilt from the data: the narrative and the rows are the template's again, earlier hand edits were replaced.
         </p>
       )}
       {warnings.length > 0 && (
-        <div role="alert" className="space-y-1 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] px-3 py-2.5 text-[12.5px] text-[#7a4d0a]">
+        <div role="alert" className="space-y-1 rounded-xl border border-warning/25 bg-warning/10 px-3 py-2.5 text-[12.5px] text-warning">
           {warnings.map((w) => (
             <p key={w} className="flex gap-2">
               <TriangleAlert size={14} className="mt-0.5 shrink-0" aria-hidden="true" /> {w}
@@ -812,7 +812,7 @@ function ReportBody({
         )
       })}
       {!all.length && <p className="text-[12.5px] text-muted-foreground">No reports of this supplier in the month.</p>}
-      {editable && narrativeChanged && <p className="text-[11.5px] text-[#96600d]">Save the narrative before withholding rows or photos.</p>}
+      {editable && narrativeChanged && <p className="text-[11.5px] text-warning">Save the narrative before withholding rows or photos.</p>}
 
       {editable && heldPhotos.length > 0 && (
         <section>
@@ -877,24 +877,24 @@ function ReportBody({
           </p>
         )}
         {draft && can.approve && !opens && (
-          <button type="button" disabled className={cn(BTN, 'w-full bg-[#137a48]')}>
+          <button type="button" disabled className={cn(BTN, 'w-full bg-success text-success-foreground')}>
             <CheckCircle2 size={16} aria-hidden="true" /> Approve
           </button>
         )}
         {draft && can.approve && opens &&
           (sure ? (
-            <div className="space-y-2 rounded-xl border border-[#cfe9da] bg-[#f3fbf6] p-3">
-              <p className="text-[12.5px] text-[#0f5a36]">Approve this report? An earlier approved report of the same supplier, month and edition becomes superseded.</p>
+            <div className="space-y-2 rounded-xl border border-success/25 bg-success/10 p-3">
+              <p className="text-[12.5px] text-success">Approve this report? An earlier approved report of the same supplier, month and edition becomes superseded.</p>
               <div className="flex gap-2">
-                <button type="button" disabled={approve.isPending || (editable && (narrativeChanged || changes > 0))} onClick={() => approve.mutate()} className={cn(BTN, 'bg-[#137a48] hover:bg-[#0f5a36]')}>
+                <button type="button" disabled={approve.isPending || (editable && (narrativeChanged || changes > 0))} onClick={() => approve.mutate()} className={cn(BTN, 'bg-success text-success-foreground hover:bg-success/90')}>
                   {approve.isPending ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Stamp size={15} aria-hidden="true" />} Yes, approve
                 </button>
                 <button type="button" onClick={() => setSure(false)} className={BTN_OUTLINE}>Not yet</button>
               </div>
-              {editable && (narrativeChanged || changes > 0) && <p className="text-[11.5px] text-[#96600d]">Save the narrative and the rows first.</p>}
+              {editable && (narrativeChanged || changes > 0) && <p className="text-[11.5px] text-warning">Save the narrative and the rows first.</p>}
             </div>
           ) : (
-            <button type="button" onClick={() => setSure(true)} className={cn(BTN, 'w-full bg-[#137a48] hover:bg-[#0f5a36]')}>
+            <button type="button" onClick={() => setSure(true)} className={cn(BTN, 'w-full bg-success text-success-foreground hover:bg-success/90')}>
               <CheckCircle2 size={16} aria-hidden="true" /> Approve
             </button>
           ))}

@@ -180,7 +180,7 @@ function SupplierRow({ s, others, mergedName }: { s: MiSupplier; others: MiSuppl
               <input id={`sc-${s.id}`} value={code} onChange={(e) => setCode(e.target.value)} maxLength={40} className={INPUT} />
             </div>
             <label className="flex h-10 items-center gap-2 text-[13px] font-semibold">
-              <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} className="h-4 w-4 accent-[#6D4091]" /> Active
+              <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} className="h-4 w-4 accent-primary" /> Active
             </label>
             <button type="button" disabled={!Object.keys(body).length || save.isPending} onClick={() => save.mutate(body)} className={BTN}>
               {save.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Save
@@ -328,7 +328,7 @@ function BrandRow({ b, suppliers, supplierName, mergedName, others }: { b: MiBra
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex h-10 items-center gap-2 text-[13px] font-semibold">
-              <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} className="h-4 w-4 accent-[#6D4091]" /> Active
+              <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} className="h-4 w-4 accent-primary" /> Active
             </label>
             <button type="button" disabled={!Object.keys(body).length || save.isPending} onClick={() => save.mutate(body)} className={BTN}>
               {save.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Save
@@ -424,7 +424,7 @@ function IssueForm({ draft, onChange, codeLocked }: { draft: IssueDraft; onChang
                 type="checkbox"
                 checked={draft.fields.includes(f.value)}
                 onChange={(e) => set('fields', e.target.checked ? [...draft.fields, f.value] : draft.fields.filter((x) => x !== f.value))}
-                className="h-4 w-4 accent-[#6D4091]"
+                className="h-4 w-4 accent-primary"
               />
               {f.label}
             </label>
@@ -432,12 +432,12 @@ function IssueForm({ draft, onChange, codeLocked }: { draft: IssueDraft; onChang
         </div>
       </fieldset>
       <div className="flex flex-wrap gap-x-5 gap-y-1">
-        <label className="flex min-h-9 items-center gap-2 text-[13px] font-semibold text-[#9f1239]">
-          <input type="checkbox" checked={draft.safety_default} onChange={(e) => set('safety_default', e.target.checked)} className="h-4 w-4 accent-[#9f1239]" />
+        <label className="flex min-h-9 items-center gap-2 text-[13px] font-semibold text-destructive">
+          <input type="checkbox" checked={draft.safety_default} onChange={(e) => set('safety_default', e.target.checked)} className="h-4 w-4 accent-destructive" />
           Safety issue (alerts the manager)
         </label>
         <label className="flex min-h-9 items-center gap-2 text-[13px] font-semibold">
-          <input type="checkbox" checked={draft.active} onChange={(e) => set('active', e.target.checked)} className="h-4 w-4 accent-[#6D4091]" />
+          <input type="checkbox" checked={draft.active} onChange={(e) => set('active', e.target.checked)} className="h-4 w-4 accent-primary" />
           Active (reps can pick it)
         </label>
       </div>
@@ -550,7 +550,7 @@ function IssueRow({ t }: { t: MiIssueType }) {
   return (
     <li className="rounded-2xl border border-border bg-card p-3">
       <div className="flex flex-wrap items-center gap-2">
-        {t.safety_default && <Flame size={15} className="text-[#9f1239]" aria-label="Safety" />}
+        {t.safety_default && <Flame size={15} className="text-destructive" aria-label="Safety" />}
         <span className="font-semibold">{t.label_en}</span>
         {t.label_ar && (
           <span dir="rtl" lang="ar" className="text-[13px] text-muted-foreground">
