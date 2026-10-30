@@ -71,7 +71,7 @@ export const PORTAL_BOOT_CSS = [
   // that moves. Its geometry is the old animated horizon's resting place (an ellipse 132 % of the
   // viewport, centred on the top edge), so the picture is the one people know.
   `.yqb-night,.yqb-plain{background:#140F24}`,
-  `.yqb-night .yqb-dome{left:-16%;width:132%;top:-66%;height:132%;border-radius:50%;background:radial-gradient(closest-side,#1C0B3F 0%,#1C0B3F 79%,#221150 85.5%,#3A1C9E 90.5%,#7547F0 94.2%,#C7AEFF 97.2%,#FFFFFF 98.7%,#FFFFFF 99.6%,rgba(255,255,255,0) 100%);box-shadow:0 0 16px 2px rgba(255,255,255,.6),0 0 56px 12px rgba(190,150,255,.4),0 0 160px 42px rgba(73,34,229,.28)}`,
+  `.yqb-night .yqb-dome{left:-16%;width:132%;top:-66%;height:132%;border-radius:50%;background:radial-gradient(closest-side,#1C0B3F 0%,#1C0B3F 77%,#24114F 83%,#4121AA 88.5%,#8657F3 92.6%,#D3BFFF 95.8%,#F4EEFF 98.2%,#FFFFFF 99.7%,rgba(255,255,255,0) 100%);box-shadow:0 0 6px 1px rgba(255,255,255,.7),0 0 34px 6px rgba(165,88,251,.26),0 0 120px 24px rgba(73,34,229,.14)}`,
   // the ONE glow: a soft violet light along the horizon. Hidden in the served frame; the login lets it
   // bloom once (transform + opacity, 900 ms) when it arrives — never a loop
   `.yqb-night .yqb-glow{left:-12%;width:124%;top:34%;height:60%;opacity:0;background:radial-gradient(50% 50% at 50% 50%,rgba(165,88,251,.36) 0%,rgba(120,72,240,.16) 46%,rgba(120,72,240,0) 72%)}`,
