@@ -338,9 +338,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     if (error) return { ok: false, error: error.message }
     // Adopt the session immediately so the router doesn't bounce back to /login.
-    if (data.session) { adoptSession(data.session); warmLanding() }
-    // Deliberately NOT awaited: onAuthStateChange (SIGNED_IN, a new user for this tab) starts
-    // the /me load, and ProtectedRoute shows the self-recovering connecting screen until it answers.
+    if (data.session) {
+      adoptSession(data.session)
+      warmLanding()
+      // The first /me of this sign-in — onAuthStateChange (SIGNED_IN, a new user for this tab) has
+      // started it; loadMe() joins it (or starts it, if the event has not run yet). The button keeps
+      // "Signing in…" while it answers, for up to 1.2 s, so a normal sign-in goes straight to the right
+      // shell, office or field, with no screen in between. A slower one moves on: ProtectedRoute shows
+      // the shell's outline, and the connecting screen only after 4 s (components/guards.tsx) — it
+      // used to flash on every sign-in.
+      await Promise.race([loadMe(), sleep(1200)])
+    }
     return { ok: true }
   }
 
