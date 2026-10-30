@@ -5,6 +5,22 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Live
 
+- Polish, ship 2 (released 30-Oct-2026 overnight on the owner's go, `4f65e0f`, web and API; release log in
+  `docs/MARKETPLACE.md`): the ops portal and the salesman app on the marketplace's standard. Office: the plum brand
+  (Instrument Sans + Sora, the night sidebar, one KPI tile, one card, tokens instead of hex; it came in as one merge,
+  `433ca4b`, so it can be reverted on his word), a first frame that is never white, "Connecting" only after 4 s, a
+  weekly intro that can be skipped, page changes that keep the old page while the next one's code loads (fetched
+  ahead on hover and when idle), an error boundary per page, the window scrolls, the seven hand-made pop-ups are
+  real sheets (Esc, focus, an exit), toasts above sheets, no blur. Salesman app: no blur on the tab bar or header,
+  each tab keeps its place, 16 px inputs and 44 px targets, the shop pick survives a WhatsApp detour (12 h), and
+  sign-out clears a shared phone. Proof: the browser checks `web/scripts/*_check.py` (admin, sales, shell, layers,
+  boot) and their node rules in CI. An independent re-rate scored live 7.0/10, new 7.5/10 (about 8.2 with its first
+  item fixed, which it is: coloured KPI figures keep their size). Open: the office's sheets stay light in dark mode
+  (his call); the shop pick is not tied to the signed-in rep (a phone the first rep did not sign out of keeps the
+  shop up to 12 h); the Undo card can sit over the checkout while a sheet is open; Spotted covers a row's Qty and +
+  at rest on a phone; Back with a product sheet open leaves the catalog; delivery shows a zero amount, not "Free";
+  the Data upload page and the rep's desktop catalog shift as they load; KPI labels wrap at some widths; the chart
+  pages paint 260-420 ms after a click headless (target 150 ms).
 - The Browse menu fix (29-Oct-2026, `dbe8899`): the menu sits above the category strip, and a click keeps it open.
 - Live (30-Oct-2026, `c559ac1`, web and API; `docs/MARKETPLACE.md` § Motion and the release log): the
   marketplace feel pass, the design review's fixes, the smooth opening and living slides; then round 2 for the
@@ -26,10 +42,8 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   with an item, it speaks first, the bubble beside the button.
 - The marketplace polish, ship 1 (released 28-Oct-2026 on the owner's go; `docs/MARKETPLACE.md`, release log):
   smoother photos, pages, sheets and Back, honest prices when the price check is slow or down, and the QA
-  harness's smoothness guards (`scripts/qa/smooth.py`). Open: ship 2, the same polish for the ops portal and the
-  salesman app (three finished agent branches to integrate, then the portal shell, brand and sheets); the
-  owner's call on the opening's hold time (1.9 s, 2.8 s on a first visit; the plan said 1.6 s); 11 minor
-  findings of the final review, deferred.
+  harness's smoothness guards (`scripts/qa/smooth.py`). Open: the owner's call on the opening's hold time (1.9 s,
+  2.8 s on a first visit; the plan said 1.6 s); 11 minor findings of the final review, deferred.
 - Ops skills, phase 1 and its upgrade: `/yq-load` (check, then the Windows box, then the writer, then the e-mail) and
   `/yq-brief` (with the team message). The engine is `python -m scripts.ops`. The one program that writes to the database
   is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (every

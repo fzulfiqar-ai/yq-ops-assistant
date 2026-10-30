@@ -877,6 +877,16 @@ guard in `scripts/qa/smooth.py` that failed on the build before it.
 
 ## Release log
 
+- **Polish, ship 2 (30-Oct-2026, branch `polish-portal`, released overnight as `4f65e0f`, web and API, on the
+  owner's go)** — the ops portal and the salesman app. Five streams in parallel worktrees, merged in order: the
+  shell (`lib/pageCode`, `lib/prefetch`, window scrolling, an error boundary per route, each tab's place kept), the
+  boot (`src/boot/frames.ts`: the served frame, the static login, the weekly intro), the sheets (`ui/sheet` on
+  `lib/sheet`, the seven modals, toasts above sheets, the photo fade-in), the brand (plum tokens, Instrument Sans
+  + Sora, the night sidebar, `ui/kpi-tile`, `lib/greeting`, `lib/shortcut`) and the salesman render check. The
+  release review's fixes: a deploy that lands mid warm-up never reloads the tab (`lib/warmState`), the first frame
+  on the brand's colours, coloured KPI figures keep their size (`cn()` knows `text-kpi`), the Ctrl K palette
+  without blur or violet. Rules in CI: `portal_shell_test`, `portal_layers_test`, `portal_boot_test`,
+  `portal_brand_test`; browser checks in `web/scripts/`.
 - **The feel pass (29-Oct-2026, branch `market-feel`, released 30-Oct-2026 as `c559ac1`, web and API)** — the motion table above, the
   Browse menu fix (released on its own on 29-Oct-2026 as `dbe8899`), a fresh design review's nine gaps
   (Add never moves the page, a shelf's first frame draws sooner, one label style, an Orders page that
