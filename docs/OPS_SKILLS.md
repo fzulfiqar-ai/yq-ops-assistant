@@ -273,7 +273,8 @@ one of two lines, and the load check says the same in its own words:
 
 ## 4. Definitions used by the brief
 
-- **The basis.** Every sales figure is for Accessories: all divisions except SIM and Devices, giveaway
+- **The basis.** Every sales figure is for Accessories: all divisions except SIM and Devices (the ZTE
+  handsets are Devices: no ZTE sale counts, as no SIM sale does), giveaway
   items left out, ex-VAT, up to the *data date*, which is the last day with loaded sales (never
   today). Returns are not deducted. B2C is the two retail outlets; everyone else is B2B. Weeks run
   Sunday to Saturday. The sales pace counts the working days, Sunday to Thursday. "At cost" has one

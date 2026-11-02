@@ -143,6 +143,13 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 ## In progress
 
 - The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
+  October's build of 2-Nov-2026 counted a ZTE handset invoice as an accessory sale: it waits for release r11.
+- Release r11 (built 02-Nov-2026 on branch `zte-devices`): the ZTE handsets are Devices, so no ZTE sale counts as an
+  accessory sale, as no SIM sale does (`docs/MIGRATIONS.md` § Release r11). The stock side's half is
+  `items.not_accessories` in the git-ignored config.
+  - Waiting for: the owner's go to apply the migration (rehearsed first), then October's pack built again.
+  - The category backfill's guard (branch `zte-backfill-guard`: never a SIM / Devices / Giveaway product moved, never a
+    curated division re-seeded) is an engine file: it ships with the next API deploy, never on its own before one.
 - YQ Assist 2.2 (release assist2.2), built 29-Oct-2026 on branch `worktree-assist-sales`, not released: the YQ mark
   in the orb, a bubble that names something real and changes each visit, product names with the codes, one
   conversation with a human voice (never the same reply twice, an order for "what should I order", help for "how can
@@ -192,6 +199,8 @@ Market Intel phases 3 and 4 once the rep reports are enough (judged from about 1
 - SIM transfers are left out of the storekeeper check (`/yq-moves` is accessories only).
 - The WEKOME codes take the approved Categories rows (set in the git-ignored config); a new Screen Protectors row.
 - `/yq-stock` values stock at the landed cost from goods-received notes, the pricing-sheet cost only where none exists.
+- (2-Nov-2026) The ZTE handsets are held and sold by the accessories team, but no ZTE sale is ever counted as an
+  accessory sale, the same as SIM for Batelco (release r11), and the stock plan leaves them out.
 
 ## Rules that bite
 

@@ -949,3 +949,42 @@ default grants, so only the file's own revokes close the new objects): assist1, 
 timeline UPDATE refused, a second reminder to the same recipient refused (rep then owner allowed), a retried
 client_ticket_id refused, yq_readonly reading the view but not the table, a bad kind refused, a ticket delete removing its timeline and
 clearing the turn's link, anon refused; the reverse; v2 again. Tests: `python -m tests.test_assist_v2` (in CI).
+
+## Release r11 (built 02-Nov-2026, not applied): `r11_zte_devices_migration.sql` — the ZTE handsets are Devices
+
+The ZTE handsets (the day book's `ZTE-A35e MOBILE` and `ZTE-A36 MOBILE`) carried no product category, so `v_sales`
+gave their lines the residual division, Accessories. Issued through the roadshow at no value (March to September 2026)
+they were giveaway lines that no figure counted; the first invoice at a price (29-Oct-2026) was counted by every
+accessory figure (the monthly and weekly workbooks, the brief, the KPI pace). The owner (02-Nov-2026): no ZTE sale is
+ever counted, the same as SIM for Batelco. Data only, with `r11_zte_devices_reverse.sql`: no view, column or grant
+changes, so the ownership table above is unchanged.
+
+- **`categories`**: `Mobile Handsets`, division `Devices` (the monthly workbook's handset row has the same name).
+- **`products`** `ZTE-A35e` and `ZTE-A36` in it (`Nos`, `Authorized`, as the other products) and **`product_aliases`**
+  for the day book's two names: `v_sales` takes the category's division first, so every basis that leaves SIM and
+  Devices out (`scripts/ops/sales.py`, `kpi.py`, the weekly and monthly workbooks; the reconciliation counts
+  `Accessories` only) leaves them out. An alias is inserted only where none exists, and the file refuses to run if
+  either name already points at another product.
+- **`division_rules`**: `(^|[^a-z])zte([^a-z]|$)` → Devices, priority 25 (ahead of the generic device row), so
+  `v_item_division` (`v_stock_health`, `v_division_summary`) resolves every spelling the same way: the stock
+  balance's, the ledger's (the code repeated after the name), a later model's.
+- **The self-check**: both names resolve to a Devices category; no ZTE line in `v_sales` and no ZTE name in
+  `v_item_division` is anything else; a notice gives the number of ZTE lines, every one Devices.
+- **Kept so**: the one thing that could move them back is `scripts/category_backfill.py`, which re-points products by
+  their Focus item group when a load carries a Multi_level_stock_movement report (none of the six standard reports is
+  one). Its guard is built on branch `zte-backfill-guard` and ships with the next API deploy (it is an engine file: on
+  main before the API has it, every `/yq-load` would stop at "a portal release is merged but not live"): the Focus pass
+  never moves a product out of a SIM / Devices / Giveaway category, and the seed adds new category names only
+  (`ignore_duplicates`). Today every run with a Multi_level report puts `Sim`, `Postpaid Giveaway` and `Batelco TRA
+  Devices` back to the coarse `Telecom`, a division `v_sales` does not know, so their lines would fall to Accessories.
+  Until the guard is live, re-running this file after such a load puts the handsets back.
+- **The stock side** is `items.not_accessories` in the git-ignored `config.json` (the ledger's spellings), set on the
+  owner's PC: the stock plan and the count sheets leave the handsets out. Not in this file.
+- **Known limit**: a later ZTE model arrives under a new item name with no alias, and `v_sales` calls it Accessories
+  until it has its own product and alias (the monthly workbook names such an item under Other, "no rule and no card").
+- **Reverse**: removes the rule, the two aliases, the two products and the category, dependents first, each only while
+  nothing else points at it (no CASCADE); the handsets are Accessories by default again.
+
+Rehearse, then apply, from the main project folder: `python -m scripts.apply_sql
+scripts/r11_zte_devices_migration.sql --rehearse` (one transaction on production, always rolled back), then without
+`--rehearse`. Tests: `python -m tests.test_r11_zte_devices` (in CI).
