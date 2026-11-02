@@ -950,7 +950,7 @@ timeline UPDATE refused, a second reminder to the same recipient refused (rep th
 client_ticket_id refused, yq_readonly reading the view but not the table, a bad kind refused, a ticket delete removing its timeline and
 clearing the turn's link, anon refused; the reverse; v2 again. Tests: `python -m tests.test_assist_v2` (in CI).
 
-## Release r11 (built 02-Nov-2026, not applied): `r11_zte_devices_migration.sql` — the ZTE handsets are Devices
+## Release r11 (applied 02-Nov-2026): `r11_zte_devices_migration.sql` — the ZTE handsets are Devices
 
 The ZTE handsets (the day book's `ZTE-A35e MOBILE` and `ZTE-A36 MOBILE`) carried no product category, so `v_sales`
 gave their lines the residual division, Accessories. Issued through the roadshow at no value (March to September 2026)
@@ -988,3 +988,8 @@ changes, so the ownership table above is unchanged.
 Rehearse, then apply, from the main project folder: `python -m scripts.apply_sql
 scripts/r11_zte_devices_migration.sql --rehearse` (one transaction on production, always rolled back), then without
 `--rehearse`. Tests: `python -m tests.test_r11_zte_devices` (in CI).
+
+Rehearsed 02-Nov-2026 on production, rolled back: the file alone, then in one transaction the file twice, the reverse
+twice and the file again, the rule, aliases, products, category and every ZTE line's division checked after each step.
+Applied the same day (the owner ran it). After it: every ZTE line in `v_sales` and both names in `v_item_division` are
+Devices, none is left on the accessory basis, and `python -m scripts.audit_grants` is clean.
