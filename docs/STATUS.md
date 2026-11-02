@@ -147,9 +147,10 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 - Release r11 (applied 02-Nov-2026): the ZTE handsets are Devices, so no ZTE sale counts as an accessory sale, as no
   SIM sale does (`docs/MIGRATIONS.md` § Release r11). The stock side's half is `items.not_accessories` in the
   git-ignored config, set the same day.
-  - Still to ship: the category backfill's guard (branch `zte-backfill-guard`: never a SIM / Devices / Giveaway product
-    moved, never a curated division re-seeded) is an engine file: it ships with the next API deploy, never on its own
-    before one. Until then, re-run r11 after any load that carries a Multi_level_stock_movement report.
+  - The category backfill's guard (never a SIM / Devices / Giveaway product moved, never a curated division
+    re-seeded) is an engine file: it is merged together with the API deploy that carries it (4-Nov-2026, with the
+    fix for Focus's new title dates). Until that deploy is live, re-run r11 after any load that carries a
+    Multi_level_stock_movement report.
 - YQ Assist 2.2 (release assist2.2), built 29-Oct-2026 on branch `worktree-assist-sales`, not released: the YQ mark
   in the orb, a bubble that names something real and changes each visit, product names with the codes, one
   conversation with a human voice (never the same reply twice, an order for "what should I order", help for "how can

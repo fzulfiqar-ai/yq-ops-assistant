@@ -972,12 +972,12 @@ changes, so the ownership table above is unchanged.
   `v_item_division` is anything else; a notice gives the number of ZTE lines, every one Devices.
 - **Kept so**: the one thing that could move them back is `scripts/category_backfill.py`, which re-points products by
   their Focus item group when a load carries a Multi_level_stock_movement report (none of the six standard reports is
-  one). Its guard is built on branch `zte-backfill-guard` and ships with the next API deploy (it is an engine file: on
-  main before the API has it, every `/yq-load` would stop at "a portal release is merged but not live"): the Focus pass
+  one). Its guard came on branch `zte-backfill-guard`, released with an API deploy (it is an engine file: on main
+  before the API has it, every `/yq-load` would stop at "a portal release is merged but not live"): the Focus pass
   never moves a product out of a SIM / Devices / Giveaway category, and the seed adds new category names only
-  (`ignore_duplicates`). Today every run with a Multi_level report puts `Sim`, `Postpaid Giveaway` and `Batelco TRA
+  (`ignore_duplicates`). Before it, every run with a Multi_level report put `Sim`, `Postpaid Giveaway` and `Batelco TRA
   Devices` back to the coarse `Telecom`, a division `v_sales` does not know, so their lines would fall to Accessories.
-  Until the guard is live, re-running this file after such a load puts the handsets back.
+  Tests: `python -m tests.test_r11_zte_devices` (the backfill on an in-memory stand-in, red on the code before it).
 - **The stock side** is `items.not_accessories` in the git-ignored `config.json` (the ledger's spellings), set on the
   owner's PC: the stock plan and the count sheets leave the handsets out. Not in this file.
 - **Known limit**: a later ZTE model arrives under a new item name with no alias, and `v_sales` calls it Accessories

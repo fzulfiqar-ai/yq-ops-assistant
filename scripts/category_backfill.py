@@ -16,6 +16,12 @@ product whose code is a catalog item takes the analytics category its marketplac
 Cable and cables under Car Charger. Each change is logged in category_master_log. Until that
 migration runs the master is absent and the Focus groups stand, exactly as before.
 
+r11 (02-Nov-2026): a division is the owner's, never a Focus group's. A product filed under a SIM, Devices or
+Giveaway category keeps it whichever group Focus lists it under (the ZTE handsets are Devices,
+scripts/r11_zte_devices_migration.sql), and the seed adds new category names only: a category already
+there keeps its division (before r11 every run put 'Sim', 'Postpaid Giveaway' and 'Batelco TRA Devices'
+back to the coarse 'Telecom', a division v_sales does not know, so their lines fell to Accessories).
+
   python -m scripts.category_backfill ["business_data/Focus ERP Updated Reports"]
 """
 from __future__ import annotations
@@ -37,6 +43,9 @@ from scripts.ingest import read_grid  # noqa: E402
 DEFAULT_FOLDER = "business_data/Focus ERP Updated Reports"
 # Coarse division — reviewable seed (the granular categories are Focus's own item-groups).
 TELECOM = {"Sim", "Postpaid Giveaway", "Batelco TRA Devices"}
+# r11: the divisions a Focus item group never moves a product out of (v_sales leaves SIM and Devices out of every
+# accessory figure, and Giveaway out of revenue)
+HELD_DIVISIONS = ("SIM", "Devices", "Giveaway")
 
 
 def _clean(s: object) -> str:
@@ -104,6 +113,13 @@ def master_targets(master: list[dict], categories: list[dict], catalog: list[dic
     return out
 
 
+def held_products(categories: list[dict], products: list[dict]) -> set[int]:
+    """Pure (r11): the products filed under a SIM, Devices or Giveaway category. The Focus item-group pass
+    leaves them where they are: the division is the owner's (the ZTE handsets are Devices), not the group's."""
+    held = {r["id"] for r in categories if (r.get("division") or "Accessories") in HELD_DIVISIONS}
+    return {p["id"] for p in products if p.get("category_id") in held}
+
+
 def plan_category_master(master: list[dict], categories: list[dict], catalog: list[dict],
                          products: list[dict]) -> list[dict]:
     """Pure (R7d): the governed products whose category differs from the master's."""
@@ -163,13 +179,15 @@ def backfill(folder: str | None = None) -> dict:
         return {"ok": False, "reason": "no multi-level report"}
     c = get_client()
 
-    # 1 — seed categories (name + coarse division)
+    # 1 — seed categories (name + coarse division). r11: new names only; a category already there keeps its
+    #     division (the curated SIM / Devices / Giveaway ones are never put back to the coarse seed by a load)
     cats = sorted({cat for _, cat in pairs})
     for name in cats:
         c.table("categories").upsert(
             {"name": name, "division": "Telecom" if name in TELECOM else "Accessories"},
-            on_conflict="name").execute()
-    cat_id = {r["name"]: r["id"] for r in (c.table("categories").select("id,name").execute().data or [])}
+            on_conflict="name", ignore_duplicates=True).execute()
+    cat_rows = c.table("categories").select("id,name,division").execute().data or []
+    cat_id = {r["name"]: r["id"] for r in cat_rows}
 
     # 2 — map each report item -> a product (via aliases first, then the product name)
     alias_map = {a["alias_text"]: a["product_id"]
@@ -183,13 +201,15 @@ def backfill(folder: str | None = None) -> dict:
     # the Focus group on every load); apply_category_master() below settles any difference
     m = _load_master(c)
     governed = set(master_targets(m["master"], m["categories"], m["catalog"], m["products"])) if m else set()
+    # r11: a product under a SIM / Devices / Giveaway category keeps it, whichever group Focus lists it under
+    held = held_products(cat_rows, _all_rows(c, "products", "id,category_id"))
     by_cat: dict[int, list[int]] = defaultdict(list)
     matched, unmatched = 0, []
     for item, cat in pairs:
         pid = alias_map.get(item) or name_map.get(item)
         cid = cat_id.get(cat)
         if pid and cid:
-            if pid not in governed:
+            if pid not in governed and pid not in held:
                 by_cat[cid].append(pid)
             matched += 1
         else:

@@ -17,7 +17,9 @@ Covered:
     division, the self-check; every statement outside a DO block parses as Postgres (sqlglot, when installed);
   * the reverse: the same literals, dependents first (rule, aliases, products, category), each delete only of what r11
     added, no DROP or CASCADE, its own self-check;
-  * (scripts/category_backfill.py's guard ships with the next API deploy, branch zte-backfill-guard, with its tests);
+  * scripts/category_backfill.py (r11) on an in-memory stand-in: the Focus item-group pass never moves a product out of
+    a SIM, Devices or Giveaway category (the ZTE handset listed under an accessory group stays a handset), it still
+    moves an accessory, and the seed adds new category names only (a curated division is never put back to Telecom);
   * nothing in the two SQL files reads like a live amount (the repo-clean scan of scripts/ops/selftest.py), and the
     release is documented (docs/MIGRATIONS.md, the basis in docs/OPS_SKILLS.md).
 """
@@ -33,6 +35,7 @@ import io  # noqa: E402
 import re  # noqa: E402
 import sys  # noqa: E402
 import traceback  # noqa: E402
+import types  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -190,6 +193,123 @@ def _():
     from scripts.ops import selftest
     for path in (MIGRATION, REVERSE, Path(__file__)):
         assert not selftest.scan_text(path.read_text(encoding="utf-8"), []), path.name
+
+
+# ── the category backfill (r11) ────────────────────────────────────────────────────────────────
+
+CATS = [{"id": 1, "name": "Batelco TRA Devices", "division": "Devices"},
+        {"id": 2, "name": "Cable", "division": "Accessories"},
+        {"id": 8, "name": "Postpaid Giveaway", "division": "Giveaway"},
+        {"id": 10, "name": "Sim", "division": "SIM"},
+        {"id": 12, "name": "Mobile Handsets", "division": "Devices"},
+        {"id": 13, "name": "Uncurated", "division": None}]
+PRODUCTS = [{"id": 104, "sku_code": "SIMKIT", "item_name": "SIMKIT thing", "category_id": 10},
+            {"id": 105, "sku_code": "GIFTBOX", "item_name": "GIFTBOX thing", "category_id": 8},
+            {"id": 106, "sku_code": "TRA1", "item_name": "TRA1 thing", "category_id": 1},
+            {"id": 107, "sku_code": "OLD", "item_name": "OLD thing", "category_id": 13},
+            {"id": 108, "sku_code": "NOCAT", "item_name": "NOCAT thing", "category_id": None},
+            {"id": 109, "sku_code": "ZTE-A35e", "item_name": "ZTE-A35e MOBILE", "category_id": 12}]
+
+
+class _Q:
+    def __init__(self, store, name):
+        self.store, self.name, self.op, self.payload, self.ids, self.kw = store, name, "select", None, None, {}
+
+    def select(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def range(self, a, b):
+        self.rng = (a, b)
+        return self
+
+    def upsert(self, row, **k):
+        self.op, self.payload, self.kw = "upsert", row, dict(k)
+        return self
+
+    def update(self, vals):
+        self.op, self.payload = "update", vals
+        return self
+
+    def in_(self, col, ids):
+        self.ids = list(ids)
+        return self
+
+    def execute(self):
+        rows = self.store.tables[self.name]
+        if self.op == "select":
+            a, b = getattr(self, "rng", (0, 10 ** 6))
+            return types.SimpleNamespace(data=[dict(r) for r in rows][a:b + 1])
+        if self.op == "update":
+            self.store.writes.append((self.name, "update", dict(self.payload), list(self.ids)))
+            for r in rows:
+                if r.get("id") in self.ids:
+                    r.update(self.payload)
+            return types.SimpleNamespace(data=[])
+        if self.op == "upsert":
+            # PostgREST: ignore_duplicates -> ON CONFLICT DO NOTHING; otherwise the row overwrites the one there
+            self.store.writes.append((self.name, "upsert", dict(self.payload), dict(self.kw)))
+            key = self.kw.get("on_conflict")
+            there = next((r for r in rows if key and r.get(key) == self.payload.get(key)), None)
+            if there is None:
+                rows.append({"id": 100 + len(rows), **self.payload})
+            elif not self.kw.get("ignore_duplicates"):
+                there.update(self.payload)
+            return types.SimpleNamespace(data=[])
+        raise AssertionError(self.op)
+
+
+class _Store:
+    def __init__(self, tables):
+        self.tables, self.writes = tables, []
+
+    def table(self, name):
+        if name not in self.tables:
+            raise RuntimeError(f'relation "{name}" does not exist')
+        return _Q(self, name)
+
+
+def _store() -> _Store:
+    return _Store({"categories": [dict(c) for c in CATS], "products": [dict(p) for p in PRODUCTS],
+                   "product_aliases": [{"alias_text": "ZTE-A35e MOBILE", "product_id": 109}]})
+
+
+@test("held_products: every product under a SIM, Devices or Giveaway category, none under Accessories or none")
+def _():
+    from scripts import category_backfill as cb
+    assert cb.HELD_DIVISIONS == ("SIM", "Devices", "Giveaway")
+    assert cb.held_products(CATS, PRODUCTS) == {104, 105, 106, 109}
+
+
+@test("the Focus pass: the ZTE handset listed under Cable stays a handset; SIM, giveaway and device products stay; "
+      "an accessory still moves; the seed never re-divides a category already there")
+def _():
+    from scripts import category_backfill as cb
+    st = _store()
+    pairs = [("ZTE-A35e MOBILE", "Cable"), ("SIMKIT thing", "Cable"), ("GIFTBOX thing", "Cable"),
+             ("TRA1 thing", "Batelco TRA Devices"), ("OLD thing", "Cable"), ("NOCAT thing", "Cable"),
+             ("NEW thing", "Brand New Group"), ("SIMKIT thing", "Sim"), ("GIFTBOX thing", "Postpaid Giveaway")]
+    saved = (cb.parse_categories, cb.get_client)
+    cb.parse_categories, cb.get_client = (lambda folder: ("x.xlsx", pairs)), (lambda: st)
+    try:
+        out = cb.backfill("anywhere")
+    finally:
+        cb.parse_categories, cb.get_client = saved
+    assert out["ok"] and out["category_master"]["ok"] is False          # no master table here: Focus groups stand
+    cats = {p["id"]: p["category_id"] for p in st.tables["products"]}
+    assert cats[109] == 12, "the ZTE handset must stay under Mobile Handsets (Devices)"
+    assert (cats[104], cats[105], cats[106]) == (10, 8, 1), "SIM, giveaway and device products keep their category"
+    assert (cats[107], cats[108]) == (2, 2), "an accessory (curated or not) still takes its Focus group"
+    moved = {pid for w in st.writes if w[0] == "products" and w[1] == "update" for pid in w[3]}
+    assert moved == {107, 108}, moved
+    seeds = [w for w in st.writes if w[0] == "categories" and w[1] == "upsert"]
+    assert seeds and all(w[3] == {"on_conflict": "name", "ignore_duplicates": True} for w in seeds), seeds
+    division = {r["name"]: r["division"] for r in st.tables["categories"]}
+    assert (division["Sim"], division["Postpaid Giveaway"], division["Batelco TRA Devices"]) == (
+        "SIM", "Giveaway", "Devices"), "a curated division is never put back to the coarse seed"
+    assert division["Brand New Group"] == "Accessories", "a new group still gets the coarse seed"
 
 
 # ── the documents ──────────────────────────────────────────────────────────────────────────────
