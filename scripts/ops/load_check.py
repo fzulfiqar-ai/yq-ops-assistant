@@ -772,12 +772,16 @@ def inventory(arg: str | None, deps: Deps) -> dict:
                        "Close it, then run the check again.") from None
 
     as_on: dict[str, str] = {}
+    starts: dict[str, str] = {}      # a title printed as a from-to range (Focus, from 4-Nov-2026): its first day
     for kind, p in files.items():
         if kind == "ledger_entries":                 # never loaded, so an unreadable date never stops a load
             try:
-                as_on[kind] = ing.report_date_from_title(title_rows(p)) or ""
+                start, day = ing.report_span_from_title(title_rows(p))
             except Exception:  # noqa: BLE001
-                as_on[kind] = ""
+                start, day = None, None
+            as_on[kind] = day or ""
+            if start:
+                starts[kind] = start
             continue
         if p.suffix.lower() != ".xlsx":
             raise Stop(f"{p.name} is not an .xlsx export. Export it again from Focus as Excel.")
@@ -791,19 +795,21 @@ def inventory(arg: str | None, deps: Deps) -> dict:
         if not ing.sniff_focus(p):
             raise Stop(f"{p.name} does not look like a Focus export (no company title in its first rows). "
                        "Remove it from the folder or export it again.")
-        day = ing.report_date_from_title(top)
+        start, day = ing.report_span_from_title(top)
         if not day:
             raise Stop(f"{p.name} has no \"As on date\" in its title block, so it cannot be dated. Export it again "
                        "from Focus.")
         as_on[kind] = day
+        if start:
+            starts[kind] = start
 
     day = paths.drop_date(drop.name) or paths.drop_date(drop.parent.name)
     if day is None:
         dated = (sorted(v for k, v in as_on.items() if v and not k.startswith("selling_prices"))
                  or sorted(v for v in as_on.values() if v))
         day = date.fromisoformat(dated[-1]) if dated else deps.now().date()
-    return {"drop": drop, "day": day, "files": files, "as_on": as_on, "hashes": hashes, "others": found["others"],
-            "folders": found["folders"], "note": note}
+    return {"drop": drop, "day": day, "files": files, "as_on": as_on, "starts": starts, "hashes": hashes,
+            "others": found["others"], "folders": found["folders"], "note": note}
 
 
 # ── step 3: staging ───────────────────────────────────────────────────────────
@@ -2058,6 +2064,11 @@ class Check:
                            (sorted(v for v in inv["as_on"].values() if v) or [self.deps.now().date().isoformat()])[-1])
         if inv["note"]:
             self.checks.append(inv["note"])
+        starts = sorted({v for k, v in inv["starts"].items() if k in DAILY})
+        if starts:                                   # Focus's title format from 4-Nov-2026: the end is the as-on date
+            self.checks.append("Focus printed the titles as a from-to range (from "
+                               + listed([fmt.day_long(d) for d in starts], 6) + "): every report is read as on the "
+                               f"end of its range, {fmt.day(self.titled_day)}.")
         if len(titled) > 1:
             self.flag("mixed_dates")
             self.checks.append("ATTENTION: the reports carry different as-on dates ("

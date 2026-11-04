@@ -142,6 +142,11 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
+- Focus's new title format (4-Nov-2026): every report's title reads `[As on date <start of the books> to <As on
+  date>]`. The reader took the first date, so the 041126 check stopped as an older drop. `report_date_from_title` now
+  takes the last date (`report_span_from_title` keeps both), and the load check says in one line when the titles
+  carry a range. It is an engine file, so it ships with an API deploy (together with the ZTE category guard below),
+  and then `/yq-load 041126` runs.
 - The month-end pack's first real run: October 2026, built 2-Nov-2026 after release r11 (its first DRAFT counted a
   ZTE handset invoice as an accessory sale; DRAFT (2) and the final do not).
 - Release r11 (applied 02-Nov-2026): the ZTE handsets are Devices, so no ZTE sale counts as an accessory sale, as no

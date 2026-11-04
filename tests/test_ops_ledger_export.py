@@ -526,6 +526,13 @@ def _():
             exc = raises(le.LedgerExportError, lambda: le.read(titled))
             assert "has no \"As on date\" in its title block" in str(exc) and "Ledger_title.xlsx" in str(exc), str(exc)
 
+        # Focus's title from 4-Nov-2026 puts the start of the books in front: the as-on date is the range's end
+        write_ledger(titled, SMALL, title_line="[As on date 26/08/2025 to 03/11/2026]")
+        assert le.read(titled).as_on == AS_ON
+        write_ledger(titled, SMALL, title_line="[As on date 03/11/2026 to 26/08/2025]")      # backwards: no date
+        exc = raises(le.LedgerExportError, lambda: le.read(titled))
+        assert "has no \"As on date\" in its title block" in str(exc), str(exc)
+
         exc = raises(le.LedgerExportError, lambda: le.read(folder / "nothing.xlsx"))
         assert str(exc) == "no such Ledger export: nothing.xlsx"
         exc = raises(le.LedgerExportError, lambda: le.read(folder))                      # a folder is no file

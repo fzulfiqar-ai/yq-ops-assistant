@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sys
 import warnings
 from datetime import date, datetime
@@ -229,18 +230,34 @@ def read_grid(path: Path) -> pd.DataFrame:
     return pd.read_excel(path, header=None, dtype=object, engine="openpyxl")
 
 
-def report_date_from_title(grid: pd.DataFrame) -> str | None:
-    """Pull '[As on date 01/06/2026]' from the top title block."""
+TITLE_DATE = re.compile(r"\d{1,2}/\d{1,2}/\d{4}")
+
+
+def report_span_from_title(grid: pd.DataFrame) -> tuple[str | None, str | None]:
+    """(start, as_on) from the "As on date" cell of the top title block.
+
+    Up to 2-Nov-2026 Focus printed one date, '[As on date 02/11/2026]' -> (None, '2026-11-02'). From
+    4-Nov-2026 the same "As on date" export prints the start of the books in front of it,
+    '[As on date 26/08/2025 to 04/11/2026]' -> ('2025-08-26', '2026-11-04'). The as-on date is always the
+    LAST date of the cell. A cell whose dates run backwards gives (None, None), like a title with no date."""
     for r in range(min(6, len(grid))):
         for c in range(grid.shape[1]):
             cell = grid.iat[r, c]
             if isinstance(cell, str) and "as on date" in cell.lower():
-                import re
+                days = [d for d in (norm_date(m) for m in TITLE_DATE.findall(cell)) if d]
+                if not days:
+                    continue
+                if len(days) == 1:
+                    return None, days[0]
+                start, end = days[0], days[-1]
+                return (start, end) if start <= end else (None, None)
+    return None, None
 
-                m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", cell)
-                if m:
-                    return norm_date(m.group(1))
-    return None
+
+def report_date_from_title(grid: pd.DataFrame) -> str | None:
+    """The report's as-on date: the last date of its title's "As on date" cell, '[As on date 01/06/2026]' or,
+    since 4-Nov-2026, '[As on date 26/08/2025 to 04/11/2026]' (see report_span_from_title)."""
+    return report_span_from_title(grid)[1]
 
 
 # --------------------------------------------------------------------------- per-file parsers

@@ -1,8 +1,9 @@
 """The Focus month-end Ledger export (all accounts), read for the month-end reconciliations. READ-ONLY.
 
 THE FILE. Focus's Ledger report for every account, put in the dated drop folder on the first morning of the
-new month (docs/FOCUS_EXPORT.md). It names one date, "[As on date dd/mm/yyyy]", and no from/to range, and it is
-CUMULATIVE: it holds entries from months back up to the as-on date. So a month is never "the file as it
+new month (docs/FOCUS_EXPORT.md). It names its as-on date, "[As on date dd/mm/yyyy]"; since 4-Nov-2026 Focus prints
+the start of the books in front of it, "[As on date 26/08/2025 to dd/mm/yyyy]", and the as-on date is the last date
+(ingest.report_date_from_title). It is CUMULATIVE: it holds entries from months back up to the as-on date. So a month is never "the file as it
 stands": every question here names its days, and the rows are filtered by date. The report has one section per
 account, closed by a "Sub Total" row, and one "Grand Total". It is double entry: a voucher is written in two or
 more account sections, once for each side of it, so a total across accounts counts a voucher twice; pick the

@@ -47,6 +47,10 @@ rows to the ledger table without checks.
   numbers during the day, just re-export today's range later and re-upload (no duplicates are created).
 - Make the range **wide enough to cover any gap** — e.g. financial-year-to-date, or at least the last
   ~100 days (the AI needs 30/90-day windows). If a day was missed, a wider range fills it in.
+- **The title's date (4-Nov-2026).** Since 4-Nov-2026 Focus prints every report's title as
+  `[As on date 26/08/2025 to 04/11/2026]`: the start of the books, then the As on date you chose. Nothing changes in
+  how you export. The load reads the last date as the report's date, as it read the one date before
+  (`scripts/ingest.py` `report_date_from_title`).
 - **Keep Focus's default file names** (they contain the report name, e.g. `Sales_day_book…xlsx`) — the
   portal recognises the report type from the file name. (`Stock_balance_by_warehouse` are "as on
   date" snapshots — exporting just gets the latest.)

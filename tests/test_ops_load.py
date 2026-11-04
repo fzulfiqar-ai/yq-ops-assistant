@@ -1388,6 +1388,55 @@ def _():
         assert "No drop folder" in res["text"] and res["exit"] == 2
 
 
+@test("Focus's title from 4-Nov-2026, '[As on date <start> to <as-on>]': the end is the as-on date, everywhere; a "
+      "drop titled so is no older drop and says so in one line; a backwards range is no date")
+def _():
+    import pandas as pd
+
+    from scripts import ingest as ing
+    ranged = "26/08/2025 to " + AS_ON
+
+    def title(cell):
+        return pd.DataFrame([[None, None, COMPANY], [None, None, "Stock balance by warehouse"], [None, None, None],
+                             [None, None, cell]], dtype=object)
+    assert ing.report_span_from_title(title(f"[As on date {AS_ON}]")) == (None, DAY)
+    assert ing.report_span_from_title(title(f"[As on date {ranged}]")) == ("2025-08-26", DAY)
+    assert ing.report_date_from_title(title(f"[As on date {ranged}]")) == DAY
+    assert ing.report_span_from_title(title(f"[As on date {AS_ON} to 26/08/2025]")) == (None, None)
+    assert ing.report_span_from_title(title("[As on date]")) == (None, None)
+    assert ing.report_date_from_title(title("Stock balance")) is None
+    with data_root() as root:
+        drop = make_drop(root, as_on=ranged)
+        # the loader's own parsers date the snapshots by the end
+        rows = ing.parse_stock_balance(ing.read_grid(drop / NAMES["stock_balance"]), NAMES["stock_balance"])
+        assert rows and {r["as_of_date"] for r in rows} == {DAY}
+        rows = ing.parse_profitability(ing.read_grid(drop / NAMES["product_profitability"]), "p.xlsx")
+        assert rows and {v for r in rows for k, v in r.items() if k.endswith("date")} == {DAY}
+        ageing = receivables_file(root / "ageing.xlsx", [("Account one", 10), ("Account two", 5)], as_on=ranged)
+        rows = ing.parse_receivables(ing.read_grid(ageing), "ageing.xlsx")
+        assert rows and {r["as_of_date"] for r in rows} == {DAY}
+        assert ing.parse_receivables_totals(ing.read_grid(ageing), "ageing.xlsx")["as_of_date"] == DAY
+        # production holds a load as on 5 Jan, after the range's start and before its end: the drop is not older
+        res, _ = check("070126")
+        text = res["text"]
+        assert res["ok"] and res["exit"] == 0 and res["token"] and res["data_date"] == DAY, text
+        assert "older_than_loaded" not in res["flags"] and "An older drop" not in text, text
+        assert ("- Focus printed the titles as a from-to range (from 26 August 2025): every report is read as on the "
+                "end of its range, Wed 07 Jan.") in text, text
+        assert "never loaded by this command (as on Wed 07 Jan)" in text and all(ord(ch) < 128 for ch in text)
+        plan = loadplan.read_plan(res["run"])
+        assert set(plan["as_on"].values()) == {DAY} and plan["as_on_all"]["ledger_entries"] == DAY, plan["as_on"]
+    with data_root() as root:                 # a single date, as up to 2-Nov-2026: no range line
+        make_drop(root)
+        res, _ = check("070126")
+        assert res["ok"] and "from-to range" not in res["text"], res["text"]
+    with data_root() as root:                 # a range that runs backwards cannot be dated: the report stops
+        drop = make_drop(root)
+        stock_balance_file(drop / NAMES["stock_balance"], as_on=f"{AS_ON} to 26/08/2025")
+        res, _ = check("070126")
+        assert res["exit"] == 2 and "has no \"As on date\" in its title block" in res["text"], res["text"]
+
+
 @test("the folder: other files and sub-folders are listed with where they go; a partial drop names what stays older")
 def _():
     with data_root() as root:
