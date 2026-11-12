@@ -305,7 +305,7 @@ FORBIDDEN_IMPORTS = (
 )
 # scripts.load_supabase holds the loader AND its pure guards: only these names may be imported.
 LOAD_SUPABASE_PURE = {"marker_present", "date_span", "warehouse_set_guard", "span_guard", "salesman_guard",
-                      "stale_pricebook_rows", "snapshot_guard", "pricebook_key", "focus_book_kind",
+                      "stale_pricebook_rows", "snapshot_guard", "overlap_guard", "pricebook_key", "focus_book_kind",
                       "PARTIAL_OK_MARKER", "REPLACE_OK_MARKER"}
 FORBIDDEN_CALLS = {("os", "system"), ("os", "popen"), ("os", "kill"), ("os", "startfile"),
                    ("os", "execv"), ("os", "spawnv")}

@@ -26,8 +26,9 @@ _BUCKET = "catalog"
 # The shelf order a customer browses in — volume lines first, accessories last.
 # Anything not listed sorts to the end alphabetically. Keep in step with
 # classify_category(): between them they are the only category vocabulary.
+# SCREEN PROTECTOR arrived with WEKOME (r12, 12-Nov-2026): its boxed privacy / HD glass.
 CATEGORY_ORDER = ["CABLE", "CHARGER", "CAR CHARGER", "POWER BANK", "EARPHONE",
-                  "BLUETOOTH HEADSET", "BLUETOOTH SPEAKER", "CAR ACCESSORIES"]
+                  "BLUETOOTH HEADSET", "BLUETOOTH SPEAKER", "CAR ACCESSORIES", "SCREEN PROTECTOR"]
 
 # What a SKU is, read off its own name and spec. The price book's own category
 # column is unreliable (it had cables filed under CAR CHARGER and airpods too),
@@ -36,15 +37,19 @@ CATEGORY_ORDER = ["CABLE", "CHARGER", "CAR CHARGER", "POWER BANK", "EARPHONE",
 # Order matters: the first rule that matches wins.
 _CLASSIFY_RULES: list[tuple[str, str]] = [
     ("MISCELLANEOUS",     r"product display|display stand|cardboard"),
+    # WEKOME's "Privacy Screen Protector iPhone 17 Pro Max (6.9) (10PCS per box)": its model sizes
+    # and box counts trip none of the rules below; ahead of them, nothing else can take it
+    ("SCREEN PROTECTOR",  r"screen\s*protector|tempered\s*glass"),
     # before POWER BANK: a BT speaker quotes its battery in mAh too
     ("BLUETOOTH SPEAKER", r"speaker"),
     ("POWER BANK",        r"\bpb\b|power\s*bank|\d{3,}\s*mah"),
     ("CAR CHARGER",       r"car\s*charger"),
     ("CAR ACCESSORIES",   r"\bholder\b|phone\s*stand|air\s*vent|dashboard"),
     # any cordless ear-worn thing: airpods (the book spells it "Aipord",
-    # "Airpord" and "Airpod"), TWS buds, neckbands, BT headphones
+    # "Airpord" and "Airpod"), TWS buds, neckbands, BT headphones, and WEKOME's
+    # "Wireless Earphone" (its wired ones say "Jack Wired Earphone": EARPHONE below)
     ("BLUETOOTH HEADSET", r"ai[rp]{0,2}por?ds?|\btws\b|neck\s*band|headphone|head\s*set|"
-                          r"bluetooth|\bbt\s*(version|v?\d)|open\s*ear"),
+                          r"bluetooth|\bbt\s*(version|v?\d)|open\s*ear|wireless\s*ear\s*(?:phone|bud)s?"),
     ("EARPHONE",          r"in[- ]?ear|ear\s*phone|\bjack\b"),
     ("CHARGER",           r"charger|\bpd\b.*port|adapter"),
     ("CABLE",             r"cable|cale|converter|\bmtr\b|\busb\b|\baux\b|"
@@ -60,6 +65,27 @@ def classify_category(*parts) -> str | None:
         if rx.search(blob):
             return cat
     return None
+
+
+# Focus names every WEKOME item "… (WEKOME)" (r12, 12-Nov-2026), as most VFAN items say "(VFAN)".
+_WEKOME_MARK = re.compile(r"\(\s*wekome\s*\)", re.I)
+
+
+def brand_of(*parts) -> str | None:
+    """The supplier brand a new SKU's spec / name carries: VFAN when "vfan" is anywhere in them (the
+    rule as it always was), WEKOME when they say "(WEKOME)", else None. VFAN is tested first."""
+    blob = " ".join(str(p or "") for p in parts).lower()
+    if "vfan" in blob:
+        return "VFAN"
+    if _WEKOME_MARK.search(blob):
+        return "WEKOME"
+    return None
+
+
+# A new catalog row whose product sits in one of these divisions (products.category_id ->
+# categories.division) is inserted hidden: a SIM pack or a handset (the ZTE phones, r11) is never
+# listed on the marketplace. Keys are upper-case; the value is the division as categories spells it.
+HIDDEN_DIVISIONS = {"SIM": "SIM", "DEVICES": "Devices"}
 
 PUBLIC_FIELDS = ("item_code", "display_name", "spec", "category", "brand", "price_bhd",
                  "b2c_bhd", "product_image_url", "package_image_url")
@@ -341,9 +367,18 @@ def public_catalog(token: str) -> dict | None:
         "WHERE is_active "
         "ORDER BY category, sort_order NULLS LAST, item_code"
     ) or []
+    # v_catalog carries no `hidden` column: drop the hidden codes (display stands, a SIM pack, a
+    # handset) here, as the marketplace does, so this fallback can never list them
+    try:
+        hidden = {str(r["item_code"]) for r in (get_client().table("catalog_items").select("item_code")
+                                                  .eq("hidden", True).execute().data or [])}
+    except Exception as e:  # noqa: BLE001 -- the list still serves; log it
+        log.warning("public catalog: hidden codes not read: %s", e)
+        hidden = set()
+    rows = [r for r in rows if str(r.get("item_code")) not in hidden]
     cats = sorted({r.get("category") or "OTHER" for r in rows},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
-    return {"items": rows, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain",
+    return {"items": rows, "categories": cats, "brand": "VFAN & WEKOME", "company": "YQ Bahrain",
             "prices_updated": prices_updated_date()}
 
 
@@ -426,8 +461,9 @@ def export_xlsx(version: str = "full") -> bytes:
         headers = ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC", "Price (BD)"]
         widths = [5, 18, 18, 12, 52, 12]
     else:
+        # r12 (12-Nov-2026): the B2C price is the Causeway price
         headers = ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC",
-                   "B2B (BD)", "B2C · CauseWay & RoadShow (BD)"]
+                   "B2B (BD)", "B2C · Causeway (BD)"]
         widths = [5, 18, 18, 12, 50, 12, 24]
 
     for cat in data["categories"]:
@@ -485,7 +521,7 @@ def export_pdf(version: str = "full") -> bytes:
     PURPLE = (109, 40, 217)
     pdf = FPDF("P", "mm", "A4")
     pdf.set_auto_page_break(False)
-    pdf.set_title("YQ Bahrain - VFAN Catalog")
+    pdf.set_title("YQ Bahrain - Mobile Accessories Catalog")
 
     COLS, GUT, M = 3, 6, 12
     card_w = (210 - 2 * M - (COLS - 1) * GUT) / COLS   # ≈ 58mm
@@ -499,7 +535,7 @@ def export_pdf(version: str = "full") -> bytes:
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("helvetica", "B", 15)
         pdf.set_xy(M, 5)
-        pdf.cell(0, 7, "YQ Bahrain - VFAN Catalog")
+        pdf.cell(0, 7, "YQ Bahrain - Mobile Accessories Catalog")
         pdf.set_font("helvetica", "", 9)
         pdf.set_xy(M, 12)
         label = "B2B trade prices" if version == "b2b" else "Full price tiers (internal)"
@@ -566,12 +602,16 @@ def sync_from_price_book() -> int:
         vanish from the portal + shared link — owner rule: 'show whatever is active
         in the pricing I upload');
       - previously deactivated items that reappear in the book are REACTIVATED.
-    Photos/specs/owner edits on existing rows are never touched."""
+    A new row's brand is read off its name (brand_of: VFAN, WEKOME), and a new row whose product is
+    in the SIM or Devices division (HIDDEN_DIVISIONS) is inserted hidden, with that division.
+    Photos/specs/owner edits on existing rows are never touched: hidden, division, brand and
+    category are set at insert only."""
     candidates = exec_sql(
         "SELECT DISTINCT ON (sp.sku_code) sp.sku_code AS code, "
         "COALESCE(NULLIF(TRIM(sp.item_name), ''), sp.sku_code) AS name, "
         "COALESCE(p.item_name, sp.item_name) AS spec, "
-        "UPPER(COALESCE(c.name, 'OTHER')) AS category "
+        "UPPER(COALESCE(c.name, 'OTHER')) AS category, "
+        "c.division AS division "
         "FROM selling_prices sp "
         "LEFT JOIN products p ON p.sku_code = sp.sku_code "
         "LEFT JOIN categories c ON c.id = p.category_id "
@@ -592,24 +632,33 @@ def sync_from_price_book() -> int:
         if len(b) < 1000:
             break
         off += 1000
-    items = []
+    items: list[dict] = []
+    hidden: list[dict] = []
     for r in candidates:
         code = str(r.get("code") or "").strip()
         if not code or code in existing:
             continue
-        blob = f"{r.get('spec') or ''} {r.get('name') or ''}".lower()
-        items.append({
+        item = {
             "item_code": code,
             "display_name": str(r.get("name") or code)[:120],
             "spec": r.get("spec"),
             # what the SKU says it is beats the book's category column, which files
             # cables under CAR CHARGER; the column is only the fallback
             "category": classify_category(code, r.get("name"), r.get("spec")) or r.get("category"),
-            "brand": "VFAN" if "vfan" in blob else None,
+            "brand": brand_of(r.get("spec"), r.get("name")),
             "is_active": code in book,
             "updated_by": "price-book auto-sync",
-        })
-    n = bulk_upsert(items)
+        }
+        division = HIDDEN_DIVISIONS.get(str(r.get("division") or "").strip().upper())
+        if division:
+            item.update(hidden=True, division=division)
+            hidden.append(item)
+        else:
+            items.append(item)
+    # Two batches, one key set each: a bulk upsert names the union of its rows' keys and sends NULL
+    # where a row lacks one, so a mixed batch would write hidden = NULL (a NOT NULL column) and
+    # division = NULL on every ordinary row, and fail them all.
+    n = bulk_upsert(items) + bulk_upsert(hidden)
     # mirror is_active with the current book
     now = datetime.now(timezone.utc).isoformat()
     to_off = [c for c, active in existing.items() if active and book and c not in book]
@@ -624,8 +673,8 @@ def sync_from_price_book() -> int:
             except Exception as e:  # noqa: BLE001
                 log.warning("catalog mirror update failed: %s", e)
     if n or to_off or to_on:
-        log.info("catalog auto-sync: +%d new, %d deactivated (left the book), %d reactivated",
-                 n, len(to_off), len(to_on))
+        log.info("catalog auto-sync: +%d new (%d hidden: SIM / Devices), %d deactivated (left the book), "
+                 "%d reactivated", n, len(hidden), len(to_off), len(to_on))
         if to_off:
             log.info("catalog deactivated: %s", ", ".join(sorted(to_off))[:400])
     return n

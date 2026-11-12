@@ -702,6 +702,62 @@ main folder, run `git pull --ff-only`, then `python -m scripts.ops status`, whic
 
 ---
 
+## Release r12: WEKOME live (12-Nov-2026)
+
+*For the owner. What goes live:*
+- *The second supplier's Focus price book (`WekomeMASellerPricebook*.xlsx`) loads through `/yq-load` like the main
+  book. Each book is judged on its own: one book's export never voids the other book's prices.*
+- *The catalog gives a new item its brand (VFAN or WEKOME) and its category, including a new Screen Protectors
+  category.*
+- *Any SIM or Devices item (a handset) is added hidden.*
+- *A new item shows its stock from its first day.*
+- *The marketplace's crossed-out shop price becomes the item's Causeway price.*
+- *Product names keep a hyphenated model code whole and drop the supplier tag.*
+- *The month-end purchases check pairs a receipt with its own order, even when its number matches another order's.*
+
+*There is no release script. Run the commands below one at a time, in PowerShell, in the project folder, on `main`,
+after `git pull --ff-only`. Never from a code worktree, never during a Focus load.*
+
+**When.** After the day's load has finished.
+- The release changes engine files (the loader, the catalog sync, the alias autofill). From the pull until the API
+  deploy has finished, `/yq-load` refuses with "a portal release is merged but not live": go from the backup to the
+  deploy in one sitting.
+- Upload nothing on the portal's Data page in between.
+- The web (the marketplace's names and labels) deploys itself once CI is green for the pushed head, and works
+  against the old API as well.
+
+```
+python -m scripts.yq_backup release r12                                         # 1. the encrypted backup: keep its last line
+python -m scripts.prod_gate snapshot --label before-r12
+python -m scripts.apply_sql scripts/r12_b2c_causeway_migration.sql --rehearse   # 2. "Rehearsal OK" (on production, rolled back)
+python -m scripts.apply_sql scripts/r12_b2c_causeway_migration.sql              #    "Done." (an error = nothing applied: tell Claude)
+python -m scripts.audit_grants                                                  #    must exit 0
+python -m scripts.render_deploy status                                          # 3. note the live deploy's id (the rollback target)
+python -m scripts.render_deploy deploy --commit <sha> --wait                    #    <sha> = the r12 commit Claude names
+curl -s https://api.yqmarketplace.com/health                                    # 4. "commit" = the first 12 characters of <sha>
+python -m scripts.ops status                                                    #    no "merged but not live": /yq-load works again
+```
+
+**Then the WEKOME book.** Type `/yq-load <ddmmyy>` for the folder that holds it. Its own line reads NEEDS YOUR
+DECISION; "load the price book" loads it, and the load's catalog sync adds its items with their brand and
+category.
+
+After that, Claude runs the one-off data steps (writes, approved by the owner) and checks them read-only:
+- the items' photos from the "Coming soon" cards;
+- linking each card to its item, so that the card retires;
+- `scripts.category_backfill.apply_category_master()` for the analytics categories.
+
+**If something is wrong.**
+- The API back: `python -m scripts.render_deploy rollback --deploy <the id of step 3> --wait`.
+- The shop price back to the ModernTrade book: `python -m scripts.apply_sql scripts/r12_b2c_causeway_reverse.sql`,
+  then `python -m scripts.audit_grants`. The Screen Protector category row stays, because products may point at it.
+- WEKOME prices already loaded stay. The older loader treats a file that is not an MA export as a non-Focus source,
+  so it never voids them.
+- Then tell Claude: `main` still carries the r12 engine files, so `/yq-load` waits until Claude reverts `main` or the
+  API is deployed again.
+
+---
+
 ## Reference: what R6 added to the checks
 
 - `/health` → `commit` (RENDER_GIT_COMMIT): the smoke can prove which build answers.

@@ -36,6 +36,7 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `mrn_landed_costs.effective_date` (data) | `mrn_dates_migration.sql` (R2) | not a view: re-dates the pre-R2 rows from the 1st of the month to the ledger's MRN move date (reverse: `mrn_dates_reverse.sql`) |
 | `v_product_economics` | `r7d_margin_exvat_migration.sql` (R7d, 27-Sep-2026: `margin_bhd` / `margin_pct` on the EX-VAT price, the other 7 columns verbatim; before that `economics_v2_migration.sql` → `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no`. Re-running `economics_v2_migration.sql` after R7d **silently puts the VAT-inclusive margin back** (same 9 columns) — never do it |
 | `v_price_tracker` | `r7d_margin_exvat_migration.sql` (R7d: `margin_now_pct` / `margin_before_pct` on the EX-VAT price; before that `price_tracker_migration.sql`) | not in the baseline. `price_tracker_migration.sql` DROPs and re-creates the view — re-running it after R7d loses the ex-VAT margin **and the grants**; never do it |
+| `v_catalog` | `r12_b2c_causeway_migration.sql` (release r12, 12-Nov-2026: `b2c_rate` is the item's current `MA_base` row of warehouse `Causeway`, no customer, picked by `v_price_list_by_book`'s current-row rule; NULL without one, no fallback; the other 16 columns verbatim; before that `daily_ops2_migration.sql` (b2c from the `modern_trade` book) → `catalog_migration.sql`) | not in the baseline. Re-running `daily_ops2_migration.sql` after r12 **silently** puts the modern_trade price back (same 17 columns) — never do it; go back only through `r12_b2c_causeway_reverse.sql` |
 | `v_catalog_reserved`, `ar_ageing_totals` | `economics_v2_migration.sql` (R2) | not in the baseline — staff reserved-stock view (M10) and Focus's own AR Grand Total per snapshot |
 | `v_sales` | `r10_long_number_mask_migration.sql` (release r10, 22-Oct-2026: the narration mask widened to every run of 10 or more digits, the other 30 columns verbatim; before that `r7_narration_mask_migration.sql` (R7b: `narration` masked) → `division_payment_migration.sql`) | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway`. Re-running `r7_narration_mask_migration.sql` after r10 **silently narrows** the mask (runs of 10 to 14 digits show again) and re-running `division_payment_migration.sql` **silently unmasks** the narration (same 31 columns) — never do either |
 | `v_receivables` | `receivables_consolidation_migration.sql` | **STALE, different source table** — baseline is ledger-based, canonical reads `ar_ageing`. Lacks the 15 ageing columns; also carries 4 the canonical does *not* have (`last_entry_date`, `salesman`, `last_narration`, `days_outstanding`). Only `account` overlaps cleanly — `outstanding_bhd` changes meaning |
@@ -993,3 +994,60 @@ Rehearsed 02-Nov-2026 on production, rolled back: the file alone, then in one tr
 twice and the file again, the rule, aliases, products, category and every ZTE line's division checked after each step.
 Applied the same day (the owner ran it). After it: every ZTE line in `v_sales` and both names in `v_item_division` are
 Devices, none is left on the accessory basis, and `python -m scripts.audit_grants` is clean.
+
+## Release r12 "WEKOME live" (built 12-Nov-2026, not applied): `r12_b2c_causeway_migration.sql` — the shop price is the Causeway price
+
+`v_catalog.b2c_rate` (the marketplace's retail anchor and the merchant's margin strip, the portal Catalog's B2C tier
+and exports, the chat's cards) came from the `modern_trade` book (ModernTradeSellerBook, last loaded in May 2026). The
+owner keeps the B2C prices in the MA price book now — each item's `Causeway` and `YQ Roadshow` rows beside the
+blank-warehouse dealer row — and raised 153 Causeway prices on 9-Nov-2026. The owner (12-Nov-2026): the shop price is
+the item's Causeway price. One view and two master-data rows, one file and its reverse; this file owns `v_catalog` now
+(table above).
+
+- **`b2c_rate`** = the item's current row of book `MA_base`, warehouse `Causeway`, no customer (`customer_code` null or
+  blank, as `v_product_margin` reads it). "Current" is `v_price_list_by_book`'s rule (`selling_prices_void_migration.sql`):
+  `Authorized`, a rate above 0, `start_date` on or before today, `end_date` null or not before today, `voided_at` null
+  (the day-first phantoms and the rows of older Focus exports are voided), then the latest `start_date`, then the
+  highest id. The item code matches exactly, as `standard_rate`'s does. No current Causeway row: NULL (the item shows
+  no retail price); there is no fallback to `modern_trade`.
+- **Everything else verbatim** (`daily_ops2_migration.sql`'s statement but the b2c lateral join): the 17 columns, names,
+  types and order (CREATE OR REPLACE refuses anything else), `standard_rate` from `v_price_list_by_book`. No view is
+  built on `v_catalog` (the readers are `app/shop.py`, `app/catalog.py`, `app/chat_extras.py`, `app/whatsapp.py`,
+  `app/video_gen.py`, `app/metrics.py`, the AI's SQL allowlist in `app/sql_validator.py` and the two thumbnail scripts),
+  so nothing else is recreated. The grants are restated
+  unchanged: SELECT for `yq_readonly`, nothing for `anon` / `authenticated`; never `security_invoker`.
+- **The self-check** raises unless: the 17 columns in order; the definition reads `'Causeway'` and not `modern_trade`;
+  `b2c_rate` equals the current Causeway row picked again with `row_number()` (the way `v_price_list_by_book` picks)
+  on every catalog item; `standard_rate` is still `v_price_list_by_book`'s MA_base price on every item; the grants;
+  and, when any active item has a trade price, at least one has a Causeway price (a missing or differently spelt
+  Causeway layer would blank every shop price). Its notice gives the counts — active items, with and without a
+  Causeway price, how many differ from the modern_trade book — and the views on `v_catalog` (none expected).
+- **The new category** (app/catalog.py files WEKOME's screen protectors under the catalog category `SCREEN PROTECTOR`):
+  a `categories` row `Screen Protector` (division Accessories) and the `category_master` row `SCREEN PROTECTOR` →
+  `Screen Protector` (note "screen protectors (WEKOME)"), each only where missing (ON CONFLICT DO NOTHING, the shape of
+  `r7d_category_master_migration.sql`'s seed), so the master again covers every catalog category. No product is
+  re-pointed in SQL: `scripts/category_backfill.apply_category_master()` does that (log first, Accessories only). The
+  file's first block stops and names R7d's file if `category_master` is missing; the self-check refuses the file when
+  `SCREEN PROTECTOR` ends without a master row on an Accessories category (a `Screen Protector` category already there
+  in another division would cause that) and its notice names the category it maps to.
+- **Reverse**: `r12_b2c_causeway_reverse.sql` puts `daily_ops2_migration.sql`'s statement back verbatim (b2c from
+  `modern_trade`), the same grants, deletes only the master row r12 seeded (`SCREEN PROTECTOR` → `Screen Protector`;
+  the `Screen Protector` category stays, products may point at it), its own self-check. No other row is written by
+  either file.
+
+The API needs no deploy and reads nothing new: its catalog copy (`app/shop.py` `context()`, 60 s) and the portal pick
+the new `b2c_rate` up by themselves. From the main project folder, after the branch is merged and pulled:
+
+```
+python -m scripts.apply_sql scripts/r12_b2c_causeway_migration.sql --rehearse     # runs it, then rolls back
+python -m scripts.apply_sql scripts/r12_b2c_causeway_migration.sql
+python -m scripts.audit_grants                                                    # exit 0 = nothing exposed
+```
+
+Tests: `python -m tests.test_r12_b2c_causeway` (no database: both files as text and parsed with sqlglot, the 17
+columns against `daily_ops2_migration.sql`, the filters against `v_price_list_by_book`'s, and the lateral's own query
+run by sqlglot's executor on invented rows against a Python twin of the rule). Not replayed on a database in the build
+session (a code worktree never connects to one). A local replay before the rehearsal, if wanted: build the scratch copy
+on the portable cluster (`python -m scripts.local_replay_db --db r12` from the main folder: it reads production
+read-only), then on it, in one rolled-back transaction, the migration twice, the reverse twice and the migration again
+(`psql -h localhost -p 55432 -U postgres -d r12 -X -v ON_ERROR_STOP=1` with `begin;` … `\i` each file … `rollback;`).

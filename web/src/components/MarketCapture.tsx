@@ -92,7 +92,7 @@ const SHOW_ON = ['/today', '/shop', '/customers', '/market-intel']
 /** The office (AppShell, r8m): Spotted floats on the Market Intel pages only; a desk has no tab bar and no shop pill. */
 const OFFICE_SHOW_ON = ['/market-intel']
 /** When the catalog's category master cannot be read (an API without the lists route). */
-const CATEGORIES = ['CABLE', 'CHARGER', 'CAR CHARGER', 'POWER BANK', 'EARPHONE', 'BLUETOOTH HEADSET', 'BLUETOOTH SPEAKER', 'CAR ACCESSORIES']
+const CATEGORIES = ['CABLE', 'CHARGER', 'CAR CHARGER', 'POWER BANK', 'EARPHONE', 'BLUETOOTH HEADSET', 'BLUETOOTH SPEAKER', 'CAR ACCESSORIES', 'SCREEN PROTECTOR']
 
 /** Which quick fields each kind asks for (all optional); the field titles are in the strings table. */
 const FIELDS: Record<MiKind, { brand?: boolean; price?: boolean; category?: boolean; barcode?: boolean; demand?: boolean }> = {

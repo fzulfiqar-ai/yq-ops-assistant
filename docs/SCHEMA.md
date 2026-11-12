@@ -24,6 +24,7 @@ and re-loading never double-counts.
 | Product_Profitability_Report*.xlsx | 6 | flat | `product_profitability` | 144 |
 | MASellingPriceBook*.xlsx | 1 | flat | `selling_prices` (price_book=`MA_base`) | 647 |
 | ModernTradeSellerBook.xlsx | 1 | flat | `selling_prices` (price_book=`modern_trade`) | 167 |
+| WekomeMASellerPricebook*.xlsx | 1 | flat | `selling_prices` (price_book=`MA_base`; a family of its own: it voids only its own rows) | 159 |
 | MT Pricing May 2026.xlsx *(reference)* | 1 | flat | `selling_prices` (price_book=`mt_pricing`) | 167 |
 
 ---
@@ -206,7 +207,7 @@ A view keeps one source of truth and stays correct on every re-import.
 
 ## Pricing
 
-### selling_prices  *(= MASellingPriceBook + ModernTradeSellerBook + MT Pricing reference)*
+### selling_prices  *(= MASellingPriceBook + WekomeMASellerPricebook + ModernTradeSellerBook + MT Pricing reference)*
 28-column Focus PriceBook schema. `customer_name` blank = base/list price.
 
 | column | type | Focus column |

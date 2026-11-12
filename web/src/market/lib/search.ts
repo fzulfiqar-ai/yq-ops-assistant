@@ -171,6 +171,7 @@ const CATEGORY_WORDS: Record<string, string> = {
   'BLUETOOTH HEADSET': 'bluetooth headset earbuds tws wireless',
   'BLUETOOTH SPEAKER': 'bluetooth speaker sound music',
   'CAR ACCESSORIES': 'car holder mount accessory',
+  'SCREEN PROTECTOR': 'screen protector glass tempered privacy',
 }
 
 interface Doc {

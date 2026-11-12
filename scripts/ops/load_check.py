@@ -48,9 +48,11 @@ The steps, one printed line each as it finishes:
   4 stock balance  more than the main store in the file: a copy cut to the main-store block, proven
                    by re-reading it with the real parser and against Focus's own Sub Total
   5 profitability  held back when the report's cost of sales is short of the stock ledger's
-  6 price book     compared key by key with the live rows of that book
+  6 price book     each book (MASellingPriceBook, the WEKOME book, ModernTradeSellerBook) compared key by
+                   key with the live rows of its own family; one decision of the owner's covers them all
   7 the preview    app.ingest_batch.run_preview, read-only: invoices, lines, days, the loader's guards
-                   (every staged report but the stock ledger: step 8 compares that one)
+                   (every staged report but the stock ledger, which step 8 compares, and the WEKOME
+                   book, which the batch engine refuses: step 6 alone judges it)
   8 stock ledger   voucher by voucher against production (the loader replaces the file's whole span),
                    and its rows in one read: their count and one digest (Q_LEDGER_SAME)
   9 catalog        what the catalog sync that follows every load would switch on or off
@@ -132,7 +134,14 @@ SUPERSEDED = "superseded"     # business_data/staging/superseded/<run>/: the sta
 EXCEL = (".xlsx", ".xls")
 SYSTEM_FILES = ("desktop.ini", "thumbs.db", ".ds_store")
 AUTO_SYNC = "price-book auto-sync"          # what app/catalog.py writes in catalog_items.updated_by
-BOOK_STEMS = {"MA_base": "MASellingPriceBook", "modern_trade": "ModernTradeSellerBook"}
+# The Focus price books, one kind per FAMILY (scripts/ingest.py PRICEBOOK_FAMILIES). The WEKOME book (r12,
+# 12-Nov-2026) loads into MA_base beside MASellingPriceBook, yet it is a report of its own: its own line, judged
+# against its own family's live rows, and a load of it switches off only its own rows.
+WEKOME = "selling_prices:MA_base:wekome"
+PRICE_KINDS = ("selling_prices:MA_base", WEKOME, "selling_prices:modern_trade")
+# a staged price book's name: its family's stem in the export's own spelling, then the run
+BOOK_STEMS = {"selling_prices:MA_base": "MASellingPriceBook", "selling_prices:modern_trade": "ModernTradeSellerBook",
+              WEKOME: "WekomeMASellerPricebook"}
 OFFSET_FILE = "status.offset"
 DELIVERY_OFFSET_FILE = "delivery.offset"     # the delivery rows `load status` has shown
 TIMING_SHOWN_FILE = "timing.shown"           # the load-time line is shown once
@@ -168,8 +177,10 @@ DB_WORDS = {"orders": "invoices", "order_lines": "sales lines", "stock_movements
             "ingest_batches_open": "an upload waiting on the Data page"}
 
 KIND_ORDER = ("order_lines", "orders", "stock_movements", "stock_balance", "receivables",
-              "product_profitability", "selling_prices:MA_base", "selling_prices:modern_trade", "ledger_entries")
-# the table each report loads into (app.ingest_batch: the preview's target); both price books are one table
+              "product_profitability", "selling_prices:MA_base", WEKOME, "selling_prices:modern_trade", "ledger_entries")
+# the table each report loads into (app.ingest_batch: the preview's target); both price books are one table. The
+# WEKOME book is not here: the batch engine refuses it (app.ingest_batch.BATCH_REFUSED), so the preview never sees
+# it and step 6 alone judges it (what_is_new reads its own comparison)
 KIND_TARGET = {"order_lines": "order_lines", "orders": "orders", "stock_movements": "stock_movements",
                "stock_balance": "stock_balance", "receivables": "ar_ageing",
                "product_profitability": "product_profitability", "selling_prices:MA_base": "selling_prices",
@@ -188,15 +199,17 @@ FOLD_NOISE = Decimal("0.000001")
 FOLD_NOUN = {"ar_ageing": "one account", "stock_balance": "one item in one warehouse"}
 # The reports that can sit outside a load and the owner's words that put them in it (the skill's Step 1 gives
 # each with its option: --with-profitability, --pricebook load)
+# (one decision for every price book of the folder: --pricebook load | skip)
 OPTION_SAY = {"product_profitability": "load profitability anyway", "selling_prices:MA_base": "load the price book",
-              "selling_prices:modern_trade": "load the price book"}
+              WEKOME: "load the price book", "selling_prices:modern_trade": "load the price book"}
 DAILY = KIND_ORDER[:6]
 ALWAYS_STAGED = ("order_lines", "orders", "stock_movements", "receivables")
 LABEL = {
     "order_lines": "Sales day book", "orders": "Sales register", "stock_movements": "Stock ledger",
     "stock_balance": "Stock balance", "receivables": "Receivables ageing",
     "product_profitability": "Profitability report", "selling_prices:MA_base": "Price book",
-    "selling_prices:modern_trade": "Price book (modern trade)", "ledger_entries": "Ledger export",
+    WEKOME: "Price book (WEKOME)", "selling_prices:modern_trade": "Price book (modern trade)",
+    "ledger_entries": "Ledger export",
 }
 WORDS = {"load": "LOAD", "trim": "LOAD (main-store block only)", "hold_back": "HOLD BACK", "leave_out": "LEAVE OUT",
          "needs_decision": "NEEDS YOUR DECISION", "not_loaded": "NOT LOADED", "stop": "STOP"}
@@ -980,10 +993,11 @@ def retired_line(found: dict) -> str | None:
     return " ".join(said) or None
 
 
-def book_stage_name(book: str, run: str) -> str:
+def book_stage_name(kind: str, run: str) -> str:
     """The Focus stem first, then the run: the loader's snapshot rule only lets a book void the rows
-    of a DIFFERENTLY named export of the same book."""
-    return f"{BOOK_STEMS[book]} {run}.xlsx"
+    of a DIFFERENTLY named export of the same book (its family: the stem tells the WEKOME book from
+    MASellingPriceBook, whose rows share MA_base)."""
+    return f"{BOOK_STEMS[kind]} {run}.xlsx"
 
 
 def write_marker(staging: Path, name: str, run: str, option: str) -> Path:
@@ -1358,15 +1372,24 @@ def status_word(row: dict | None) -> str:
     return str((row or {}).get("status") or "").strip()
 
 
-def pricebook_diff(file_rows: list[dict], live_rows: list[dict], book: str, exported: str) -> dict:
+def pricebook_diff(file_rows: list[dict], live_rows: list[dict], book: str, exported: str,
+                   family: str | None = None) -> dict:
     """The file against the live rows of its book, key by key (scripts.load_supabase.pricebook_key):
     price, start date (it is part of the key), end date and status; the file a row came from is
     ignored. The status counts because the live price list holds a row only while it is Authorized:
     a row that turned to another status at the same price is not "the same as the live book". A live
     row counts as dropped only when it came from a Focus export of this book (the loader never voids
     another source).
+    `family` is the file's price-book family (scripts.ingest.PRICEBOOK_FAMILIES; by default the one
+    named after `book`, MASellingPriceBook for MA_base). The file is judged against its own family's
+    live rows: a live row of ANOTHER family of the same price_book (the WEKOME book's MA_base rows
+    against MASellingPriceBook, and the other way round) is never added, changed or dropped by it. Rows
+    of no family (workbook imports) are compared as before, and never dropped.
     Returns {file_keys, live_keys, items: [{sku, scope, start, end, rate, what, tags, ...}]}."""
-    from scripts.load_supabase import focus_book_kind, pricebook_key
+    from scripts import ingest as ing
+    from scripts.load_supabase import pricebook_key
+    fam = family or ing.pricebook_kind_family(f"selling_prices:{book}")
+    live_rows = [r for r in live_rows if ing.pricebook_family(r.get("source_file")) in (None, fam)]
     in_file: dict[tuple, dict] = {}
     for r in file_rows:
         in_file[pricebook_key(r)] = r                    # the loader keeps the last row of a key
@@ -1414,7 +1437,7 @@ def pricebook_diff(file_rows: list[dict], live_rows: list[dict], book: str, expo
               or status_word(old) != status_word(row)):
             items.append(entry(key, row, "changed", old))
     for key, row in live.items():
-        if key not in in_file and focus_book_kind(row.get("source_file")) == book:
+        if key not in in_file and ing.pricebook_family(row.get("source_file")) == fam:
             items.append(entry(key, row, "dropped", row))
     items.sort(key=lambda e: (e["sku"], e["scope"], e["start"]))
     return {"file_keys": len(in_file), "live_keys": len(live), "items": items}
@@ -1940,7 +1963,9 @@ class Check:
         self.stock: dict | None = None
         self.profit: dict | None = None
         self.profit_evidence: dict | None = None     # what the profitability step found (plan.json: profitability)
-        self.books: dict[str, dict] = {}
+        self.books: dict[str, dict] = {}             # price-book kind -> what step 6 found for it
+        self.live_by_book: dict[str, list[dict]] = {}    # price_book -> its live rows (one read for two families)
+        self.said_decision = False                   # the price books' one decision is said once
         self.summary: dict = {}
         self.targets: dict = {}
         self.pv: dict = {"actions": {}, "invoices": {}, "stops": [], "infos": [], "more_invoices": 0}
@@ -2397,24 +2422,33 @@ class Check:
 
     # 6 ── price book
     def step_price_books(self) -> None:
-        kinds = [k for k in ("selling_prices:MA_base", "selling_prices:modern_trade") if k in self.inv["files"]]
+        """Every price book of the folder on a line of its own (PRICE_KINDS: MASellingPriceBook, the WEKOME book,
+        ModernTradeSellerBook), each judged against its own family's live rows; one decision of the owner's
+        (--pricebook load | skip) is applied to each of them. A drop with only some of the books judges those."""
+        kinds = [k for k in PRICE_KINDS if k in self.inv["files"]]
         if not kinds:
             self.done("Price book: not in this drop (live prices stay as they are).")
             return
         self.done("; ".join(self.price_book(kind) for kind in kinds) + ".")
 
+    def live_prices(self, book: str) -> list[dict]:
+        """The live rows of a price_book, read once: the MA book and the WEKOME book both load into MA_base."""
+        if book not in self.live_by_book:
+            self.live_by_book[book] = self.q(Q_LIVE_PRICES, [book])
+        return self.live_by_book[book]
+
     def price_book(self, kind: str) -> str:
         from scripts import ingest as ing
-        from scripts.load_supabase import focus_book_kind
         opt, run, path = self.options, self.run, self.inv["files"][kind]
-        book, exported = kind.split(":", 1)[1], self.inv["as_on"][kind]
+        book, exported = ing.pricebook_of(kind), self.inv["as_on"][kind]
+        family = ing.pricebook_kind_family(kind)
         try:
             rows = ing.parse_pricebook(ing.read_grid(path), path.name, book)
         except ing.HeaderMismatch as exc:
             self.row(kind, "stop", "its header row is not the one the loader reads: " + str(exc)[:160])
             return f"{LABEL[kind]}: STOP (its header row changed)"
-        live = self.q(Q_LIVE_PRICES, [book])
-        diff = pricebook_diff(rows, live, book, exported)
+        live = self.live_prices(book)                    # every live row of the price_book (the catalog step reads them)
+        diff = pricebook_diff(rows, live, book, exported, family=family)
         items = diff["items"]
         # what was already sold at a scoped price: looked up for SCOPE_LOOKUPS_MAX rows at most (each is
         # one read), the rows below the general price first: those are the ones for the action list
@@ -2427,15 +2461,16 @@ class Check:
             except Exception:  # noqa: BLE001  (its line then says nothing about sales, and the count says why)
                 unanswered += 1
         not_looked = len(scoped) - len(scoped[:SCOPE_LOOKUPS_MAX])
-        out = self.books[book] = {"book": book, "kind": kind, "file_rows": rows, "live_rows": live, "items": items,
-                                  "exported": exported, "staged": None}
+        out = self.books[kind] = {"book": book, "kind": kind, "family": family,
+                                  "name": ing.PRICEBOOK_FAMILIES[family][2], "file_rows": rows, "live_rows": live,
+                                  "file_keys": diff["file_keys"], "items": items, "exported": exported, "staged": None}
         n = Counter(e["what"] for e in items)
         below = [e for e in items if e["below_general"]]
         what = ", ".join(f"{n[w]} {w}" for w in ("added", "changed", "dropped") if n[w])
         choice = opt["pricebook"]
         if choice == "load":
-            name = book_stage_name(book, run)
-            if focus_book_kind(name) != book or ing.classify(name) != kind:
+            name = book_stage_name(kind, run)
+            if ing.pricebook_family(name) != family or ing.classify(name) != kind:
                 self.row(kind, "stop", "the name of the staged copy would not be read as this price book")
                 return f"{LABEL[kind]}: STOP"
             copy_checked(path, self.staging / name)
@@ -2464,10 +2499,16 @@ class Check:
                 self.checks.append("    What was already sold at the scoped price could not be read for "
                                    f"{plural(unanswered, 'row')} (the database did not answer): those lines say "
                                    "nothing about sales.")
-            if self.rows[kind]["verdict"] == "needs_decision":
-                self.checks.append("    The decision is for the whole file: say \"load the price book\" "
-                                   "(--pricebook load) or \"leave it out\" (--pricebook skip). With no answer it is "
-                                   "left out and the rest loads.")
+            if self.rows[kind]["verdict"] == "needs_decision" and not self.said_decision:
+                self.said_decision = True                # one decision covers every price book of the folder: said once
+                if sum(1 for k in PRICE_KINDS if k in self.inv["files"]) == 1:
+                    self.checks.append("    The decision is for the whole file: say \"load the price book\" "
+                                       "(--pricebook load) or \"leave it out\" (--pricebook skip). With no answer it is "
+                                       "left out and the rest loads.")
+                else:
+                    self.checks.append("    One decision covers every price book of this folder: say \"load the price "
+                                       "book\" (--pricebook load) or \"leave it out\" (--pricebook skip). With no answer "
+                                       "they are left out and the rest loads.")
         else:
             self.checks.append(f"{LABEL[kind]} (exported {fmt.day(exported)}): no key added, changed or dropped against "
                                "the live book.")
@@ -2610,11 +2651,13 @@ class Check:
         """What the preview compares: a copy of every staged file but the stock ledger, in the run's folder (the
         staging folder itself stays as the token binds it). Step 8 compares the ledger, voucher by voucher and in
         one read row by row (Q_LEDGER_SAME), so the preview never sends its rows to the database: that was most of
-        a check's time."""
+        a check's time. A report the batch engine refuses (app.ingest_batch.BATCH_REFUSED: the WEKOME price book) is
+        left out too: step 6 has judged it against its own family's rows, and the writer loads it from staging."""
+        from app.ingest_batch import batch_refuses
         ledger = self.staged.get("stock_movements")
         into.mkdir(parents=True, exist_ok=True)      # an empty one too, as an empty staging folder was handed over
         for path in sorted(self.staging.iterdir()):
-            if path.is_file() and path != ledger:
+            if path.is_file() and path != ledger and not batch_refuses(path.name):
                 paths.copy_file(path, into / path.name)
 
     def compared(self, target: str, seconds: float, ok: bool) -> None:
@@ -2714,7 +2757,8 @@ class Check:
     def loader_guards(self) -> None:
         """The loader's guards for the stock snapshot and for a staged price book (its sales guards
         were read with the preview). A guard predicted to fire is a STOP on that file."""
-        from scripts.load_supabase import focus_book_kind, snapshot_guard, stale_pricebook_rows, warehouse_set_guard
+        from scripts import ingest as ing
+        from scripts.load_supabase import overlap_guard, snapshot_guard, stale_pricebook_rows, warehouse_set_guard
         opt, pv = self.options, self.pv
         if self.stock and "stock_balance" in self.staged:
             before = {str(r.get("w")) for r in self.q(Q_WAREHOUSES_BEFORE, [self.stock["as_on"]])}
@@ -2730,36 +2774,59 @@ class Check:
             elif seen is not None:
                 self.checks.append("Stock balance: fewer warehouses than the last snapshot (" + listed(seen, 5)
                                    + " missing): allowed by --partial-ok.")
-        for book, b in self.books.items():
+        for kind, b in self.books.items():
             if not b.get("staged"):
                 continue
+            # the loader's own rule, per family: the staged file voids only rows of its own family, and the guard
+            # counts that family's live rows (the MA book and the WEKOME book share MA_base)
             loaded = [dict(r, source_file=b["staged"]) for r in b["file_rows"]]
             names = {p.name for p in self.staging.iterdir() if p.is_file() and p.suffix.lower() in EXCEL}
-            live_focus = [r for r in b["live_rows"] if focus_book_kind(r.get("source_file")) == book]
+            live_focus = [r for r in b["live_rows"] if ing.pricebook_family(r.get("source_file")) == b["family"]]
             why = snapshot_guard(stale_pricebook_rows(loaded, b["live_rows"], names), live_focus,
                                  {str(r.get("sku_code") or "").strip() for r in loaded} - {""})
-            if why or pv.get("void_guard"):
-                text = "it would switch off too much of the live book (" + (why or str(pv.get("void_guard"))[:160]) + ")"
-                self.guards.append(f"price book {book}: " + text)
+            seen = pv.get("void_guard") if kind in KIND_TARGET else None      # the preview never sees the WEKOME book
+            if why or seen:
+                text = "it would switch off too much of the live book (" + (why or str(seen)[:160]) + ")"
+                self.guards.append(f"price book {b['name']}: " + text)
                 self.row(b["kind"], "stop", text + ". Is the export complete? Export the whole book again, or leave it "
                          "out (--pricebook skip)")
+        # one item, one book: an item in two Focus price books of one price_book (the MA book and the WEKOME book, both
+        # MA_base) would be one row owned by the book loaded last. The loader refuses such a load before it writes
+        # (scripts.load_supabase.overlap_guard): each staged book against the other family, from its staged file
+        # when it loads too, else from its live rows
+        books_staged = [b for b in self.books.values() if b.get("staged")]
+        loading = {b["family"]: {str(r.get("sku_code") or "").strip() for r in b["file_rows"]} - {""} for b in books_staged}
+        found = overlap_guard(loading, [r for book in sorted({b["book"] for b in books_staged})
+                                        for r in self.live_prices(book)]) if loading else None
+        if found:
+            self.guards.append(found["text"])
+            for b in books_staged:
+                if (b["family"] in found["families"] and loading[b["family"]] & set(found["codes"])
+                        and self.rows.get(b["kind"], {}).get("verdict") != "stop"):
+                    self.row(b["kind"], "stop", found["text"])
         self.checks.append("Loader guards: none is predicted to fire." if not self.guards else
                            "Loader guards predicted to fire: " + "; ".join(self.guards) + ".")
 
     # 9 ── catalog
     def step_catalog(self) -> None:
-        from scripts.load_supabase import focus_book_kind
+        """The catalog follows the MA_base price list. A book of MA_base that loads (MASellingPriceBook, the WEKOME
+        book, or both) replaces its own family's live rows in that list; every other live row stays (the other
+        family's, a workbook import's)."""
+        from scripts import ingest as ing
         from scripts.verify_numbers import current_prices
         catalog_rows = self.q(Q_CATALOG)
         live_book = {str(r.get("sku_code")).strip() for r in self.q(Q_BOOK) if r.get("sku_code")}
         candidates = {str(r.get("sku_code")).strip() for r in self.q(Q_CANDIDATES) if r.get("sku_code")}
-        b = self.books.get("MA_base")
-        if b and b.get("staged") and self.rows.get(b["kind"], {}).get("verdict") == "load":
-            others = [r for r in b["live_rows"] if focus_book_kind(r.get("source_file")) != "MA_base"]
-            book_after = set(current_prices(list(b["file_rows"]) + others, today=self.today))
-            candidates |= {str(r.get("sku_code")).strip() for r in b["file_rows"]
+        loading = [b for b in self.books.values() if b["book"] == "MA_base" and b.get("staged")
+                   and self.rows.get(b["kind"], {}).get("verdict") == "load"]
+        if loading:
+            replaced = {b["family"] for b in loading}
+            others = [r for r in loading[0]["live_rows"] if ing.pricebook_family(r.get("source_file")) not in replaced]
+            file_rows = [r for b in loading for r in b["file_rows"]]
+            book_after = set(current_prices(file_rows + others, today=self.today))
+            candidates |= {str(r.get("sku_code")).strip() for r in file_rows
                            if r.get("sku_code") and dec(r.get("rate_bhd")) > 0}
-            basis = "the price list this book would give"
+            basis = "the price list this book would give" if len(loading) == 1 else "the price list these books would give"
         else:
             book_after, basis = live_book, "the live price list (no price book loads)"
         effect = self.catalog = catalog_effect(catalog_rows, book_after, candidates)
@@ -2834,7 +2901,7 @@ class Check:
                   if b.get("staged") and self.rows.get(b["kind"], {}).get("verdict") == "load"]
         for b in loaded:
             n = Counter(e["what"] for e in b["items"])
-            lines.append(f"Price book {b['book']}: {n['added']} rows added, {n['changed']} changed, {n['dropped']} "
+            lines.append(f"Price book {b['name']}: {n['added']} rows added, {n['changed']} changed, {n['dropped']} "
                          "switched off.")
         if not loaded:
             lines.append("Prices: no price book loads; live prices stay as they are.")
@@ -2962,6 +3029,17 @@ class Check:
                            + (f", {changed:,} changed" if changed else ""))
             elif changed:
                 rewritten[target] = changed              # perhaps a folded row only: looked at last
+        for kind in KIND_ORDER:
+            # a staged price book the preview never compares (the WEKOME book: the batch engine refuses it) is said
+            # from step 6's own comparison, key by key; staged, its rows are written again under the staged name
+            b = self.books.get(kind)
+            if b is None or kind in KIND_TARGET or kind not in self.staged:
+                continue
+            n = Counter(e["what"] for e in b["items"])
+            said = [f"{n[w]:,} {word}" for w, word in (("added", "new"), ("dropped", "removed"), ("changed", "changed"))
+                    if n[w]]
+            out.append(f"{LABEL[kind]}: " + (", ".join(said) if said else
+                                             f"{plural(b['file_keys'], 'row')} written again under the staged name"))
         if "stock_movements" in self.staged:
             c = self.ledger_cmp
             if c is None:
@@ -2997,7 +3075,7 @@ class Check:
             if not r or r["verdict"] not in ("hold_back", "leave_out", "needs_decision"):
                 continue
             say = OPTION_SAY.get(kind)
-            book = self.books.get(kind.split(":", 1)[1]) if kind.startswith("selling_prices:") else None
+            book = self.books.get(kind)                  # a price book's own comparison (None for any other report)
             if r["verdict"] == "hold_back":
                 line = f"{r['label']}: {r['decision']}." + (f" To load it anyway, say: {say}." if say else "")
             elif r["verdict"] == "needs_decision":

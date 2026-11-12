@@ -745,6 +745,7 @@ export const ar: Strings = {
     'BLUETOOTH HEADSET': 'سماعات بلوتوث',
     'BLUETOOTH SPEAKER': 'مكبرات صوت بلوتوث',
     'CAR ACCESSORIES': 'إكسسوارات السيارة',
+    'SCREEN PROTECTOR': 'واقيات الشاشة',
     OTHER: 'أخرى',
   },
   /** app/shop.py shop_areas (the live list, 27-Sep-2026); an area the office adds later shows in English */

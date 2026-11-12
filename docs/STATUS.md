@@ -142,6 +142,25 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
+- Release r12, "WEKOME live" (built 12-Nov-2026; steps in `docs/RELEASE.md` § Release r12).
+  - The second supplier's Focus price book (`WekomeMASellerPricebook*.xlsx`) loads through `/yq-load`. Each Focus
+    price-book file family voids only its own superseded rows (`scripts/ingest.py`, `scripts/load_supabase.py`,
+    `scripts/ops/load_check.py`, `scripts/verify_numbers.py`). The portal's batch upload refuses that book; its SQL
+    scope is per MA prefix.
+  - The catalog sync gives a new item its brand (VFAN or WEKOME) and its category, with a new SCREEN PROTECTOR. A new
+    item whose product sits in the SIM or Devices division is added hidden. `alias_autofill` also writes exact-name
+    aliases for stock-report names, so an item that has not sold yet shows its stock.
+  - Migration `r12_b2c_causeway`: the marketplace's shop price (`v_catalog.b2c_rate`) is the item's current MA_base
+    Causeway row, and the Screen Protector category gets its category-master row.
+  - The market's product names keep a hyphenated model code whole and drop the supplier tag.
+  - `/yq-month`'s purchases check accepts a same-number order only when the codes agree. Focus numbers orders and
+    receipts apart, and on 12-Nov-2026 they crossed.
+  - Known and left:
+    - The load check's "MRNs without cost" line compares MRN numbers with `mrn_lines.doc_no`, which holds PO numbers
+      (`scripts/ingest_mrn.py` files cost lines under the order). Engine work for a later release.
+    - The van and customer price items (price_scope) clear themselves when a drop holds only one of the two MA_base
+      books, and come back as new with the other. modern_trade already behaved this way.
+
 - Focus's new title format (4-Nov-2026): every report's title reads `[As on date <start of the books> to <As on
   date>]`. The reader took the first date, so the 041126 check stopped as an older drop. `report_date_from_title` now
   takes the last date (`report_span_from_title` keeps both), and the load check says in one line when the titles

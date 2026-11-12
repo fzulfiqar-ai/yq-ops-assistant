@@ -1126,6 +1126,102 @@ def rb_rows(*orders):
     return [r for no, day, *codes in orders for r in po(no, day, *codes)]
 
 
+@test("purchases (r12): the order under the receipt's number is refused only when the two share no model code")
+def _():
+    pos = rb._po_table(rb_rows(("Q-1", "2026-11-01", "WZ1", "WZ2", "WY9"), ("Q-2", "2026-11-02", "QA1", "QB2", "QC3")))
+    day = date(2026, 11, 10)
+    # the numbers crossed: Q-1 is the other supplier's order; the codes find the receipt's own
+    assert rb.match_po("Q-1", day, {"QA1", "QB2", "QC3"}, pos) == ("Q-2", "codes", 1)
+    assert rb.match_po("Q-2", day, {"WZ1", "WZ2", "WY9"}, pos) == ("Q-1", "codes", 1)
+    # crossed, and the receipt's own order is not on file: no order at all, never the other supplier's
+    only_other = rb._po_table(rb_rows(("Q-1", "2026-11-01", "WZ1", "WZ2", "WY9")))
+    assert rb.match_po("Q-1", day, {"QA1", "QB2", "QC3"}, only_other) == (None, None, None)
+    # a part delivery (2 of the order's 6 codes) keeps its own order by the number (the review's case)
+    part = rb._po_table(rb_rows(("Q-1", "2026-11-01", "QA1", "QB2", "QC3", "QD4", "QE5", "QF6")))
+    assert rb.match_po("Q-1", day, {"QA1", "QB2"}, part) == ("Q-1", "number", None)
+    # extra items the order did not list (4 ordered + 5 extra) keep it too
+    extra = rb._po_table(rb_rows(("Q-1", "2026-11-01", "QA1", "QB2", "QC3", "QD4")))
+    assert rb.match_po("Q-1", day, {"QA1", "QB2", "QC3", "QD4", "ZE1", "ZE2", "ZE3", "ZE4", "ZE5"}, extra) == \
+        ("Q-1", "number", None)
+    # the number is judged by the receipt's own item codes only: a model code read off a name ("WDC-21") that the
+    # order lists as variants ("WDC-21-CC") does not count against it
+    variants = rb._po_table(rb_rows(("Q-1", "2026-11-01", "QA1", "QV1-CC")))
+    assert rb.match_po("Q-1", day, {"QA1", "QV1"}, variants, number_leads={"QA1"}) == ("Q-1", "number", None)
+    assert rb.match_po("Q-1", day, {"QV1"}, variants, number_leads=set()) == ("Q-1", "number", None)
+    # nothing to compare: as before, the number stands -- the order has no codes, the receipt none, or the receipt's
+    # item codes could not be read (check_number off); a receipt dated before its order still takes it by its number
+    bare = {"Q-1": {"date": date(2026, 11, 1), "codes": set()}}
+    assert rb.match_po("Q-1", day, {"QA1"}, bare) == ("Q-1", "number", None)
+    assert rb.match_po("Q-1", day, set(), pos) == ("Q-1", "number", None)
+    assert rb.match_po("Q-1", day, {"QA1", "QB2", "QC3"}, pos, check_number=False) == ("Q-1", "number", None)
+    assert rb.match_po("Q-2", date(2026, 10, 1), {"QA1", "QB2", "QC3"}, pos) == ("Q-2", "number", None)
+
+
+def crossed_world():
+    """Two suppliers' receipts whose numbers crossed their orders' (invented): receipt Q-26-11-1 holds supplier X's
+    items, which X's order Q-26-11-2 lists; receipt Q-26-11-2 holds supplier Y's, which Y's order Q-26-11-1 lists.
+    Each order's papers and cost lines are filed under its own number (the MRN XML follows its linked order)."""
+    x = {"QX-A Cable Quartz QA1": "QA1", "QX-B Charger Quill QB2": "QB2", "QX-C Holder Quay QC3": "QC3"}
+    y = {"WZ-1 Earphone Zinc WZ-1-BK": "WZ-1-BK", "WZ-2 Speaker Zest WZ-2": "WZ-2", "WY-9 Glass Yew WY-9": "WY-9"}
+    b = Book()
+    for name in x:
+        b.receipt(name, date(2026, 11, 10), 10, 5, "MRN:Q-26-11-1")
+    for name in y:
+        b.receipt(name, date(2026, 11, 11), 20, 8, "MRN:Q-26-11-2")
+    pos = po("Q-26-11-1", "2026-11-01", *y.values()) + po("Q-26-11-2", "2026-11-02", *x.values())
+    files = ([{"po_no": "Q-26-11-2", "kind": k} for k in ("po", "mrn", "invoice")]
+             + [{"po_no": "Q-26-11-1", "kind": k} for k in ("po", "mrn")])
+    mrn = ([{"doc_no": "Q-26-11-2", "code": c} for c in x.values()]
+           + [{"doc_no": "Q-26-11-1", "code": c} for c in y.values()])
+    return b.rows, dict(x, **y), pos, files, mrn
+
+
+@test("purchases (r12): crossed receipt and order numbers pair by the codes; the other order's papers and cost lines are never borrowed")
+def _():
+    rows, codes, pos, files, mrn = crossed_world()
+    asked: list[str] = []
+
+    def detail_of(po_no):
+        asked.append(po_no)
+        return {"found": True, "status": "received", "lines": [], "reconciliation": {"summary": "t"}}
+
+    with data_root():
+        got, elsewhere = rb.purchases_rows(rows, codes, date(2026, 11, 1), date(2026, 11, 30), pos, files, mrn, None,
+                                           detail_of)
+        by = {r["receipt"]: r for r in got}
+        one, two = by["MRN:Q-26-11-1"], by["MRN:Q-26-11-2"]
+        assert (one["po"], one["po_basis"], one["overlap"], one["xml"], one["invoice_basis"]) == (
+            "Q-26-11-2", "codes", "1", True, "vault"), one
+        assert (one["cost_lines"], one["lines"], one["status"], one["actions"]) == (3, 3, rb.PROVEN, []), one
+        assert (two["po"], two["po_basis"], two["cost_lines"], two["xml"]) == ("Q-26-11-1", "codes", 3, True), two
+        assert two["status"] == rb.PAPERS_MISSING and two["actions"] == [rb.PAPER_ACTIONS["invoice"]]   # Y's own: none
+        assert asked == ["Q-26-11-2", "Q-26-11-1"] and elsewhere == 0
+        assert ("the order filed under its number, Q-26-11-1, is not taken: the two share 0 of their 6 model codes "
+                "(Focus numbers orders and receipts apart), and its papers and cost lines are not read as this "
+                "receipt's") in one["notes"], one["notes"]
+        assert "its order Q-26-11-2 is matched by its model codes, not by its number: the two share 3 of their 3 codes" \
+            in one["notes"]
+        text = all_lines(rb.purchases_block(got, elsewhere, date(2026, 11, 1), date(2026, 11, 30)))
+        assert "Q-26-11-2 (by its codes)" in text and "3 of 3" in text and "0 of 3" not in text, text
+        assert "MRN:Q-26-11-1: the order filed under its number, Q-26-11-1, is not taken" in text
+        # the receipt's own order not loaded yet: the other one's papers under the same number are not borrowed --
+        # no order, no XML, no invoice, no cost line, each paper an action (the vault's PO is not this receipt's)
+        y_only = [r for r in pos if r["po_no"] == "Q-26-11-1"]
+        got, _n = rb.purchases_rows(rows, codes, date(2026, 11, 1), date(2026, 11, 30), y_only,
+                                    files + [{"po_no": "Q-26-11-1", "kind": "invoice"}], mrn, None, detail_of)
+        one = next(r for r in got if r["receipt"] == "MRN:Q-26-11-1")
+        assert (one["po"], one["po_file_only"], one["xml"], one["invoice"], one["cost_lines"]) == (
+            None, False, False, False, 0), one
+        assert one["status"] == rb.PAPERS_MISSING
+        assert one["actions"] == [rb.PAPER_ACTIONS[k] for k in ("po", "xml", "invoice")], one["actions"]
+        assert any(n.startswith("the order filed under its number, Q-26-11-1, is not taken") for n in one["notes"])
+        # without the item codes there is nothing to compare: the number stands, as before (no note)
+        got, _n = rb.purchases_rows(rows, None, date(2026, 11, 1), date(2026, 11, 30), pos, files, mrn, None, detail_of)
+        one = next(r for r in got if r["receipt"] == "MRN:Q-26-11-1")
+        assert (one["po"], one["po_basis"], one["cost_lines"]) == ("Q-26-11-1", "number", None)
+        assert not any("is not taken" in n for n in one["notes"])
+
+
 @test("purchases: every paper missing, each one an action; the vault's PO with no lines; cost lines from a workbook")
 def _():
     p = purchases(pos=[], order_files=[{"po_no": "T-26-09-2", "kind": "po"}], invoices=[], details={},

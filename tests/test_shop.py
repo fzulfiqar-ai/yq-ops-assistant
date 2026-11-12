@@ -229,6 +229,205 @@ def _():
         assert got in CATEGORY_ORDER or got == "MISCELLANEOUS"
 
 
+@test("catalog (r12): WEKOME shapes - screen protectors, wireless vs wired earphones; the brand read off the name")
+def _():
+    from app.catalog import CATEGORY_ORDER, brand_of, classify_category
+    # invented codes and names in the shapes of the WEKOME book (12-Nov-2026)
+    cases = {
+        ("QP-210-15PM", "QP-210 Privacy Screen Protector Phone 15 Pro Max (6.7) (10PCS per box) Clear (WEKOME)"): "SCREEN PROTECTOR",
+        ("QP-211-14", "QP-211 HD Screen Protector Phone 14 / 15 (6.1) (10PCS per box) Clear (WEKOME)"): "SCREEN PROTECTOR",
+        ("QG-3", "QG-3 Tempered Glass Phone 13 (6.1)"): "SCREEN PROTECTOR",
+        ("QE-07-GR", "QE-07 Wireless Earphone Green (WEKOME)"): "BLUETOOTH HEADSET",
+        ("QS-40", "QS-40 Wireless Earphone (Gen4) White (WEKOME)"): "BLUETOOTH HEADSET",
+        ("QB-21-3.5", "QB-21 3.5mm Jack Wired Earphone Red (WEKOME)"): "EARPHONE",
+        ("QB-21-C", "QB-21 Type-C Jack Wired Earphone (Digital Signal) Red (WEKOME)"): "EARPHONE",
+        ("QDC-90-CL", "QDC-90 PD 27W 1Mtr Data Cable (Type-C to Lightning) Grey (WEKOME)"): "CABLE",
+        ("QX-C70", "QX-C70 30W Car Charger (USB + Type-C Port) Grey (WEKOME)"): "CAR CHARGER",
+        ("QX-U20", "QX-U20 PD 20W Charger (UK) (Single Port) White (WEKOME)"): "CHARGER",
+        ("QD-01", "QD-01 Speaker Tarnish (WEKOME)"): "BLUETOOTH SPEAKER",
+    }
+    for (code, name), want in cases.items():
+        got = classify_category(code, name, name)      # as sync_from_price_book calls it: code, name, spec
+        assert got == want, (code, got, want)
+        assert got in CATEGORY_ORDER
+    # "wireless" alone is not an earphone (chargers, speakers, power banks say it too); the wired kind stays EARPHONE
+    assert classify_category("QW1", "QW1 15W 1Mtr Wireless Charger") == "CHARGER"
+    assert classify_category("QW2", "QW2 BT Speaker Wireless Distance 10mtr") == "BLUETOOTH SPEAKER"
+    assert classify_category("QW3", "QW3 PB 5000mah Magnetic Wireless Power Bank") == "POWER BANK"
+    assert classify_category("QW4", "QW4 Type-C Flat In-Ear Phones") == "EARPHONE"
+    # the shelf order only grew at its end
+    assert CATEGORY_ORDER == ["CABLE", "CHARGER", "CAR CHARGER", "POWER BANK", "EARPHONE", "BLUETOOTH HEADSET",
+                              "BLUETOOTH SPEAKER", "CAR ACCESSORIES", "SCREEN PROTECTOR"]
+    # the brand: VFAN anywhere (as before, tested first), WEKOME on its "(WEKOME)" mark only
+    assert brand_of("QE-07 Wireless Earphone Green (WEKOME)", None) == "WEKOME"
+    assert brand_of(None, "qe-07 wireless earphone ( wekome )") == "WEKOME"
+    assert brand_of("V12 Fast Cable (VFAN)", "V12 Fast Cable (VFAN)") == "VFAN"
+    assert brand_of("V12 vfan fast cable", None) == "VFAN"
+    assert brand_of("Q9 (VFAN) case (WEKOME)", None) == "VFAN"
+    assert brand_of("Wekome-style cable", None) is None and brand_of(None, None) is None and brand_of("Plain", "") is None
+
+
+class _CatQuery:
+    """Just enough of the service client's table query for sync_from_price_book (select / range / order,
+    upsert, update ... in_), recording every write."""
+
+    def __init__(self, rows: list, writes: list):
+        self.rows, self.writes = rows, writes
+        self.op, self.payload, self.codes, self.rng = "select", None, None, None
+
+    def select(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def range(self, a, b):
+        self.rng = (a, b)
+        return self
+
+    def upsert(self, rows, on_conflict=None, **k):
+        self.op, self.payload = "upsert", [dict(r) for r in rows]
+        assert on_conflict == "item_code", on_conflict
+        return self
+
+    def update(self, payload):
+        self.op, self.payload = "update", dict(payload)
+        return self
+
+    def in_(self, col, vals):
+        assert col == "item_code"
+        self.codes = list(vals)
+        return self
+
+    def execute(self):
+        import types
+        if self.op == "select":
+            a, b = self.rng or (0, len(self.rows) - 1)
+            return types.SimpleNamespace(data=[dict(r) for r in self.rows[a:b + 1]])
+        self.writes.append((self.op, self.payload, self.codes))
+        if self.op == "upsert":
+            for rec in self.payload:
+                hit = next((r for r in self.rows if r["item_code"] == rec["item_code"]), None)
+                if hit is None:
+                    self.rows.append(dict(rec))
+                else:
+                    hit.update(rec)
+        else:
+            for r in self.rows:
+                if r["item_code"] in self.codes:
+                    r.update(self.payload)
+        return types.SimpleNamespace(data=[])
+
+
+@test("catalog (r12): sync adds new SKUs with their brand; SIM / Devices products are inserted hidden; existing rows untouched")
+def _():
+    import types
+    import app.catalog as cat
+    # invented codes; the candidates query's rows (DISTINCT ON code) with the product's division
+    candidates = [
+        {"code": "QE-07-GR", "name": "QE-07 Wireless Earphone Green (WEKOME)", "spec": "QE-07 Wireless Earphone Green (WEKOME)",
+         "category": "OTHER", "division": "Accessories"},
+        {"code": "QB-21-3.5", "name": "QB-21 3.5mm Jack Wired Earphone Red (WEKOME)", "spec": None, "category": "OTHER", "division": None},
+        {"code": "QP-210-15PM", "name": "QP-210 Privacy Screen Protector Phone 15 Pro Max (6.7) (10PCS per box) Clear (WEKOME)",
+         "spec": None, "category": "OTHER", "division": "Accessories"},
+        {"code": "V12", "name": "V12 Fast Cable 1Mtr (VFAN)", "spec": "V12 Fast Cable 1Mtr (VFAN)", "category": "CAR CHARGER", "division": "Accessories"},
+        {"code": "ZQ-PHONE", "name": "ZQ-PHONE MOBILE", "spec": "ZQ-PHONE MOBILE", "category": "MOBILE PHONES", "division": "Devices"},
+        {"code": "QSIM-PACK", "name": "Prepaid starter pack", "spec": None, "category": "PREPAID", "division": "sim"},
+        # already in the catalog: never re-inserted, never hidden, whatever its product's division
+        {"code": "OLD-PHONE", "name": "OLD-PHONE MOBILE", "spec": None, "category": "MOBILE PHONES", "division": "Devices"},
+        {"code": "OLD-OFF", "name": "OLD-OFF Cable", "spec": None, "category": "CABLE", "division": "Accessories"},
+    ]
+    book = ["QE-07-GR", "QB-21-3.5", "QP-210-15PM", "V12", "ZQ-PHONE", "OLD-PHONE", "OLD-OFF"]   # QSIM-PACK: not current
+    table = [{"item_code": "OLD-PHONE", "is_active": True, "hidden": False, "division": "Accessories", "brand": None,
+              "category": "OWNER PICK", "updated_by": "owner"},
+             {"item_code": "OLD-OFF", "is_active": False, "hidden": False, "division": "Accessories", "brand": "VFAN",
+              "category": "CABLE", "updated_by": "owner"},
+             {"item_code": "GONE", "is_active": True, "hidden": False, "division": "Accessories", "brand": "VFAN",
+              "category": "CABLE", "updated_by": "owner"}]
+    before = {r["item_code"]: dict(r) for r in table}
+    sqls: list[str] = []
+    writes: list = []
+
+    def fake_sql(sql):
+        sqls.append(sql)
+        if "FROM selling_prices sp" in sql:
+            return [dict(r) for r in candidates]
+        if "FROM v_price_list_by_book" in sql:
+            return [{"sku_code": c} for c in book]
+        raise AssertionError(sql)
+
+    client = types.SimpleNamespace(table=lambda name: _CatQuery(table, writes) if name == "catalog_items"
+                                   else (_ for _ in ()).throw(AssertionError(name)))
+    saved = (cat.exec_sql, cat.get_client)
+    try:
+        cat.exec_sql, cat.get_client = fake_sql, (lambda: client)
+        n = cat.sync_from_price_book()
+    finally:
+        cat.exec_sql, cat.get_client = saved
+    assert n == 6, n
+    # one candidates query, which now carries the product's division; no other read
+    assert len(sqls) == 2 and sum("FROM selling_prices sp" in s for s in sqls) == 1, sqls
+    assert "c.division AS division" in next(s for s in sqls if "FROM selling_prices sp" in s)
+    ups = [w for w in writes if w[0] == "upsert"]
+    assert len(ups) == 2, writes
+    plain, hid = ups[0][1], ups[1][1]
+    keys = {"item_code", "display_name", "spec", "category", "brand", "is_active", "updated_by", "updated_at"}
+    # each batch has ONE key set: a bulk upsert NULLs a key a row lacks, so the ordinary rows never carry hidden
+    assert all(set(r) == keys for r in plain), [sorted(r) for r in plain]
+    assert all(set(r) == keys | {"hidden", "division"} for r in hid), [sorted(r) for r in hid]
+    got = {r["item_code"]: r for r in plain + hid}
+    assert [r["item_code"] for r in plain] == ["QE-07-GR", "QB-21-3.5", "QP-210-15PM", "V12"]
+    assert [(r["item_code"], r["hidden"], r["division"]) for r in hid] == [("ZQ-PHONE", True, "Devices"), ("QSIM-PACK", True, "SIM")]
+    assert {c: (got[c]["brand"], got[c]["category"]) for c in got} == {
+        "QE-07-GR": ("WEKOME", "BLUETOOTH HEADSET"), "QB-21-3.5": ("WEKOME", "EARPHONE"),
+        "QP-210-15PM": ("WEKOME", "SCREEN PROTECTOR"), "V12": ("VFAN", "CABLE"),
+        "ZQ-PHONE": (None, "MOBILE PHONES"), "QSIM-PACK": (None, "PREPAID")}, got
+    assert got["QSIM-PACK"]["is_active"] is False and got["ZQ-PHONE"]["is_active"] is True
+    # existing rows: never upserted; only the is_active mirror (OLD-OFF back in the book, GONE left it)
+    assert not ({"OLD-PHONE", "OLD-OFF", "GONE"} & set(got))
+    rows = {r["item_code"]: r for r in table}
+    assert rows["OLD-PHONE"] == before["OLD-PHONE"], rows["OLD-PHONE"]
+    for code, flag in (("OLD-OFF", True), ("GONE", False)):
+        changed = {k for k in rows[code] if rows[code][k] != before[code].get(k)}
+        assert rows[code]["is_active"] is flag and changed <= {"is_active", "updated_by", "updated_at"}, (code, changed)
+        assert rows[code]["hidden"] is False and rows[code]["division"] == "Accessories"
+    # nothing new and nothing hidden: no write at all
+    writes.clear()
+    try:
+        cat.exec_sql, cat.get_client = (lambda sql: [] if "selling_prices" in sql else [{"sku_code": c} for c in book]), (lambda: client)
+        assert cat.sync_from_price_book() == 0
+    finally:
+        cat.exec_sql, cat.get_client = saved
+    assert [w for w in writes if w[0] == "upsert"] == [], writes
+
+
+@test("catalog (r12): the full export's B2C column is the Causeway price; the salesman's B2B copy is unchanged")
+def _():
+    import app.catalog as cat
+    from openpyxl import load_workbook
+    item = {"item_code": "QE-07-GR", "display_name": "QE-07 Wireless Earphone Green (WEKOME)", "spec": None,
+            "category": "BLUETOOTH HEADSET", "standard_rate": 1.25, "b2c_rate": 2.5,
+            "product_image_url": None, "package_image_url": None}
+    saved = (cat._catalog_sig, cat.list_catalog, cat._fetch_images)
+    try:
+        cat._catalog_sig = lambda: "r12-export-test"
+        cat.list_catalog = lambda *a, **k: {"items": [dict(item)], "categories": ["BLUETOOTH HEADSET"], "count": 1}
+        cat._fetch_images = lambda items, kinds=("product", "package"): {}
+        for k in ("xlsx:full", "xlsx:b2b"):
+            cat._export_cache.pop(k, None)
+        ws = load_workbook(io.BytesIO(cat.export_xlsx("full")))["BLUETOOTH HEADSET"]
+        heads = [c.value for c in ws[1]]
+        assert heads[-2:] == ["B2B (BD)", "B2C · Causeway (BD)"], heads
+        assert not any("roadshow" in str(h).lower() for h in heads), heads
+        assert [c.value for c in ws[2]][-2:] == [1.25, 2.5]
+        ws = load_workbook(io.BytesIO(cat.export_xlsx("b2b")))["BLUETOOTH HEADSET"]
+        assert [c.value for c in ws[1]] == ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC", "Price (BD)"]
+    finally:
+        cat._catalog_sig, cat.list_catalog, cat._fetch_images = saved
+        for k in ("xlsx:full", "xlsx:b2b"):
+            cat._export_cache.pop(k, None)
+
+
 @test("pricing: free-delivery threshold, delivery fee, minimum order")
 def _():
     from app.shop import price_cart

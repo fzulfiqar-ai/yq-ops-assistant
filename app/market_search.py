@@ -43,6 +43,7 @@ CATEGORY_WORDS: dict[str, str] = {
     "BLUETOOTH HEADSET": "bluetooth headset earbuds tws wireless",
     "BLUETOOTH SPEAKER": "bluetooth speaker sound music",
     "CAR ACCESSORIES": "car holder mount accessory",
+    "SCREEN PROTECTOR": "screen protector glass tempered privacy",
 }
 
 # search.ts boosts: code 6, name 3, syn 2.5, category 1.5, brand 1.2, spec 1

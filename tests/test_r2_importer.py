@@ -547,6 +547,119 @@ def _():
         assert "notes.txt" in names and out.rows == {} and out.files == []
 
 
+# ── r12 (12-Nov-2026): the WEKOME price book never goes through a batch ───────────────────────
+# Its rows are MA_base rows, but its file is no MASellingPriceBook: staged as MA_base, the book scope (every live
+# MA_base row of a 'masellingpricebook%' file other than the staged one) would switch the whole MA book off.
+
+WEKOME_WORDS = "load the WEKOME price book with /yq-load"
+
+
+def _price_book_file(path: Path, rows) -> Path:
+    """A price book in the Focus layout (header row 0, 28 columns), every code and rate invented."""
+    from openpyxl import Workbook
+    from scripts import ingest as ing
+    wb = Workbook()
+    ws = wb.active
+    ws.append(list(ing.EXPECTED_HEADERS["selling_prices"]))
+    for code, wh, rate in rows:
+        ws.append([f"Item {code}", code, None, None, wh, None, "Dinar", "1/1/2026", None, 0, 0, "Nos", rate,
+                   *([0] * 13), "Authorized"])
+    wb.save(path)
+    return path
+
+
+@test("batch path: the WEKOME price book is refused with the words that load it; a read-only preview lists it, never parses it")
+def _():
+    from app.ingest_batch import BATCH_REFUSED, BatchRefused, batch_refuses, parse_folder, run_preview
+    assert set(BATCH_REFUSED) == {"selling_prices:MA_base:wekome"}
+    for name in ("WekomeMASellerPricebook.xlsx", "WekomeMASellerPricebook (3).xlsx", "WekomeMASellerPricebook _3_.xlsx"):
+        assert WEKOME_WORDS in (batch_refuses(name) or ""), name
+    for name in ("MASellingPriceBook (3).xlsx", "MASellingPriceBook _3_.xlsx", "ModernTradeSellerBook.xlsx", "REPLACE_OK",
+                 "Sales_day_book1.xlsx"):
+        assert batch_refuses(name) is None, name
+    with tempfile.TemporaryDirectory() as d:
+        _price_book_file(Path(d) / "WekomeMASellerPricebook _2_.xlsx", [("ZZ-01", None, 1.234), ("ZZ-01", "Causeway", 1.456)])
+        _price_book_file(Path(d) / "MASellingPriceBook (2).xlsx", [("ZZ-50", None, 2.5)])
+        out = parse_folder(d)                                   # read-only: listed with the words, never parsed
+        assert [r["file"] for r in out.refused] == ["WekomeMASellerPricebook _2_.xlsx"], out.refused
+        assert WEKOME_WORDS in {i["file"]: i["reason"] for i in out.ignored}["WekomeMASellerPricebook _2_.xlsx"]
+        assert [f["file"] for f in out.files] == ["MASellingPriceBook (2).xlsx"], out.files
+        assert {r["source_file"] for r in out.rows["selling_prices"]} == {"MASellingPriceBook (2).xlsx"}
+        # a batch that could be committed is refused whole, before anything is parsed, staged or written
+        fb = _FakeBackend()
+        try:
+            run_preview(d, fb, actor="a@b", persist=True, out_dir=Path(d) / "p")
+            raise AssertionError("a batch holding the WEKOME price book must be refused")
+        except BatchRefused as e:
+            said = str(e)
+        assert said.startswith(f"WekomeMASellerPricebook _2_.xlsx: {WEKOME_WORDS}") and said.endswith("Nothing was staged."), said
+        assert len("Preview failed: " + said) <= 216, "the route shows the first 200 characters: the words are early"
+        assert fb.calls == [] and not (Path(d) / "p").exists(), "no query, no batch, no preview files"
+        # a read-only preview (the load check, scripts/ingest_preview) goes on without it, and says why
+        res = run_preview(d, None, actor="cli", persist=False, out_dir=Path(d) / "q", today="2026-11-12")
+        s = res["summary"]
+        assert list(s["targets"]) == ["selling_prices"] and s["targets"]["selling_prices"]["file_rows"] == 1, s["targets"]
+        assert any(i["file"] == "WekomeMASellerPricebook _2_.xlsx" and WEKOME_WORDS in i["reason"] for i in s["ignored"])
+
+
+@test("batch path: the MA book's preview never counts an SKU only the WEKOME book carries as dropped")
+def _():
+    from app.ingest_batch import _other_family_stems, _price_changes
+    assert _other_family_stems("MA_base") == ["wekomemasellerpricebook"] and _other_family_stems("modern_trade") == []
+
+    class _Book:
+        """The live MA_base list (MA codes and a WEKOME code) and the WEKOME family's live codes."""
+        def __init__(self):
+            self.asked = []
+
+        def query(self, sql, params=None):
+            self.asked.append(list(params or []))
+            if "v_price_list_by_book" in sql:
+                return [{"sku_code": c, "price_bhd": p} for c, p in (("ZZ-50", 2.5), ("ZZ-51", 3.5), ("ZZ-01", 1.234))]
+            if "count(*) as n" in sql:
+                return [{"n": 2, "skus": 2}]
+            if params and params[1] == "wekomemasellerpricebook%":
+                return [{"s": "ZZ-01"}]
+            return [{"s": "ZZ-50"}, {"s": "ZZ-51"}]
+    rows = [{"sku_code": "ZZ-50", "price_book": "MA_base", "warehouse_name": None, "start_date": "2026-01-01",
+             "end_date": None, "rate_bhd": 2.5, "status": "Authorized", "source_file": "MASellingPriceBook (2).xlsx"}]
+    be = _Book()
+    p = _price_changes(be, rows, "2026-11-12")["MA_base"]
+    assert p["dropped_skus"] == ["ZZ-51"], p
+    assert ["MA_base", "wekomemasellerpricebook%"] in be.asked and p["live_skus"] == 2 and p["live_skus_covered"] == 1
+
+
+@test("routes: a portal upload holding the WEKOME price book is refused with the words that load it; nothing is staged")
+def _():
+    from fastapi.testclient import TestClient
+    import app.audit as aud
+    import app.ingest_batch_api as api
+    import app.main as m
+    from app.auth import CurrentUser, require_admin
+    c = TestClient(m.app)
+    saved_factory, saved_log = api.backend_factory, aud.log_event
+    seen: list = []
+    fb = _FakeBackend()
+    api.backend_factory = lambda: fb
+    aud.log_event = lambda email, event, **kw: seen.append(event)
+    m.app.dependency_overrides[require_admin] = lambda: CurrentUser(user_id="u", email="admin@example.com", role="admin")
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            book = _price_book_file(Path(d) / "WekomeMASellerPricebook (2).xlsx", [("ZZ-01", None, 1.234)])
+            day = _price_book_file(Path(d) / "MASellingPriceBook (2).xlsx", [("ZZ-50", None, 2.5)])
+            files = [("files", (p.name, p.read_bytes(),
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) for p in (book, day)]
+            r = c.post("/ingest/preview", files=files)
+        body = r.json()
+        assert r.status_code == 200 and body["ok"] is False and WEKOME_WORDS in body["error"], body
+        assert "WekomeMASellerPricebook (2).xlsx" in body["error"] and "Nothing was staged" in body["error"], body
+        assert fb.calls == [] and fb.closed == 1, "the session opened for the preview is closed; nothing was asked of it"
+        assert seen == ["ingest.preview_failed"], seen
+    finally:
+        api.backend_factory, aud.log_event = saved_factory, saved_log
+        m.app.dependency_overrides.pop(require_admin, None)
+
+
 @test("DirectBackend.open() without DATABASE_URL raises DirectDbUnavailable (the routes say so; nothing else breaks)")
 def _():
     from app.ingest_batch import DEFAULT_STATEMENT_TIMEOUT_S, DirectBackend, DirectDbUnavailable

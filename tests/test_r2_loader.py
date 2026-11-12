@@ -896,6 +896,79 @@ def _():
     assert '"data.unmapped_share": [_react_notify_warn]' in ev
 
 
+@test("alias autofill (r12): the latest stock snapshot's unaliased names that ARE a product's name are aliased too -- same rules, sold names once, a failed stock read skips only them")
+def _():
+    from scripts.alias_autofill import STOCK_UNALIASED_SQL, autofill, summary_line
+    # the read: unaliased names (v_current_stock: stock_balance + aliases, a view -- yq_readonly reads no product_aliases)
+    # of the LATEST snapshot only
+    low = " ".join(STOCK_UNALIASED_SQL.split()).lower()
+    assert "from v_current_stock" in low and "sku_code is null" in low
+    assert "as_of_date = (select max(as_of_date) from stock_balance)" in low and "product_aliases" not in low
+    # invented codes and names
+    green = "QE-07 Wireless Earphone Green (WEKOME)"
+    cable = "QDC-90 PD 27W 1Mtr Data Cable (Type-C to Lightning) Grey (WEKOME)"
+    held = "QH-1 Held Back Cable (WEKOME)"
+    sold = "V12 Fast Cable 1Mtr (VFAN)"
+    products = [{"id": 21, "sku_code": "QE-07-GR", "item_name": green}, {"id": 23, "sku_code": "QDC-90-CL", "item_name": cable},
+                {"id": 24, "sku_code": "QH-1", "item_name": held}, {"id": 25, "sku_code": "V12", "item_name": sold},
+                {"id": 99, "sku_code": "QDC-90-OLD", "item_name": "QDC-90 old cable"}]
+    stock = [{"item_name": green, "stores": 1, "units": 40, "as_of": "2026-11-12"},
+             {"item_name": cable, "stores": 2, "units": 12, "as_of": "2026-11-12"},           # aliased meanwhile (curated)
+             {"item_name": "QDC-90-CL spare variant", "stores": 1, "units": 3, "as_of": "2026-11-12"},  # a code match (0.9): left
+             {"item_name": held, "stores": 1, "units": 5, "as_of": "2026-11-12"},             # the owner's hold-back
+             {"item_name": sold, "stores": 1, "units": 9, "as_of": "2026-11-12"},             # on the sales list too: once
+             {"item_name": "Unnamed gadget", "stores": 1, "units": 1, "as_of": "2026-11-12"},
+             {"item_name": "  ", "stores": 1, "units": 1, "as_of": "2026-11-12"}]
+    reads: list[str] = []
+    state = {"stock_fails": False}
+
+    def fake_sql(sql):
+        reads.append(sql)
+        if "sku_code IS NULL AND sale_date" in sql:                    # UNALIASED_SQL: one unaliased sold string
+            return [{"item_name": sold, "division": "Accessories", "lines": 3, "units": 3, "rev_365": 4.5, "rev_90": 4.5,
+                     "last_sold": "2026-11-10"}]
+        if sql.startswith("SELECT id, sku_code, item_name FROM products"):
+            return [dict(p) for p in products]
+        if sql == STOCK_UNALIASED_SQL:
+            if state["stock_fails"]:
+                raise RuntimeError("stock view down")
+            return [dict(s) for s in stock]
+        if "COUNT(*) FILTER (WHERE sku_code IS NULL)" in sql:
+            return [{"lines": 500, "unmapped": 5, "rev": 900.0, "rev_unmapped": 4.0, "data_to": "2026-11-12"}]
+        raise AssertionError(sql)
+
+    db = {"product_aliases": [{"id": 1, "alias_text": cable, "product_id": 99}], "audit_log": [],
+          "app_settings": [{"key": "alias_autofill_exclude", "value": "QH-1"}]}
+    res = autofill(exec_sql=fake_sql, client=_FakeDB(db), emit=lambda *a, **k: True)   # 1% < 2%: never called
+    assert res.get("error") is None and res.get("stock_error") is None, res
+    assert res["proposed"] == 1 and res["stock_proposed"] == 5, res            # the sold name and the blank one are not stock proposals
+    assert res["picked"] == 3 and res["codes"] == ["QDC-90-CL", "QE-07-GR", "V12"], res
+    assert res["stock_codes"] == ["QDC-90-CL", "QE-07-GR"] and res["held_back"] == ["QH-1"], res
+    al = {r["alias_text"]: r["product_id"] for r in db["product_aliases"]}
+    # insert-only: the stock string itself is the alias; the curated alias is not re-pointed; nothing deleted
+    assert al == {cable: 99, green: 21, sold: 25}, al
+    assert res["inserted"] == 2 and len(db["product_aliases"]) == 3
+    assert db["audit_log"][0]["detail"]["from_stock"] == ["QDC-90-CL", "QE-07-GR"] and db["audit_log"][0]["detail"]["proposed"] == 3
+    assert not res["warned"] and res["share"]["share"] == 0.01
+    line = summary_line(res)
+    assert line.startswith("aliases: 2 exact-name inserted (QDC-90-CL, QE-07-GR, V12), 2 code(s) from the stock list (not sold yet); "
+                           "held back (owner decision): QH-1; unmapped accessory lines last 30d: 5/500 = 1.0%"), line
+    assert "not read" not in line
+    # the share query is the same one as before, and runs after the inserts
+    assert reads.index(STOCK_UNALIASED_SQL) < next(i for i, s in enumerate(reads) if "COUNT(*) FILTER (WHERE sku_code IS NULL)" in s)
+    # dry run: the stock picks are reported, nothing is written
+    db2 = {"product_aliases": [], "audit_log": [], "app_settings": []}
+    res = autofill(exec_sql=fake_sql, client=_FakeDB(db2), emit=lambda *a, **k: True, dry_run=True)
+    assert res["stock_codes"] == ["QDC-90-CL", "QE-07-GR", "QH-1"] and db2["product_aliases"] == [] and db2["audit_log"] == []
+    # a failed stock read: the sold string is still aliased, the share still measured, no load error; the line says so
+    state["stock_fails"] = True
+    db3 = {"product_aliases": [], "audit_log": [], "app_settings": []}
+    res = autofill(exec_sql=fake_sql, client=_FakeDB(db3), emit=lambda *a, **k: True)
+    assert res.get("error") is None and res["stock_error"].startswith("stock read failed: stock view down"), res
+    assert res["codes"] == ["V12"] and res["stock_codes"] == [] and [r["alias_text"] for r in db3["product_aliases"]] == [sold]
+    assert res["share"] is not None and summary_line(res).endswith("; stock names not read")
+
+
 # ── 6. margin truth: agents, digest, templates, reports ──────────────────────
 
 _UK03 = {"item_name": "UK03 20W Charger (USB + Type-C Port) (VFAN)", "sku_code": "UK03", "product_name": "UK03", "category_name": "CHARGER",

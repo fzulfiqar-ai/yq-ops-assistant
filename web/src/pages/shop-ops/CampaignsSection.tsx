@@ -93,7 +93,7 @@ const CTA_PRESETS: { label: string; to: string }[] = [
   { label: 'Chargers', to: '/t/charger' },
   { label: 'Power banks', to: '/t/power-bank' },
 ]
-const CATEGORIES = ['CABLE', 'CHARGER', 'CAR CHARGER', 'POWER BANK', 'EARPHONE', 'BLUETOOTH HEADSET', 'BLUETOOTH SPEAKER', 'CAR ACCESSORIES']
+const CATEGORIES = ['CABLE', 'CHARGER', 'CAR CHARGER', 'POWER BANK', 'EARPHONE', 'BLUETOOTH HEADSET', 'BLUETOOTH SPEAKER', 'CAR ACCESSORIES', 'SCREEN PROTECTOR']
 
 const STATUS_TONE: Record<string, BadgeTone> = { live: 'green', scheduled: 'accent', ended: 'grey', paused: 'amber', archived: 'grey' }
 

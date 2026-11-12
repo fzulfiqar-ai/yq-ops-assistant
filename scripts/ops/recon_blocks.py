@@ -49,11 +49,15 @@ action and never a difference, and nothing reads as agreeing without its second 
      collection is proven but the invoicing was not set beside the files here (it stands on the load's own verify)
      or a part could not be read; else PROVEN.
   4. PURCHASES. Every supplier receipt (Material Receipt Note) into the main store in the month, one row each: the
-     purchase order on file (by the receipt's number, else the order whose model codes overlap the receipt's by at
-     least PO_OVERLAP (Jaccard) and dated at most PO_DAYS days before it), the MRN XML on file (the Orders page's
-     vault), the supplier invoice on file (the vault, or a supplier invoice /yq-stock's lead-time rule sets beside
-     this receipt), the cost lines n of m (the receipt's items with a landed cost loaded under its number or its
-     order's), and the order's flags (app.orders.detail(po, with_files=False): short, over, not received, not on
+     purchase order on file (by the receipt's number when that order shares at least PO_OVERLAP of the two's model
+     codes, or when there is nothing to compare; else the order whose model codes overlap the receipt's by at
+     least PO_OVERLAP (Jaccard) and dated at most PO_DAYS days before it. Focus numbers orders and receipts apart:
+     on 12-Nov-2026 receipt YQ-26-11-1 was order YQ-26-11-2's and the other way round. An order refused under the
+     receipt's number is a note, and its papers and cost lines are never read as the receipt's), the MRN XML on
+     file (the Orders page's vault), the supplier invoice on file (the vault, or a supplier invoice /yq-stock's
+     lead-time rule sets beside this receipt), the cost lines n of m (the receipt's items with a landed cost loaded
+     under its number, unless that order was refused, or its order's), and the order's flags
+     (app.orders.detail(po, with_files=False): short, over, not received, not on
      the order, cost above or below the order are differences; a thin margin and an estimated cost are notes). A
      model code with several variants on the receipt reads "variant not provable from the PO". A row: PAPERS
      MISSING when a paper or a cost line is missing, or the MRN XML is filed where its order cannot read it (the
@@ -1080,18 +1084,35 @@ def _lead(name: str, code: str | None) -> str:
     return (str(code).split()[0].upper() if code and str(code).split() else items.leading_code(name))
 
 
-def match_po(number: str, day: date, leads: set, pos: dict) -> tuple[str | None, str | None, Fraction | None]:
+def _overlap(leads: set, codes: set) -> Fraction:
+    """The share of model codes two sides have in common (Jaccard): both shared over either's."""
+    return Fraction(len(leads & codes), len(leads | codes))
+
+
+def match_po(number: str, day: date, leads: set, pos: dict, *, check_number: bool = True,
+             number_leads: set | None = None) -> tuple[str | None, str | None, Fraction | None]:
     """(the order, how it was matched: 'number' or 'codes', the overlap) for a receipt: the order filed under the
-    receipt's own number, else the order dated at most PO_DAYS days before it whose model codes overlap the
-    receipt's by at least PO_OVERLAP (Jaccard), the best overlap first, then the latest, then its number."""
-    if _key(number) in pos:
+    receipt's own number unless the receipt's model codes and that order's share NONE at all; when there is nothing
+    to compare (the order has no codes, the receipt none, or check_number is off: the receipt's item codes could
+    not be read) the number stands. Else the order dated at most PO_DAYS days before it whose model codes overlap
+    the receipt's by at least PO_OVERLAP (Jaccard), the best overlap first, then the latest, then its number.
+    `number_leads` are the codes the number is judged by (the receipt's own item codes; default: `leads`).
+
+    Focus numbers orders and receipts apart, so the order under the receipt's number can be another supplier's
+    (12-Nov-2026: receipt YQ-26-11-1 was order YQ-26-11-2's, and the other way round): taking it on the number
+    alone paired each receipt with the other's order. Those share no code. A part delivery, or a receipt with
+    items its order did not list, shares some and keeps its own order (review of 12-Nov-2026: a Jaccard bar
+    here refused them). An order refused here shares nothing, so the codes match below never takes it either."""
+    own = pos.get(_key(number))
+    judge = leads if number_leads is None else number_leads
+    if own is not None and (not (check_number and judge and own["codes"]) or (judge & own["codes"])):
         return _key(number), "number", None
     best = None
     for po, entry in pos.items():
         when = entry["date"]
         if when is None or when > day or (day - when).days > PO_DAYS or not leads or not entry["codes"]:
             continue
-        overlap = Fraction(len(leads & entry["codes"]), len(leads | entry["codes"]))
+        overlap = _overlap(leads, entry["codes"])
         if overlap >= PO_OVERLAP:
             rank = (overlap, when, po)
             if best is None or rank > best[0]:
@@ -1132,8 +1153,15 @@ def receipt_row(voucher: str, v: dict, codes: dict | None, pos: dict, files: dic
     leads: dict[str, set] = {}
     for name, code in item_codes.items():
         leads.setdefault(_lead(name, code), set()).add(name)
-    po, basis, overlap = match_po(number, v["date"], set(leads), pos)
-    keys = {_key(number)} | ({po} if po else set())
+    # the number is checked against the order's codes only when the receipt has item codes of its own to compare (a
+    # model code read off a ledger name alone is not one: the order lists the first word of each item code)
+    code_leads = {_lead(n, c) for n, c in item_codes.items() if c}
+    po, basis, overlap = match_po(number, v["date"], set(leads), pos,
+                                  check_number=codes is not None and bool(code_leads), number_leads=code_leads)
+    # the order filed under the receipt's own number, refused (another supplier's): the papers and cost lines filed
+    # under that number are that order's, so the number is no key to them -- only the order matched by the codes is
+    refused = _key(number) if _key(number) in pos and po != _key(number) else None
+    keys = (set() if refused else {_key(number)}) | ({po} if po else set())
     kinds = set().union(*(files.get(k, set()) for k in keys))
     loaded = set().union(*(mrn.get(k, set()) for k in keys))
     no_code = sorted(n for n, c in item_codes.items() if not c) if codes is not None else []
@@ -1181,6 +1209,11 @@ def receipt_row(voucher: str, v: dict, codes: dict | None, pos: dict, files: dic
     for f in NOTE_FLAGS:
         if row["flags"].get(f):
             row["notes"].append(f"{FLAG_WORDS[f]}: {_listed(row['flags'][f])}")
+    if refused:
+        shared, both = len(set(leads) & pos[refused]["codes"]), len(set(leads) | pos[refused]["codes"])
+        row["notes"].append(f"the order filed under its number, {refused}, is not taken: the two share {shared} of their "
+                            f"{both} model codes (Focus numbers orders and receipts apart), and its papers and cost "
+                            "lines are not read as this receipt's")
     if basis == "codes":
         shared, both = len(set(leads) & pos[po]["codes"]), len(set(leads) | pos[po]["codes"])
         row["notes"].append(f"its order {po} is matched by its model codes, not by its number: the two share {shared} of "

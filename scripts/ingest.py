@@ -599,6 +599,44 @@ def parse_receivables_totals(grid: pd.DataFrame, src: str) -> dict | None:
     return None
 
 
+# --------------------------------------------------------------------------- price-book families
+# Focus exports each price book under its own name, and the name is what tells two books apart: one
+# FAMILY per export name, by the stem the lower-cased file name starts with (the browser's
+# 'MASellingPriceBook (40).xlsx' and the portal's sanitised 'MASellingPriceBook _40_.xlsx' are one
+# family). Two families may share one price_book: the WEKOME book (r12, 12-Nov-2026) has
+# MASellingPriceBook's 28-column layout, its dealer rows carry a blank warehouse and its B2C rows
+# 'Causeway' / 'YQ Roadshow', and its rows load as MA_base beside the MA book's. Each family is still
+# a report of its own: its own kind below (the newest file of one family never competes with another
+# family's), its own line in the load check, and its own snapshot in the loader: an export voids only
+# the live rows of ITS family that it no longer carries (scripts/load_supabase.py).
+#   stem -> (price_book, kind, the name the owner's lines use)
+PRICEBOOK_FAMILIES: dict[str, tuple[str, str, str]] = {
+    "masellingpricebook": ("MA_base", "selling_prices:MA_base", "MA_base"),
+    "moderntradesellerbook": ("modern_trade", "selling_prices:modern_trade", "modern_trade"),
+    "wekomemasellerpricebook": ("MA_base", "selling_prices:MA_base:wekome", "MA_base (WEKOME)"),
+}
+# each family's name as Focus spells the export (scripts/ops/load_check.py BOOK_STEMS stages under it)
+PRICEBOOK_EXPORT_NAMES = {"masellingpricebook": "MASellingPriceBook", "moderntradesellerbook": "ModernTradeSellerBook",
+                          "wekomemasellerpricebook": "WekomeMASellerPricebook"}
+
+
+def pricebook_family(name) -> str | None:
+    """The price-book family (its stem) a file name belongs to: the stem its lower-cased base name
+    STARTS with, else None (a workbook import, a blank, any other report)."""
+    n = Path(str(name or "")).name.strip().lower()
+    return next((stem for stem in PRICEBOOK_FAMILIES if n.startswith(stem)), None)
+
+
+def pricebook_of(kind: str) -> str:
+    """The price_book a price-book kind loads into ('selling_prices:MA_base:wekome' -> 'MA_base')."""
+    return kind.split(":")[1]
+
+
+def pricebook_kind_family(kind: str) -> str | None:
+    """The family (its stem) of a price-book kind ('selling_prices:MA_base' -> 'masellingpricebook'), else None."""
+    return next((stem for stem, (_book, k, _name) in PRICEBOOK_FAMILIES.items() if k == kind), None)
+
+
 # --------------------------------------------------------------------------- dispatch
 def classify(name: str) -> str | None:
     n = name.lower()
@@ -623,10 +661,10 @@ def classify(name: str) -> str | None:
         return "ledger_entries"
     if "product_profitability" in n:
         return "product_profitability"
-    if "masellingpricebook" in n:
-        return "selling_prices:MA_base"
-    if "moderntradesellerbook" in n:
-        return "selling_prices:modern_trade"
+    # the price books, each family its own kind (PRICEBOOK_FAMILIES)
+    for stem, (_book, kind, _name) in PRICEBOOK_FAMILIES.items():
+        if stem in n:
+            return kind
     # Receivables: use ONLY the by-due-date summary (one row/customer + Group Name).
     # The other three ageing exports are skipped to avoid double-counting.
     if "customer_summary_ageing_by_due_date" in n:
@@ -670,6 +708,8 @@ def main() -> int:
 
     # De-dup by report type: Focus export filenames vary per export, so a folder/upload can hold
     # several files of the same report. Keep only the NEWEST (by mtime) of each -> no double load.
+    # Each price-book family is a report type of its own (PRICEBOOK_FAMILIES): the WEKOME book never
+    # competes with MASellingPriceBook, and both books' rows go to selling_prices together.
     candidates: dict[str, Path] = {}
     for path in sorted(src.glob("*.xls*")):
         kind = classify(path.name)
@@ -719,7 +759,7 @@ def main() -> int:
         elif kind == "stock_balance":
             recs = parse_stock_balance(grid, path.name)
         elif kind.startswith("selling_prices:"):
-            recs = parse_pricebook(grid, path.name, kind.split(":")[1])
+            recs = parse_pricebook(grid, path.name, pricebook_of(kind))
             kind = "selling_prices"
         else:
             continue

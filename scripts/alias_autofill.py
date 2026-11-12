@@ -10,7 +10,16 @@ attributed numbers are short. scripts/refresh.py calls autofill() after each loa
 
   * only proposals the matcher grades 1.0 (the Focus string IS a product's exact item_name) are
     written, insert-only (an alias that exists is never re-pointed -- a curated alias always wins).
-    Everything below 1.0 stays for a human (scripts/alias_backfill_preview.py). Codes the owner
+    Everything below 1.0 stays for a human (scripts/alias_backfill_preview.py). The strings come
+    from two places: the unaliased sales strings of the last 365 days (UNALIASED_SQL), and, from
+    r12 (12-Nov-2026), the unaliased item names of the LATEST stock snapshot (STOCK_UNALIASED_SQL:
+    v_current_stock is stock_balance at MAX(as_of_date) joined to the aliases). An item that has
+    not sold yet then still shows its stock on the marketplace: v_catalog_stock_rows matches stock to
+    a catalog code by the manual map, then the alias, then a code prefix, and a variant code such as
+    'WG-08-BK' never prefixes its own name 'WG-08 Wireless Earphone Black (WEKOME)'. A stock name the
+    sales list already carries is proposed once. A stock-name alias changes no sales line of the
+    share's window (a name sold in it is on the sales list), and a failed stock read only skips the
+    stock names: the sales aliases and the share still run. Codes the owner
     holds back (the near-duplicate SKUs still to be settled: 'X24 CC 1Mtr' / 'X24 CL 1Mtr' on
     24-Sep-2026, held back from alias_backfill_preview --commit with --exclude) are never written
     either: the list lives in app_settings 'alias_autofill_exclude' (comma-separated codes, seeded
@@ -58,6 +67,17 @@ SELECT item_name, COUNT(*) AS lines, COALESCE(SUM(revenue_bhd), 0) AS rev
 FROM v_sales, mx
 WHERE division = 'Accessories' AND sale_date > mx.d - {WINDOW_DAYS} AND sku_code IS NULL
 GROUP BY item_name ORDER BY lines DESC, rev DESC LIMIT 10
+"""
+
+# The latest stock snapshot's item names that carry no alias (r12). Read through v_current_stock --
+# stock_balance LEFT JOIN product_aliases / products, a view -- because the read-only role holds no
+# SELECT on product_aliases itself (scripts/ingest_batches_migration.sql keeps it that way).
+STOCK_UNALIASED_SQL = """
+SELECT item_name, COUNT(*) AS stores, COALESCE(SUM(balance_qty), 0) AS units, MAX(as_of_date)::text AS as_of
+FROM v_current_stock
+WHERE sku_code IS NULL AND as_of_date = (SELECT MAX(as_of_date) FROM stock_balance)
+GROUP BY item_name
+ORDER BY item_name
 """
 
 
@@ -108,6 +128,29 @@ def unmapped_share(row: dict | None) -> dict:
             "over": share > UNMAPPED_SHARE_MAX}
 
 
+def _stock_proposals(exec_sql, products: list[dict], sales: list[dict], out: dict) -> list[dict]:
+    """The latest stock snapshot's unaliased item names as matcher proposals (r12), each marked
+    source='stock'; a name the sales list already proposes is left to it. They go through the same
+    pick_exact (1.0 only, hold-back honoured) and the same insert-only write as the sales strings.
+    A failed read is noted in out['stock_error'] and proposes nothing."""
+    from scripts.alias_backfill_preview import propose
+    try:
+        rows = exec_sql(STOCK_UNALIASED_SQL) or []
+    except Exception as e:  # noqa: BLE001
+        out["stock_error"] = f"stock read failed: {str(e)[:140]}"
+        return []
+    seen = {str(p.get("item_name") or "") for p in sales}
+    fresh: list[dict] = []
+    for r in rows:
+        name = str(r.get("item_name") or "")
+        if not name.strip() or name in seen:
+            continue
+        seen.add(name)
+        fresh.append({"item_name": name, "division": None, "lines": 0, "units": r.get("units"),
+                      "rev_90": 0, "rev_365": 0, "last_sold": ""})
+    return [dict(p, source="stock") for p in propose(fresh, products)]
+
+
 def autofill(exec_sql=None, client=None, emit=None, dry_run: bool = False) -> dict:
     """Run the exact-name autofill and the share check. All three collaborators default to the
     app's own (exec_sql = yq_readonly RPC, client = service role, emit = app.events.emit) so tests
@@ -118,7 +161,7 @@ def autofill(exec_sql=None, client=None, emit=None, dry_run: bool = False) -> di
         from app.db_read import exec_sql as _x
         exec_sql = _x
     out: dict = {"proposed": 0, "picked": 0, "inserted": 0, "codes": [], "held_back": [], "share": None,
-                 "warned": False, "dry_run": dry_run}
+                 "warned": False, "dry_run": dry_run, "stock_proposed": 0, "stock_codes": []}
     try:
         unaliased = exec_sql(UNALIASED_SQL) or []
         products = exec_sql("SELECT id, sku_code, item_name FROM products WHERE sku_code IS NOT NULL") or []
@@ -126,6 +169,7 @@ def autofill(exec_sql=None, client=None, emit=None, dry_run: bool = False) -> di
         out["error"] = f"read failed: {str(e)[:140]}"
         return out
     proposals = propose(unaliased, products)
+    stock_proposals = _stock_proposals(exec_sql, products, proposals, out)
     if client is None:
         try:
             from app.database import get_client
@@ -133,11 +177,14 @@ def autofill(exec_sql=None, client=None, emit=None, dry_run: bool = False) -> di
         except Exception:  # noqa: BLE001
             client = None
     held = hold_back_codes(client) if client is not None else parse_hold_back(",".join(DEFAULT_HOLD_BACK))
-    exact = pick_exact(proposals)
-    picked = pick_exact(proposals, held)
+    exact = pick_exact(proposals) + pick_exact(stock_proposals)
+    from_stock = pick_exact(stock_proposals, held)
+    picked = pick_exact(proposals, held) + from_stock
     out["proposed"] = len(proposals)
+    out["stock_proposed"] = len(stock_proposals)
     out["picked"] = len(picked)
     out["codes"] = sorted({str(p["proposed_code"]) for p in picked})
+    out["stock_codes"] = sorted({str(p["proposed_code"]) for p in from_stock})
     out["held_back"] = sorted({str(p["proposed_code"]) for p in exact if str(p["proposed_code"]).upper() in held})
     if picked and not dry_run and client is not None:
         recs = [{"alias_text": p["item_name"], "product_id": p["product_id"]} for p in picked]
@@ -153,6 +200,7 @@ def autofill(exec_sql=None, client=None, emit=None, dry_run: bool = False) -> di
                     "user_email": "alias_autofill", "event": "product_aliases.autofill",
                     "question": "exact-name aliases after load",
                     "detail": {"proposed": len(recs), "inserted": out["inserted"], "codes": out["codes"],
+                               "from_stock": out["stock_codes"],
                                "rev_90_bhd": round(sum(_f(p.get("rev_90")) for p in picked), 3)},
                 }).execute()
             except Exception as e:  # noqa: BLE001
@@ -203,12 +251,16 @@ def summary_line(res: dict) -> str:
     line = f"aliases: {res.get('inserted', 0)} exact-name inserted"
     if res.get("codes"):
         line += " (" + ", ".join(res["codes"][:8]) + (" ..." if len(res["codes"]) > 8 else "") + ")"
+    if res.get("stock_codes"):
+        line += f", {len(res['stock_codes'])} code(s) from the stock list (not sold yet)"
     if res.get("held_back"):
         line += "; held back (owner decision): " + ", ".join(res["held_back"][:6])
     if s:
         line += (f"; unmapped accessory lines last {WINDOW_DAYS}d: {s['unmapped']}/{s['lines']} = "
                  f"{s['share'] * 100:.1f}%" + (" -- OVER 2%, warning event emitted" if res.get("warned")
                                                else (" -- over 2%" if s.get("over") else "")))
+    if res.get("stock_error"):
+        line += "; stock names not read"
     return line
 
 

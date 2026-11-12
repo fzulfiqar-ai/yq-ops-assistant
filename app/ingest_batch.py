@@ -94,8 +94,29 @@ PROTECTED = {"id", "imported_at", "created_at", "updated_at", "product_id", "ord
 KIND_TO_TARGET = {"orders": "orders", "order_lines": "order_lines", "stock_movements": "stock_movements",
                   "ledger_entries": "ledger_entries", "product_profitability": "product_profitability",
                   "receivables": "ar_ageing", "stock_balance": "stock_balance"}
+# The Focus price-book family the batch path loads for each price_book: the book scope of diff_sql (and of
+# _ingest_apply_target in ingest_batches_migration.sql) reads a book's live rows by this file-name stem.
 FOCUS_BOOK_STEMS = {"MA_base": "masellingpricebook", "modern_trade": "moderntradesellerbook"}
+# The reports the batch path refuses (r12, 12-Nov-2026), by ingest.classify() kind, with the words that load
+# them. The WEKOME book's rows are MA_base rows, but its file is no MASellingPriceBook: staged here as MA_base,
+# the book scope (every live MA_base row of a 'masellingpricebook%' file other than the staged one) would void
+# the whole MA book. /yq-load loads it: scripts/load_supabase.py voids per family. A batch that could be
+# committed (run_preview with persist: the portal's Data page) is refused whole; a read-only preview (the load
+# check, scripts/ingest_preview) lists the file as ignored, with these words.
+BATCH_REFUSED = {"selling_prices:MA_base:wekome": "load the WEKOME price book with /yq-load; the batch import refuses "
+                                                  "it (a batch would switch the MA book's rows off)"}
 BLOCKING, WARNING, INFO = "blocking", "warning", "info"
+
+
+class BatchRefused(ValueError):
+    """An upload holds a report the batch path never loads (BATCH_REFUSED): nothing was parsed or staged."""
+
+
+def batch_refuses(name: str) -> str | None:
+    """Why the batch path never loads a file of this name (BATCH_REFUSED, by its ingest.classify() kind), or
+    None for every other file."""
+    from scripts import ingest as ing
+    return BATCH_REFUSED.get(ing.classify(Path(str(name)).name) or "")
 
 
 # ── money ───────────────────────────────────────────────────────────────────────
@@ -152,6 +173,7 @@ class Parsed:
     ar_grand_total: Decimal | None = None
     mrn_xml: list[dict] = field(default_factory=list)     # [{file, doc_no, lines}]
     export_dates: dict[str, str] = field(default_factory=dict)  # price book -> export day
+    refused: list[dict] = field(default_factory=list)     # [{file, reason}]: BATCH_REFUSED (also in `ignored`)
 
 
 def _grand_total(grid) -> Decimal | None:
@@ -163,11 +185,14 @@ def _grand_total(grid) -> Decimal | None:
     return None
 
 
-def parse_folder(folder: str | Path, row_hook=None) -> Parsed:
+def parse_folder(folder: str | Path, row_hook=None, refuse: bool = False) -> Parsed:
     """Every recognised Focus export in `folder`, newest of each report type (the rule the old
     ingest applies), parsed and prepared per target. Read-only: the folder is never written.
     row_hook(target, row) -> row, when given, is applied to every prepared row (the local replay
-    uses it to mask merchant names the same way its copy of the database is masked)."""
+    uses it to mask merchant names the same way its copy of the database is masked).
+    A report the batch path never loads (BATCH_REFUSED: the WEKOME price book) is never parsed: it is
+    listed under `ignored` and `refused` with the words that load it, and with `refuse` (a batch that
+    could be committed) the whole folder is refused at once: BatchRefused, nothing parsed."""
     from scripts import ingest as ing
     src = Path(folder)
     out = Parsed(folder=str(src))
@@ -189,6 +214,10 @@ def parse_folder(folder: str | Path, row_hook=None) -> Parsed:
         if kind.startswith("skip:"):
             out.ignored.append({"file": path.name, "reason": kind[5:]})
             continue
+        if kind in BATCH_REFUSED:
+            out.ignored.append({"file": path.name, "reason": BATCH_REFUSED[kind]})
+            out.refused.append({"file": path.name, "reason": BATCH_REFUSED[kind]})
+            continue
         if kind == "categories":
             out.ignored.append({"file": path.name, "reason": "product categories (category_backfill, not a batch target)"})
             continue
@@ -202,6 +231,8 @@ def parse_folder(folder: str | Path, row_hook=None) -> Parsed:
             candidates[kind] = path
         else:
             out.ignored.append({"file": path.name, "reason": f"older export of the same report; {prev.name} is newer"})
+    if refuse and out.refused:
+        raise BatchRefused("; ".join(f"{r['file']}: {r['reason']}" for r in out.refused) + ". Nothing was staged.")
 
     raw: dict[str, list[dict]] = {}
     for kind, path in candidates.items():
@@ -225,7 +256,7 @@ def parse_folder(folder: str | Path, row_hook=None) -> Parsed:
             recs = ing.parse_stock_balance(grid, path.name)
             out.as_on["stock_balance"] = ing.report_date_from_title(grid)
         elif kind.startswith("selling_prices:"):
-            book = kind.split(":", 1)[1]
+            book = ing.pricebook_of(kind)
             recs = ing.parse_pricebook(grid, path.name, book)
             try:
                 from scripts.verify_numbers import export_date
@@ -464,6 +495,8 @@ def diff_sql(target: str, col_types: dict[str, str], payload_cols: list[str], sc
         sc = f"exists (select 1 from s sp where {partm})"
         sample_extra = ""
     else:
+        # a book's own family only (FOCUS_BOOK_STEMS, as the migration spells it): the WEKOME book's MA_base rows sit
+        # outside the MA book's scope by their file name, and its file never reaches a batch (BATCH_REFUSED)
         sc = ("L.price_book = any($3::text[]) and L.voided_at is null and L.source_file <> all($4::text[]) "
               "and lower(coalesce(L.source_file, '')) like (case L.price_book when 'MA_base' then 'masellingpricebook%' "
               "when 'modern_trade' then 'moderntradesellerbook%' end)")
@@ -887,6 +920,14 @@ def _stock_snapshot(backend: Backend, rows: list[dict]) -> dict:
             "missing_warehouses": sorted(set(db_wh) - set(file_wh)), "per_warehouse": rows_out}
 
 
+def _other_family_stems(book: str) -> list[str]:
+    """The Focus price-book families that share `book` with the one the batch path loads (FOCUS_BOOK_STEMS):
+    for MA_base the WEKOME book's stem, for modern_trade none."""
+    from scripts.ingest import PRICEBOOK_FAMILIES
+    return [stem for stem, (b, _kind, _name) in PRICEBOOK_FAMILIES.items()
+            if b == book and stem != FOCUS_BOOK_STEMS.get(book)]
+
+
 def _price_changes(backend: Backend, rows: list[dict], today: str) -> dict:
     from scripts.verify_numbers import current_prices
     out: dict[str, dict] = {}
@@ -906,8 +947,15 @@ def _price_changes(backend: Backend, rows: list[dict], today: str) -> dict:
                 changes.append({"sku": sku, "old": money(live[sku]), "new": money(fp)})
             else:
                 same += 1
-        gone = sorted(set(live) - set(want))
         stem = FOCUS_BOOK_STEMS.get(book, "")
+        # the live list is the whole price_book: an SKU only another family of it carries (the WEKOME book's, in
+        # MA_base) is not one this file dropped
+        others = set()
+        for other in _other_family_stems(book):
+            others |= {str(x["s"]) for x in backend.query(
+                "select distinct sku_code as s from selling_prices where price_book = $1 and voided_at is null "
+                "and lower(source_file) like $2 and sku_code is not null", [book, f"{other}%"])}
+        gone = sorted(set(live) - set(want) - others)
         live_focus = backend.query(
             "select count(*) as n, count(distinct sku_code) as skus from selling_prices "
             "where price_book = $1 and voided_at is null and lower(source_file) like $2", [book, f"{stem}%"])
@@ -1207,8 +1255,12 @@ def run_preview(folder: str | Path, backend: Backend | None, actor: str | None =
     """Parse -> stage -> preview. With `persist` (and a writable backend) a batch row is created
     and left in status 'previewed' with its summary and exceptions; a read-only backend previews
     against a temp table and creates nothing. Writes summary.md + exceptions.csv under out_dir
-    (default business_data/ingest_previews/<ts>/), best-effort."""
-    parsed = parse_folder(folder, row_hook=row_hook)
+    (default business_data/ingest_previews/<ts>/), best-effort.
+    With `persist` (the portal's Data page: a batch that can be committed) a folder holding a report
+    the batch path never loads (BATCH_REFUSED: the WEKOME price book) is refused whole before anything
+    is parsed or staged: BatchRefused, whose words say how to load it. Without it (a read-only preview)
+    that file is listed under `ignored` with the same words."""
+    parsed = parse_folder(folder, row_hook=row_hook, refuse=persist)
     batch_id = 0
     pruned = None
     can_stage = backend is not None and backend.can_stage()

@@ -32,8 +32,8 @@ warnings.filterwarnings("ignore")
 
 from app.database import get_client  # noqa: E402
 from scripts.ingest import (  # noqa: E402
-    parse_order_lines, parse_orders, parse_pricebook, parse_receivables, parse_receivables_totals, parse_stock,
-    parse_stock_balance, read_grid,
+    PRICEBOOK_FAMILIES, parse_order_lines, parse_orders, parse_pricebook, parse_receivables, parse_receivables_totals,
+    parse_stock, parse_stock_balance, read_grid,
 )
 from scripts.load_supabase import PARTIAL_OK_MARKER, marker_present, pricebook_key, warehouse_set_guard  # noqa: E402
 
@@ -55,8 +55,11 @@ _UNCHECKED = {
     "ledger_entries": "Ledger",
 }
 
-# filename key (lower-cased substring, as classify() sees it) -> price_book
-_PRICE_BOOKS = (("masellingpricebook", "MA_base"), ("moderntradesellerbook", "modern_trade"))
+# One entry per Focus price-book FAMILY (scripts/ingest.py PRICEBOOK_FAMILIES): (filename key -- the lower-cased
+# stem, as classify() sees it --, price_book, the name its checks carry). Each family's newest file is checked
+# against its own family's live rows (source_file starts with its stem): the MA book and the WEKOME book load into
+# MA_base both, and neither counts the other's rows as "not in file".
+_PRICE_BOOKS = tuple((stem, book, name) for stem, (book, _kind, name) in PRICEBOOK_FAMILIES.items())
 
 
 def _latest_source_dir() -> Path:
@@ -724,9 +727,12 @@ def _price_book_checks(src: Path, checks: list) -> None:
         whole book, so such rows are older exports the loader's snapshot rule should have voided.
         This is the line that FAILS the refresh when the loader's mass-void guard skipped the void
         (the stale rows stay live), and until selling_prices_void_migration.sql has run.
-    Workbook rows (YQ_MRN%) never count; the newest export in the folder is the one checked."""
+    Workbook rows (YQ_MRN%) never count; the newest export in the folder is the one checked.
+    Per FAMILY (_PRICE_BOOKS): the WEKOME book's file against the WEKOME rows, MASellingPriceBook's against
+    the MA rows, though both load into MA_base (the first check reads the book's live list per SKU of the
+    file, so another family's SKUs never enter it). Its checks carry the family's name ('MA_base (WEKOME)')."""
     today = _db_today()
-    for key, book in _PRICE_BOOKS:
+    for key, book, name in _PRICE_BOOKS:
         f = _find_newest_book(key, src)
         if not f:
             continue
@@ -737,12 +743,12 @@ def _price_book_checks(src: Path, checks: list) -> None:
         want = current_prices(rows, today=today)
         live = _db_book_prices(book)
         agree = sum(1 for s, p in want.items() if s in live and abs(live[s] - p) < 0.0005)
-        checks.append((f"{book} price = file ({len(want)} SKUs)", float(len(want)), float(agree), 0.0))
+        checks.append((f"{name} price = file ({len(want)} SKUs)", float(len(want)), float(agree), 0.0))
         keys = {pricebook_key(r) for r in rows}
         stale = [r for r in _db_live_focus_rows(book, key) if pricebook_key(r) not in keys]
         ghosts = [r for r in stale if str(r.get("start_date") or "")[:10] > exported]
-        checks.append((f"{book} rows after {exported} not in file", 0.0, float(len(ghosts)), 0.0))
-        checks.append((f"{book} live rows not in file (older exports)", 0.0, float(len(stale)), 0.0))
+        checks.append((f"{name} rows after {exported} not in file", 0.0, float(len(ghosts)), 0.0))
+        checks.append((f"{name} live rows not in file (older exports)", 0.0, float(len(stale)), 0.0))
 
 
 def evaluate_checks(checks: list) -> tuple[bool, list[dict]]:

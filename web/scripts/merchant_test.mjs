@@ -24,6 +24,11 @@
  *     order is never re-marked adopted) and "Same as last time" only ever uses an order placed here;
  *   * price drop wins (lib/format.ts isClearing): a line with a real drop is never "Clearing line" on the
  *     card, on ?f=clearance or in the home Clearing set, even from an older payload that still says 'clearance'.
+ *   * product names (lib/format.ts, r12 "WEKOME live"): a WEKOME code is a model and a variant, so the
+ *     "(WEKOME)" tag goes like "(VFAN)", the model leaves the name whole and a suffix never eats into it
+ *     ("YB13-3.5" keeps "3.5mm"); a VFAN name led by its hyphenated model reads the same way (TB-D3-CC),
+ *     every other VFAN name exactly as before; SCREEN PROTECTOR reads "Screen protector" in English, as
+ *     the other categories do, and has its Arabic label.
  */
 import { registerHooks } from 'node:module'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -547,6 +552,46 @@ check('a warmed page renders at once, and a failed fetch is asked again, not rep
   eq([firstTry, secondTry], [1, 2], 'preload after a failure fetches again')
   // after the code is here the component renders synchronously: no Suspense, no fallback
   eq(renderToString(createElement(warmed, { n: 7 })), '<b>hi 7</b>', 'renders without suspending')
+})
+
+/* ── r12 "WEKOME live" (12-Nov-2026): product names and the new category, on the price book's own names ── */
+const named = (code, name, extra = {}) => ({ item_code: code, display_name: name, spec: name, ...extra })
+check('names: a WEKOME code is a model and a variant: the tag goes, the model leaves the name whole, a suffix never eats into it', () => {
+  eq(F.productName(named('WG-08-BK', 'WG-08 Wireless Earphone Black (WEKOME)')), 'Wireless Earphone Black', 'model + colour (was "08 Wireless …")')
+  eq(F.productName(named('YB13-3.5', 'YB13 3.5mm Jack Wired Earphone Blue (WEKOME)')), '3.5mm Jack Wired Earphone Blue', 'the 3.5 suffix keeps 3.5mm (was "mm Jack …")')
+  eq(F.productName(named('YB13-C', 'YB13 Type-C Jack Wired Earphone (Digital Signal) Blue (WEKOME)')), 'Type-C Jack Wired Earphone (Digital Signal) Blue', 'a one-letter suffix')
+  eq(F.productName(named('WDC-21-CL', 'WDC-21 PD 27W 1Mtr Data Cable (Type-C to Lightning) White (WEKOME)')), 'PD 27W 1Mtr Data Cable (Type-C to Lightning) White', 'a connector suffix')
+  eq(F.productName(named('WP-C56-BK', 'WP-C56 15W Car Charger (USB + USB Port) Black (WEKOME)')), '15W Car Charger (USB + USB Port) Black', 'a lettered model')
+  eq(F.productName(named('WTP-137-17PM', 'WTP-137 HD Screen Protector iPhone 17 Pro Max / 18 Pro Max (6.9) (10PCS per box) White (WEKOME)')),
+    'HD Screen Protector iPhone 17 Pro Max / 18 Pro Max (6.9) (10PCS per box) White', 'a phone-model suffix')
+  eq(F.productName(named('WDC-C34a-0.3Mtr', 'WDC-C34a 66W 0.3Mtr Data Cable (USB to Type-C) White (WEKOME)')), '66W 0.3Mtr Data Cable (USB to Type-C) White', 'a length suffix stays in the name')
+  eq(F.productName(named('WS-31', 'WS-31 Wireless Earphone White (WEKOME)')), 'Wireless Earphone White', 'a code with no suffix')
+  // the same item however the catalog holds it: the name under a bare code, or the tag edited out and only the brand set
+  eq(F.productName({ item_code: 'WG-08-BK', display_name: 'WG-08-BK', spec: 'WG-08 Wireless Earphone Black (WEKOME)' }), 'Wireless Earphone Black', 'the name in spec')
+  eq(F.productName({ item_code: 'WG-08-BK', display_name: 'WG-08 Wireless Earphone Black', spec: null, brand: 'WEKOME' }), 'Wireless Earphone Black', 'the brand alone')
+  eq(F.variantOf(named('YB13-3.5', 'YB13 3.5mm Jack Wired Earphone Blue (WEKOME)')), ['3.5 mm jack'], 'the chips read without the tag')
+  const two = F.distinctNames([named('WS-33-WH', 'WS-33 Wireless Earphone White (WEKOME)'), named('WS-31', 'WS-31 Wireless Earphone White (WEKOME)')])
+  eq([two.get('WS-33-WH'), two.get('WS-31')], ['Wireless Earphone White · WS-33-WH', 'Wireless Earphone White · WS-31'], 'look-alikes in a short list carry their code')
+})
+check('names: every other VFAN name reads exactly as before (r12 changed only how a model + variant code is read)', () => {
+  eq(F.productName(named('BE01', 'BE01 NeckBand Type-C Port (VFAN)', { brand: 'VFAN' })), 'NeckBand Type-C Port', 'BE01')
+  eq(F.productName(named('X02-C-1.2Mtr', 'X02 3A 1.2Mtr NYLON BRAIDED TYPE-C USB Cable (VFAN)', { brand: 'VFAN' })), '3A 1.2Mtr Nylon Braided Type-C USB Cable', 'X02-C-1.2Mtr')
+  eq(F.productName(named('X26-C', 'X26-C C to C (100W)')), 'C to C (100W)', 'X26-C, untagged')
+  eq(F.productName(named('F29A', 'F29A PB 5000mah 3 in 1 Magnetic Wireless Power Bank (PD 20W)')), 'PB 5000mah 3 in 1 Magnetic Wireless Power Bank (PD 20W)', 'F29A, untagged')
+})
+check('names: a VFAN name that starts with its hyphenated model reads like a WEKOME one (TB-D3-CC was "D3 Display Box …")', () => {
+  eq(F.productName(named('TB-D3-CC', 'TB-D3 Display Box 30 Cables (18 Type-C to Type-C + 6 USB to Lightning + 6 USB to Type-C) (VFAN)', { brand: 'VFAN' })),
+    'Display Box 30 Cables (18 Type-C to Type-C + 6 USB to Lightning + 6 USB to Type-C)', 'TB-D3-CC')
+  eq(F.productName({ item_code: 'TB-D3-USB', display_name: 'TB-D3-USB', spec: 'TB-D3 Display Box 30 Cables (15 USB to Lightning + 15 USB to Type-C) (VFAN)' }),
+    'Display Box 30 Cables (15 USB to Lightning + 15 USB to Type-C)', 'TB-D3-USB, the name in spec')
+  // the code IS the model (no variant after it): read as before
+  eq(F.productName(named('TB-D1', 'TB-D1 USB to Micro 6pcs / Ligthning 12pcs / Type C 12pcs')), 'USB to Micro 6pcs / Ligthning 12pcs / Type C 12pcs', 'TB-D1')
+})
+check('categories: SCREEN PROTECTOR (WEKOME) reads like the other categories in English and has its Arabic label', () => {
+  eq(F.niceCategory('SCREEN PROTECTOR'), 'Screen protector', 'English: the ERP name title-cased, as "Bluetooth headset"')
+  eq(F.niceCategory('BLUETOOTH HEADSET'), 'Bluetooth headset', 'the other categories as before')
+  eq(Object.keys(en.categoryNames), [], 'English lists no category label')
+  eq(ar.categoryNames['SCREEN PROTECTOR'], 'واقيات الشاشة', 'Arabic')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

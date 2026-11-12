@@ -840,10 +840,10 @@ _BROAD_WORDS = frozenset({"charger", "chargers", "adapter", "adaptor", "plug", "
 CATEGORY_LABELS = {
     "en": {"CABLE": "Cables", "CHARGER": "Chargers", "CAR CHARGER": "Car chargers", "POWER BANK": "Power banks",
            "EARPHONE": "Earphones", "BLUETOOTH HEADSET": "Earbuds", "BLUETOOTH SPEAKER": "Speakers",
-           "CAR ACCESSORIES": "Car holders"},
+           "CAR ACCESSORIES": "Car holders", "SCREEN PROTECTOR": "Screen protectors"},
     "ar": {"CABLE": "الكيابل", "CHARGER": "الشواحن", "CAR CHARGER": "شواحن السيارة", "POWER BANK": "الباور بنك",
            "EARPHONE": "السماعات السلكية", "BLUETOOTH HEADSET": "سماعات البلوتوث", "BLUETOOTH SPEAKER": "مكبرات الصوت",
-           "CAR ACCESSORIES": "حوامل السيارة"},
+           "CAR ACCESSORIES": "حوامل السيارة", "SCREEN PROTECTOR": "واقيات الشاشة"},
 }
 # why a card is there, in the words the model may use (all from public data: badges, the shop's own orders)
 _WHY_WORDS = {
@@ -862,10 +862,10 @@ _BADGE_ORDER = ("best_seller", "trending", "selling_fast", "new", "price_drop", 
 _KIND = {
     "en": {"CABLE": "cable", "CHARGER": "charger", "CAR CHARGER": "car charger", "POWER BANK": "power bank",
            "EARPHONE": "earphones", "BLUETOOTH HEADSET": "earbuds", "BLUETOOTH SPEAKER": "speaker",
-           "CAR ACCESSORIES": "car holder"},
+           "CAR ACCESSORIES": "car holder", "SCREEN PROTECTOR": "screen protector"},
     "ar": {"CABLE": "كيبل", "CHARGER": "شاحن", "CAR CHARGER": "شاحن سيارة", "POWER BANK": "باور بنك",
            "EARPHONE": "سماعة سلكية", "BLUETOOTH HEADSET": "سماعة بلوتوث", "BLUETOOTH SPEAKER": "مكبر صوت",
-           "CAR ACCESSORIES": "حامل سيارة"},
+           "CAR ACCESSORIES": "حامل سيارة", "SCREEN PROTECTOR": "واقي شاشة"},
 }
 _WATTS = re.compile(r"(?i)(?<![0-9.])([0-9]{1,3})\s?w\b")
 _MAH = re.compile(r"(?i)(?<![0-9])([0-9]{4,5})\s?mah\b")

@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from scripts.ingest import PRICEBOOK_EXPORT_NAMES, PRICEBOOK_FAMILIES, pricebook_family
 from scripts.load_txn import AVOID_ENV, ONE_TXN_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +70,21 @@ ONE_TXN_ARG = "--one-transaction"
 # rows, or the file names fewer than SNAPSHOT_MIN_SKU_COVER of its live SKUs, nothing is voided, the
 # log shouts, an audit_log row records the skip and scripts/verify_numbers.py FAILS the refresh
 # ("live rows not in file (older exports)" > 0). Every void batch writes one audit_log row too.
-FOCUS_BOOKS = {"MA_base": "masellingpricebook", "modern_trade": "moderntradesellerbook"}
+#
+# One snapshot per FAMILY (r12, 12-Nov-2026). A book is told by its export's name
+# (scripts/ingest.py PRICEBOOK_FAMILIES: masellingpricebook, moderntradesellerbook,
+# wekomemasellerpricebook), and two families can share a price_book: the WEKOME book's rows are
+# MA_base rows. So every rule here reads the FAMILY of a row's source_file, never its price_book
+# alone: an export voids only the live rows of its own family that it no longer carries, with the
+# guard counted on that family's rows. Loading the WEKOME book never voids an MA row and loading
+# MASellingPriceBook never voids a WEKOME row; modern_trade is one family of one book, as before.
+#
+# One item, one book (r12 review). Both MA_base families write the same natural key (sku, MA_base,
+# customer, warehouse, start date): an item in both books would be ONE row, owned by whichever book
+# loaded last, and the other book's next export without that key would switch off a price its own
+# book still carries. So a load that would leave an item in two families of one price_book is
+# refused before anything is written (overlap_guard; the load check stops on the same rule). A
+# family the load does not write is read from the live rows.
 SNAPSHOT_MAX_STALE_SHARE = 0.10
 SNAPSHOT_MIN_SKU_COVER = 0.90
 _SP_KEY_COLS = "id,sku_code,price_book,customer_code,warehouse_name,start_date,source_file"
@@ -266,15 +281,26 @@ def _notice(kind: str, text: str, detail: dict | None = None) -> None:
     print(NOTICE_PREFIX + json.dumps({"kind": kind, "text": text, "detail": detail or {}}, default=str))
 
 
+def focus_book_family(source_file) -> str | None:
+    """The Focus price-book family a file name belongs to (its stem: 'masellingpricebook',
+    'moderntradesellerbook', 'wekomemasellerpricebook'), or None for anything else (workbook imports,
+    blanks). The portal stages 'MASellingPriceBook (40).xlsx' as 'MASellingPriceBook _40_.xlsx'
+    (app/main.py sanitises the name): both spell the same family."""
+    return pricebook_family(source_file)
+
+
 def focus_book_kind(source_file) -> str | None:
-    """The price_book a Focus export file name belongs to ('MA_base' / 'modern_trade'), or None for
-    anything else (workbook imports, blanks). The portal stages 'MASellingPriceBook (40).xlsx' as
-    'MASellingPriceBook _40_.xlsx' (app/main.py sanitises the name): both spell the same book."""
-    n = Path(str(source_file or "")).name.strip().lower()
-    for book, stem in FOCUS_BOOKS.items():
-        if n.startswith(stem):
-            return book
-    return None
+    """The price_book a Focus export file name belongs to ('MA_base' for MASellingPriceBook and for the
+    WEKOME book, 'modern_trade'), or None for anything else. Two families share MA_base: a rule that
+    must keep the books apart reads focus_book_family, never this."""
+    fam = focus_book_family(source_file)
+    return PRICEBOOK_FAMILIES[fam][0] if fam else None
+
+
+def focus_book_name(family: str) -> str:
+    """A family as the loader's lines name it: its price_book ('MA_base', 'modern_trade'), and
+    'MA_base (WEKOME)' for the WEKOME book."""
+    return PRICEBOOK_FAMILIES[family][2]
 
 
 def pricebook_key(r: dict) -> tuple:
@@ -323,18 +349,22 @@ def staged_files(folder) -> set[str]:
 
 
 def loaded_focus_books(loaded: list[dict], staged: set[str] | None = None) -> dict[str, dict]:
-    """Pure: the Focus books in a load -> {price_book: {srcs, keys, skus}}.
-    staged -- names of the files ingest read THIS run; a book whose file is not among them is left
-    out, so a leftover CSV never drives the snapshot rule. None = no staging information."""
+    """Pure: the Focus books in a load, one per FAMILY -> {family: {book, name, srcs, keys, skus}}
+    (family = focus_book_family of the row's source_file; book = the price_book its rows load into).
+    A row counts only when its price_book is its family's. staged -- names of the files ingest read
+    THIS run; a book whose file is not among them is left out, so a leftover CSV never drives the
+    snapshot rule. None = no staging information."""
     books: dict[str, dict] = {}
     for r in loaded:
         book = r.get("price_book")
         src = _fname(r.get("source_file"))
-        if not book or focus_book_kind(src) != book:
+        fam = focus_book_family(src)
+        if not book or fam is None or PRICEBOOK_FAMILIES[fam][0] != book:
             continue
         if staged is not None and src not in staged:
             continue
-        b = books.setdefault(book, {"srcs": set(), "keys": set(), "skus": set()})
+        b = books.setdefault(fam, {"book": book, "name": focus_book_name(fam), "srcs": set(), "keys": set(),
+                                   "skus": set()})
         b["srcs"].add(src)
         b["keys"].add(pricebook_key(r))
         sku = str(r.get("sku_code") or "").strip()
@@ -350,20 +380,20 @@ def stale_pricebook_rows(loaded: list[dict], existing: list[dict], staged: set[s
     existing -- live (voided_at is null) rows of the same price_book(s): id, price_book,
                 source_file and the key columns
     staged   -- file names ingest read this run (see loaded_focus_books); None = every Focus book
-    The loaded file is the newest export of its book by definition. Returns the existing rows of
-    the same price_book that came from a DIFFERENT Focus export of that book and whose key the
-    loaded file does not carry. Rows of other sources (workbook imports), rows the file still
-    carries and rows of other books are left alone."""
+    The loaded file is the newest export of its FAMILY by definition. Returns the existing rows
+    that came from a DIFFERENT Focus export of the same family (and so of its price_book) and whose
+    key the loaded file does not carry. Rows of other sources (workbook imports), rows the file still
+    carries, rows of another family of the same price_book (the MA book and the WEKOME book) and rows
+    of other books are left alone."""
     books = loaded_focus_books(loaded, staged)
     out: list[dict] = []
     for r in existing:
-        b = books.get(r.get("price_book") or "")
-        if not b:
-            continue
         rsrc = _fname(r.get("source_file"))
-        if rsrc in b["srcs"] or focus_book_kind(rsrc) != r.get("price_book"):
+        fam = focus_book_family(rsrc)
+        b = books.get(fam) if fam else None
+        if not b or b["book"] != r.get("price_book"):      # another family, another source or another book
             continue
-        if pricebook_key(r) in b["keys"]:
+        if rsrc in b["srcs"] or pricebook_key(r) in b["keys"]:
             continue
         out.append(r)
     return out
@@ -373,14 +403,47 @@ def revived_pricebook_rows(loaded: list[dict], voided: list[dict], staged: set[s
     """Pure: voided rows whose key the file just loaded carries. The upsert has already rewritten
     each of them with the file's values (rate, source_file, ...), so they are that file's live
     prices and must come back -- a real future price that lands on a voided key (say C01 dated
-    2026-11-01) would otherwise stay invisible and the SKU would drop off the market."""
-    books = loaded_focus_books(loaded, staged)
-    out: list[dict] = []
-    for r in voided:
-        b = books.get(r.get("price_book") or "")
-        if b and pricebook_key(r) in b["keys"]:
-            out.append(r)
-    return out
+    2026-11-01) would otherwise stay invisible and the SKU would drop off the market. The key holds
+    the price_book, so a key carried by any family of the load is that family's row now."""
+    keys: set[tuple] = set()
+    for b in loaded_focus_books(loaded, staged).values():
+        keys |= b["keys"]
+    return [r for r in voided if pricebook_key(r) in keys]
+
+
+def overlap_guard(loading: dict[str, set[str]], live: list[dict]) -> dict | None:
+    """Pure: None when no item code would sit in two Focus price-book families of one price_book after a load, else
+    {"text": the one sentence that refuses the load, "codes": the shared codes (sorted), "families": the families
+    involved, in PRICEBOOK_FAMILIES order}.
+    loading -- {family: the item codes of its file} for every Focus book the load writes
+    live    -- live rows (voided_at is null) of the price_books concerned: sku_code, price_book, source_file. A family
+               of the same price_book that the load does not write is read from these; one that it writes, from its
+               file (its live rows go with the load).
+    Two families share MA_base: MASellingPriceBook and the WEKOME book (see "One item, one book" above)."""
+    shared: set[str] = set()
+    involved: set[str] = set()
+    for fam, mine in loading.items():
+        book = PRICEBOOK_FAMILIES[fam][0]
+        for other, (other_book, _kind, _name) in PRICEBOOK_FAMILIES.items():
+            if other == fam or other_book != book:
+                continue
+            theirs = loading[other] if other in loading else {
+                str(r.get("sku_code") or "").strip() for r in live
+                if r.get("price_book") == book and focus_book_family(r.get("source_file")) == other}
+            both = ({str(c).strip() for c in mine} & theirs) - {""}
+            if both:
+                shared |= both
+                involved |= {fam, other}
+    if not shared:
+        return None
+    codes = sorted(shared)
+    n = len(codes)
+    shown = ", ".join(codes[:5]) + (f" and {n - 5} more" if n > 5 else "")
+    families = [f for f in PRICEBOOK_FAMILIES if f in involved]
+    text = (f"{n} item{'' if n == 1 else 's'} ({shown}) {'is' if n == 1 else 'are'} in both "
+            + " and ".join(PRICEBOOK_EXPORT_NAMES[f] for f in families)
+            + ": keep each item in one Focus price book, then export the books again")
+    return {"text": text, "codes": codes, "families": families}
 
 
 def snapshot_guard(stale: list[dict], live_focus: list[dict], file_skus: set[str]) -> str | None:
@@ -397,6 +460,31 @@ def snapshot_guard(stale: list[dict], live_focus: list[dict], file_skus: set[str
         return (f"the file names {len(live_skus & file_skus)} of the book's {len(live_skus)} live SKUs "
                 f"(under {SNAPSHOT_MIN_SKU_COVER:.0%}): a filtered or truncated export?")
     return None
+
+
+class PricebookOverlap(RuntimeError):
+    """A load that would leave one item in two Focus price books of one price_book (overlap_guard): refused before
+    anything of it is written."""
+
+
+def _refuse_shared_items(client, loaded: list[dict]) -> None:
+    """Before anything is written: refuse a load whose Focus books would leave one item in two families of one
+    price_book (overlap_guard), whether the load was started by /yq-load or any other way. Every Focus book in the
+    CSV counts, staged or not (the upsert writes them all). A family the load does not write is read from the live
+    rows; that read is not one the loader tolerates failing, so a database that cannot answer stops the load too."""
+    loading = {fam: b["skus"] for fam, b in loaded_focus_books(loaded).items()}
+    need = sorted({PRICEBOOK_FAMILIES[f][0] for f in loading
+                   if any(o not in loading for o, (b, _kind, _name) in PRICEBOOK_FAMILIES.items()
+                          if o != f and b == PRICEBOOK_FAMILIES[f][0])})
+    live: list[dict] = []
+    for book in need:
+        live += _fetch_book_rows(client, book, voided=False)
+    found = overlap_guard(loading, live)
+    if found:
+        print(f"  !! REFUSED: {found['text']}. Nothing of this load was written.")
+        _notice("pricebook_overlap", found["text"] + ". Nothing of this load was written.",
+                {"codes": found["codes"][:50], "families": found["families"]})
+        raise PricebookOverlap(found["text"])
 
 
 def void_columns_present(client) -> bool:
@@ -441,16 +529,19 @@ def _audit(client, event: str, question: str, detail: dict) -> None:
 
 
 def _apply_pricebook_snapshot(client, loaded: list[dict], staged: set[str] | None) -> dict:
-    """After the selling_prices upsert: un-void every row the file carries again, then void the
-    rows an older Focus export of the same book left behind (stale_pricebook_rows), guarded by
-    snapshot_guard. Returns {"revived": n, "voided": n, "skipped": {book: reason}}. Prints a skip
-    reason and changes nothing while the void columns are missing (the migration has not run) --
+    """After the selling_prices upsert, per Focus book FAMILY in the load (loaded_focus_books): un-void
+    every row its file carries again, then void the rows an older export of the SAME family left
+    behind (stale_pricebook_rows), guarded by snapshot_guard on that family's live rows. Returns
+    {"revived": n, "voided": n, "skipped": {name: reason}} (name: focus_book_name, the price_book for
+    MASellingPriceBook and ModernTradeSellerBook, 'MA_base (WEKOME)' for the WEKOME book). Prints a
+    skip reason and changes nothing while the void columns are missing (the migration has not run) --
     the load itself is unaffected."""
     res: dict = {"revived": 0, "voided": 0, "skipped": {}}
     all_books = loaded_focus_books(loaded)            # every Focus book in the load: un-void applies to all
     if not all_books:
         return res
-    for book, b in sorted(all_books.items()):
+    for fam, b in sorted(all_books.items(), key=lambda fb: fb[1]["name"]):
+        book, name = b["book"], b["name"]
         file = ", ".join(sorted(b["srcs"]))
         try:
             with _guard(client):
@@ -458,48 +549,48 @@ def _apply_pricebook_snapshot(client, loaded: list[dict], staged: set[str] | Non
         except Exception as e:  # noqa: BLE001
             msg = str(e)[:160]
             hint = " -- apply scripts/selling_prices_void_migration.sql" if "voided_at" in msg else ""
-            print(f"  (selling_prices snapshot rule skipped for {book}: {msg}{hint})")
-            res["skipped"][book] = msg
+            print(f"  (selling_prices snapshot rule skipped for {name}: {msg}{hint})")
+            res["skipped"][name] = msg
             continue
-        revive = [r for r in revived_pricebook_rows(loaded, voided) if r.get("price_book") == book]
+        revive = [r for r in voided if pricebook_key(r) in b["keys"]]       # this family's keys only
         if revive:
             _set_void(client, [int(r["id"]) for r in revive], None, None)
             res["revived"] += len(revive)
-            print(f"  revived  selling_prices {len(revive):7}  ({book}: voided keys carried again by {file})")
+            print(f"  revived  selling_prices {len(revive):7}  ({name}: voided keys carried again by {file})")
         # the void: only for a book whose file ingest read THIS run
         if staged is None:
-            print(f"  (selling_prices: {book} void skipped -- no --staged folder; run through scripts.refresh)")
-            res["skipped"][book] = "no staged folder"
+            print(f"  (selling_prices: {name} void skipped -- no --staged folder; run through scripts.refresh)")
+            res["skipped"][name] = "no staged folder"
             continue
         if not (b["srcs"] & staged):
-            print(f"  (selling_prices: {book} void skipped -- {file} is not in this run's upload)")
-            res["skipped"][book] = "file not staged this run"
+            print(f"  (selling_prices: {name} void skipped -- {file} is not in this run's upload)")
+            res["skipped"][name] = "file not staged this run"
             continue
         live = _fetch_book_rows(client, book, voided=False)
-        stale = stale_pricebook_rows(loaded, live, staged)
-        live_focus = [r for r in live if focus_book_kind(r.get("source_file")) == book]
+        stale = [r for r in stale_pricebook_rows(loaded, live, staged) if focus_book_family(r.get("source_file")) == fam]
+        live_focus = [r for r in live if focus_book_family(r.get("source_file")) == fam]
         reason = snapshot_guard(stale, live_focus, b["skus"])
         if reason:
-            print(f"  !! WARNING: {book} snapshot void SKIPPED -- {reason}. Nothing was voided. "
+            print(f"  !! WARNING: {name} snapshot void SKIPPED -- {reason}. Nothing was voided. "
                   f"Check {file} is a complete, unfiltered export (verify will FAIL until it is).")
-            _audit(client, "selling_prices.void_skipped", f"{book}: {file}",
-                   {"book": book, "file": file, "reason": reason, "stale_rows": len(stale),
+            _audit(client, "selling_prices.void_skipped", f"{name}: {file}",
+                   {"book": book, "family": fam, "file": file, "reason": reason, "stale_rows": len(stale),
                     "live_rows": len(live_focus), "file_skus": len(b["skus"]),
                     "skus": sorted({str(r.get("sku_code")) for r in stale})[:200]})
-            res["skipped"][book] = reason
+            res["skipped"][name] = reason
             continue
         if not stale:
-            print(f"  (selling_prices: {book} -- no superseded Focus book rows to void)")
+            print(f"  (selling_prices: {name} -- no superseded Focus book rows to void)")
             continue
         now = datetime.now(timezone.utc).isoformat()
         why = f"superseded by {file} (Focus book snapshot: key not in the newest export)"
         _set_void(client, [int(r["id"]) for r in stale], now, why)
         skus = sorted({str(r.get("sku_code")) for r in stale})
-        _audit(client, "selling_prices.void", f"{book}: {file}",
-               {"book": book, "file": file, "count": len(stale), "skus": skus,
+        _audit(client, "selling_prices.void", f"{name}: {file}",
+               {"book": book, "family": fam, "file": file, "count": len(stale), "skus": skus,
                 "sources": sorted({_fname(r.get("source_file")) for r in stale})})
         res["voided"] += len(stale)
-        print(f"  voided   selling_prices {len(stale):7}  ({book}: rows of older Focus books not in {file}; "
+        print(f"  voided   selling_prices {len(stale):7}  ({name}: rows of older Focus books not in {file}; "
               f"{len(skus)} SKUs; audit_log row written)")
     return res
 
@@ -806,9 +897,11 @@ def main(argv: list[str] | None = None) -> int:
 def _load_tables(client, staged: set[str] | None, replace_ok: bool, partial_ok: bool) -> None:
     """Every table of data/clean, in the order of the header, through `client` (PostgREST, or the
     one transaction of scripts/load_txn.py), ending with the loader's own ingest_runs row."""
-    # 1) products from price books
+    # 1) products from price books -- after the one check that refuses the whole load before its first write: an
+    #    item in two Focus price books of one price_book (_refuse_shared_items)
     sp = _read("selling_prices")
     if sp is not None:
+        _refuse_shared_items(client, _records(sp))
         prods = (
             sp[["sku_code", "item_name", "unit_name", "status"]]
             .dropna(subset=["sku_code"])

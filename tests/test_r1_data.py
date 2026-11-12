@@ -362,6 +362,272 @@ def _():
                                      staged={"YQ_MRN_x.xlsx"}) == {"revived": 0, "voided": 0, "skipped": {}}
 
 
+# ── 2b. one snapshot per FAMILY (r12, 12-Nov-2026): the WEKOME book shares MA_base ─────────────
+# Every code and rate below is invented. The WEKOME book's file names a family of its own
+# ('wekomemasellerpricebook': "seller", not "selling"), and its rows are MA_base rows.
+
+WK_A, WK_B, WK_C = "WekomeMASellerPricebook (3).xlsx", "WekomeMASellerPricebook _4_.xlsx", "WekomeMASellerPricebook.xlsx"
+MA_A, MA_B, MA_C = "MASellingPriceBook (40).xlsx", "MASellingPriceBook _41_.xlsx", "MASellingPriceBook (2).xlsx"
+
+
+@test("families: MASellingPriceBook, the WEKOME book and ModernTradeSellerBook are three kinds; '(2)' and '_2_' spell one family")
+def _():
+    from scripts import ingest as ing
+    from scripts import load_supabase as ls
+    cases = (("MASellingPriceBook.xlsx", "selling_prices:MA_base", "masellingpricebook", "MA_base"),
+             ("MASellingPriceBook (2).xlsx", "selling_prices:MA_base", "masellingpricebook", "MA_base"),
+             ("MASellingPriceBook _2_.xlsx", "selling_prices:MA_base", "masellingpricebook", "MA_base"),
+             ("WekomeMASellerPricebook.xlsx", "selling_prices:MA_base:wekome", "wekomemasellerpricebook", "MA_base"),
+             ("WekomeMASellerPricebook (2).xlsx", "selling_prices:MA_base:wekome", "wekomemasellerpricebook", "MA_base"),
+             ("WekomeMASellerPricebook _2_.xlsx", "selling_prices:MA_base:wekome", "wekomemasellerpricebook", "MA_base"),
+             ("WEKOMEMASELLERPRICEBOOK.XLSX", "selling_prices:MA_base:wekome", "wekomemasellerpricebook", "MA_base"),
+             ("ModernTradeSellerBook _7_.xlsx", "selling_prices:modern_trade", "moderntradesellerbook", "modern_trade"))
+    for name, kind, fam, book in cases:
+        assert ing.classify(name) == kind, (name, ing.classify(name))
+        assert ls.focus_book_family(name) == fam and ls.focus_book_kind(name) == book, name
+        assert ing.pricebook_of(kind) == book and ing.pricebook_kind_family(kind) == fam, kind
+    assert len({ing.classify(n) for n, *_ in cases}) == 3, "three books, three kinds: none competes with another"
+    assert ls.focus_book_name("wekomemasellerpricebook") == "MA_base (WEKOME)"
+    assert ls.focus_book_name("masellingpricebook") == "MA_base" and ls.focus_book_name("moderntradesellerbook") == "modern_trade"
+    # "seller", not "selling": neither name is read as the other book
+    assert ls.focus_book_family("MASellerPricebook.xlsx") is None and ing.classify("MASellerPricebook.xlsx") is None
+    assert ing.classify("Wekome price list.xlsx") is None and ls.focus_book_family("YQ_MRN_x.xlsx") is None
+
+
+@test("families: a WEKOME load voids no MA row, an MA load voids no WEKOME row, a WEKOME re-export voids its own dropped key")
+def _():
+    from scripts.load_supabase import revived_pricebook_rows, stale_pricebook_rows
+    existing = [
+        _sp("T02", "2026-03-26", 2.95, src=MA_A, id=1),                         # an MA row both MA files carry
+        _sp("M20", "2026-05-10", 1.7, src=MA_A, id=2),                          # an MA row the MA re-export drops
+        _sp("ZZ-01", "2026-10-01", 1.234, src=WK_A, id=3),                      # a WEKOME dealer row
+        _sp("ZZ-01", "2026-10-01", 1.456, src=WK_A, wh="Causeway", id=4),       # ... its B2C row
+        _sp("ZZ-02", "2026-10-01", 2.345, src=WK_A, id=5),                      # a WEKOME row the WEKOME re-export drops
+        _sp("M20", "2026-09-14", 1.6, src="YQ_MRN_Landing_Cost_Analysis Sep 2026.xlsx", id=6),   # a workbook row
+        _sp("T02", "2026-05-13", 3.9, src="ModernTradeSellerBook _7_.xlsx", book="modern_trade", id=7),
+    ]
+    wk_load = [_sp("ZZ-01", "2026-10-01", 1.234, src=WK_B), _sp("ZZ-01", "2026-10-01", 1.456, src=WK_B, wh="Causeway")]
+    ma_load = [_sp("T02", "2026-03-26", 2.95, src=MA_B)]
+    assert [r["id"] for r in stale_pricebook_rows(wk_load, existing, staged={WK_B})] == [5], "its own dropped key only"
+    assert [r["id"] for r in stale_pricebook_rows(ma_load, existing, staged={MA_B})] == [2], "no WEKOME row"
+    assert sorted(r["id"] for r in stale_pricebook_rows(wk_load + ma_load, existing, staged={WK_B, MA_B})) == [2, 5]
+    # the staged gate is per family: a WEKOME file not read this run voids nothing, the MA file still voids its own
+    assert [r["id"] for r in stale_pricebook_rows(wk_load + ma_load, existing, staged={MA_B})] == [2]
+    assert stale_pricebook_rows(wk_load, existing, staged={MA_B}) == []
+    # a WEKOME row is never voided by an MA file that does not carry its key, nor the other way round, though both are
+    # MA_base rows (no staging information either: every Focus book of the load counts)
+    assert not [r for r in stale_pricebook_rows(ma_load, existing) if r["id"] in (3, 4, 5)]
+    assert not [r for r in stale_pricebook_rows(wk_load, existing) if r["id"] in (1, 2)]
+    # revive: a voided WEKOME key the WEKOME file carries again comes back; a voided MA key it does not carry stays
+    voided = [_sp("ZZ-02", "2026-10-01", 2.345, src=WK_C, id=8, voided="2026-11-10T00:00:00Z"),
+              _sp("M20", "2026-05-10", 1.7, src=MA_A, id=9, voided="2026-11-10T00:00:00Z")]
+    again = wk_load + [_sp("ZZ-02", "2026-10-01", 2.345, src=WK_C)]
+    assert [r["id"] for r in revived_pricebook_rows(again, voided)] == [8]
+    assert [r["id"] for r in revived_pricebook_rows(ma_load + [_sp("M20", "2026-05-10", 1.7, src=MA_B)], voided)] == [9]
+
+
+def _families_db():
+    """12 live MA rows (S01-S12, one about to go), 12 live WEKOME rows (ZZ-01..ZZ-12), a voided WEKOME key, a workbook
+    row and a modern-trade row. Ids: MA 1-12, WEKOME 21-32."""
+    rows = [_sp(f"S{i:02}", "2026-01-01", 1.0, src=MA_A, id=i) for i in range(1, 13)]
+    rows += [_sp(f"ZZ-{i:02}", "2026-10-01", 1.234, src=WK_A, id=20 + i) for i in range(1, 13)]
+    rows.append(_sp("ZZ-13", "2026-11-01", 1.5, src=WK_A, id=33, voided="2026-11-05T10:00:00+00:00"))
+    rows.append(_sp("M20", "2026-09-14", 1.6, src="YQ_MRN_Landing_Cost_Analysis Sep 2026.xlsx", id=34))
+    rows.append(_sp("T02", "2026-05-13", 3.9, src="ModernTradeSellerBook _7_.xlsx", book="modern_trade", id=35))
+    for r in rows:
+        r["void_reason"] = "older export" if r["voided_at"] else None
+    return {"selling_prices": rows, "audit_log": [], "_has_void": True}
+
+
+@test("families: apply -- each family voids its own, its guard counted on its own rows; the MA book never trips on WEKOME rows")
+def _():
+    from scripts.load_supabase import _apply_pricebook_snapshot
+    db = _families_db()
+    client = _FakeDB(db)
+    by_id = {r["id"]: r for r in db["selling_prices"]}
+    # the WEKOME book alone: ZZ-12 is gone from it, ZZ-13 is back. One of its 12 live rows (8%) is stale and it names
+    # 11 of its 12 SKUs: the guard lets it through. Counted on the whole MA_base book (24 rows, 24 SKUs) it would not.
+    wk = [_sp(f"ZZ-{i:02}", "2026-10-01", 1.234, src=WK_B) for i in range(1, 12)] + [_sp("ZZ-13", "2026-11-01", 1.5, src=WK_B)]
+    res = _apply_pricebook_snapshot(client, wk, staged={WK_B, "Sales_day_book.xlsx"})
+    assert res == {"revived": 1, "voided": 1, "skipped": {}}, res
+    assert by_id[32]["voided_at"] and by_id[32]["void_reason"].startswith(f"superseded by {WK_B}")
+    assert by_id[33]["voided_at"] is None, "the WEKOME key it carries again is back"
+    assert all(by_id[i]["voided_at"] is None for i in range(1, 13)), "no MA row is voided by the WEKOME book"
+    assert by_id[34]["voided_at"] is None and by_id[35]["voided_at"] is None
+    (a,) = db["audit_log"]
+    assert a["event"] == "selling_prices.void" and a["question"] == f"MA_base (WEKOME): {WK_B}"
+    assert a["detail"]["book"] == "MA_base" and a["detail"]["family"] == "wekomemasellerpricebook" and a["detail"]["skus"] == ["ZZ-12"]
+    # the MA book alone: S12 is gone from it. Its guard counts the 12 MA rows (1 stale, 11 of 12 SKUs named), never
+    # the 12 live WEKOME rows beside them in MA_base (11 of 24 SKUs would be under 90%: the void would be skipped)
+    ma = [_sp(f"S{i:02}", "2026-01-01", 1.0, src=MA_B) for i in range(1, 12)]
+    res = _apply_pricebook_snapshot(client, ma, staged={MA_B})
+    assert res == {"revived": 0, "voided": 1, "skipped": {}}, res
+    assert by_id[12]["voided_at"] and all(by_id[20 + i]["voided_at"] is None for i in range(1, 12)), "no WEKOME row voided"
+    assert db["audit_log"][-1]["question"] == f"MA_base: {MA_B}" and db["audit_log"][-1]["detail"]["family"] == "masellingpricebook"
+    # both books in one load, each a re-export of what is live now: nothing to void, nothing to revive
+    both = ([_sp(f"S{i:02}", "2026-01-01", 1.0, src=MA_C) for i in range(1, 12)]
+            + [_sp(f"ZZ-{i:02}", "2026-10-01", 1.234, src=WK_C) for i in range(1, 12)] + [_sp("ZZ-13", "2026-11-01", 1.5, src=WK_C)])
+    assert _apply_pricebook_snapshot(client, both, staged={MA_C, WK_C}) == {"revived": 0, "voided": 0, "skipped": {}}
+    # a filtered WEKOME export (two of its rows) beside a whole MA book: the WEKOME guard skips ITS void, under its own
+    # name; the MA book still voids what it no longer carries
+    db = _families_db()
+    client = _FakeDB(db)
+    part = [_sp("ZZ-01", "2026-10-01", 1.234, src=WK_B), _sp("ZZ-02", "2026-10-01", 1.234, src=WK_B)]
+    res = _apply_pricebook_snapshot(client, part + ma, staged={WK_B, MA_B})
+    assert res["voided"] == 1 and list(res["skipped"]) == ["MA_base (WEKOME)"] and "stale rows" in res["skipped"]["MA_base (WEKOME)"]
+    assert [e["event"] for e in db["audit_log"]] == ["selling_prices.void", "selling_prices.void_skipped"], db["audit_log"]
+    skipped = db["audit_log"][1]["detail"]
+    assert skipped["family"] == "wekomemasellerpricebook" and skipped["stale_rows"] == 10 and skipped["live_rows"] == 12
+    assert all(r["voided_at"] is None for r in db["selling_prices"] if str(r["sku_code"]).startswith("ZZ-") and r["id"] != 33)
+
+
+class _UpsertQ(_FakeQ):
+    """_FakeQ with the loader's upsert: a row of the same on_conflict key is rewritten, any other is inserted live."""
+
+    def upsert(self, payload, on_conflict=None):
+        self.op, self.payload, self.conflict = "upsert", payload, on_conflict
+        return self
+
+    def execute(self):
+        if self.op != "upsert":
+            return super().execute()
+        rows = self.db.setdefault(self.t, [])
+        cols = [c.strip() for c in str(self.conflict).split(",")]
+
+        def key(r):
+            return tuple(str(r.get(c) if r.get(c) is not None else "")[:10] if c == "start_date" else
+                         str(r.get(c) if r.get(c) is not None else "") for c in cols)
+        for rec in self.payload:
+            hit = next((r for r in rows if key(r) == key(rec)), None)
+            if hit is not None:
+                hit.update(rec)
+            else:
+                rows.append(dict(rec, id=1000 + len(rows), voided_at=None))
+        return types.SimpleNamespace(data=[], count=None)
+
+
+class _UpsertDB(_FakeDB):
+    def table(self, name):
+        if name not in self.tables and not name.startswith("_") and name != "audit_log":
+            raise RuntimeError(f"table {name} unavailable")
+        return _UpsertQ(self.tables, name)
+
+
+@test("families: through the loader -- both books' rows load into selling_prices together, products include the WEKOME codes")
+def _():
+    from contextlib import redirect_stdout
+
+    import pandas as pd
+    from scripts import load_supabase as ls
+    db = _families_db()
+    db["products"] = []
+    sp = ([dict(_sp(f"S{i:02}", "2026-01-01", 1.0, src=MA_B), item_name=f"Item S{i:02}", unit_name="Nos", status="Authorized")
+           for i in range(1, 12)]
+          + [dict(_sp(f"ZZ-{i:02}", "2026-10-01", 1.234, src=WK_B), item_name=f"Item ZZ-{i:02}", unit_name="Nos",
+                  status="Authorized") for i in range(1, 12)])
+    for r in sp:
+        r.pop("id"), r.pop("voided_at")
+    with tempfile.TemporaryDirectory() as d:
+        pd.DataFrame(sp).to_csv(Path(d) / "selling_prices.csv", index=False, encoding="utf-8")
+        saved = ls.CLEAN
+        ls.CLEAN = Path(d)
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                ls._load_tables(_UpsertDB(db), {MA_B, WK_B}, False, False)
+        finally:
+            ls.CLEAN = saved
+    said = out.getvalue()
+    assert {p["sku_code"] for p in db["products"]} == {f"S{i:02}" for i in range(1, 12)} | {f"ZZ-{i:02}" for i in range(1, 12)}
+    live = {(r["sku_code"], r["source_file"]) for r in db["selling_prices"] if r["voided_at"] is None and r["price_book"] == "MA_base"}
+    assert {s for s, f in live if f == WK_B} == {f"ZZ-{i:02}" for i in range(1, 12)}, live
+    assert {s for s, f in live if f == MA_B} == {f"S{i:02}" for i in range(1, 12)}, live
+    by_id = {r["id"]: r for r in db["selling_prices"]}
+    assert by_id[12]["voided_at"] and by_id[32]["voided_at"], "each book voided the key it dropped, and only that one"
+    assert "(MA_base: rows of older Focus books not in MASellingPriceBook _41_.xlsx" in said, said
+    assert "(MA_base (WEKOME): rows of older Focus books not in WekomeMASellerPricebook _4_.xlsx" in said, said
+
+
+@test("one item, one book: an item in both MA_base books is found via both files, or via a file and the other's live rows")
+def _():
+    from scripts import ingest as ing
+    from scripts.load_supabase import overlap_guard
+    ma, wk, mt = "masellingpricebook", "wekomemasellerpricebook", "moderntradesellerbook"
+    live = [_sp("S01", "2026-01-01", 1.0, src=MA_A), _sp("ZZ-07", "2026-01-01", 1.0, src=MA_A),     # the MA book's
+            _sp("ZZ-01", "2026-10-01", 1.234, src=WK_A),                                             # the WEKOME book's
+            _sp("ZZ-09", "2026-10-01", 1.234, src="YQ_MRN_x.xlsx"),                                  # a workbook row
+            _sp("ZZ-05", "2026-05-13", 3.9, src="ModernTradeSellerBook _7_.xlsx", book="modern_trade")]
+    # via both files: each family's file is what loads, so its own live rows do not count
+    found = overlap_guard({ma: {"S01", "ZZ-02"}, wk: {"ZZ-01", "ZZ-02"}}, live)
+    assert found == {"text": "1 item (ZZ-02) is in both MASellingPriceBook and WekomeMASellerPricebook: keep each item in "
+                             "one Focus price book, then export the books again", "codes": ["ZZ-02"],
+                     "families": [ma, wk]}, found
+    # via a file and the other family's live rows, either way round
+    found = overlap_guard({wk: {"ZZ-01", "ZZ-07"}}, live)
+    assert found and found["codes"] == ["ZZ-07"] and found["families"] == [ma, wk], found
+    found = overlap_guard({ma: {"S01", "ZZ-01"}}, live)
+    assert found and found["codes"] == ["ZZ-01"] and "keep each item in one Focus price book" in found["text"], found
+    # no overlap passes: its own family's live rows, a workbook row, another price_book's book
+    assert overlap_guard({wk: {"ZZ-01", "ZZ-09"}}, live) is None
+    assert overlap_guard({ma: {"S01", "ZZ-05", "ZZ-09"}}, live) is None
+    assert overlap_guard({mt: {"S01", "ZZ-01"}}, live) is None and overlap_guard({}, live) is None
+    assert overlap_guard({ma: {"S01"}, wk: {"ZZ-01"}}, live) is None, "both load: the other's live rows go with the load"
+    # up to five codes named, the rest counted
+    many = {f"ZZ-{i:02}" for i in range(10, 17)}
+    found = overlap_guard({ma: many, wk: many}, [])
+    assert found["text"].startswith("7 items (ZZ-10, ZZ-11, ZZ-12, ZZ-13, ZZ-14 and 2 more) are in both "), found["text"]
+    # the export names it says are the ones the load check stages under
+    from scripts.ops import load_check as lc
+    for fam, (_book, kind, _name) in ing.PRICEBOOK_FAMILIES.items():
+        assert lc.BOOK_STEMS[kind] == ing.PRICEBOOK_EXPORT_NAMES[fam], kind
+
+
+@test("one item, one book: the loader refuses before its first write (a file, or a file and the other's live rows)")
+def _():
+    from contextlib import redirect_stdout
+
+    import pandas as pd
+    from scripts import load_supabase as ls
+
+    def load(rows) -> tuple[dict, str, Exception | None]:
+        db = _families_db()
+        db["products"] = []
+        before = [dict(r) for r in db["selling_prices"]]
+        sp = [dict(r, item_name=f"Item {r['sku_code']}", unit_name="Nos", status="Authorized") for r in rows]
+        for r in sp:
+            r.pop("id"), r.pop("voided_at")
+        out, err = io.StringIO(), None
+        with tempfile.TemporaryDirectory() as d:
+            pd.DataFrame(sp).to_csv(Path(d) / "selling_prices.csv", index=False, encoding="utf-8")
+            saved = ls.CLEAN
+            ls.CLEAN = Path(d)
+            try:
+                with redirect_stdout(out):
+                    ls._load_tables(_UpsertDB(db), {MA_B, WK_B}, False, False)
+            except ls.PricebookOverlap as exc:
+                err = exc
+            finally:
+                ls.CLEAN = saved
+        unchanged = db["selling_prices"] == before and db["products"] == [] and db["audit_log"] == []
+        return {"unchanged": unchanged}, out.getvalue(), err
+    # the WEKOME book alone, naming S05: the MA book's live rows hold S05
+    wk = [_sp(f"ZZ-{i:02}", "2026-10-01", 1.234, src=WK_B) for i in range(1, 13)] + [_sp("S05", "2026-10-01", 2.5, src=WK_B)]
+    state, said, err = load(wk)
+    assert isinstance(err, ls.PricebookOverlap) and state["unchanged"], (state, said)
+    assert str(err) == ("1 item (S05) is in both MASellingPriceBook and WekomeMASellerPricebook: keep each item in one "
+                        "Focus price book, then export the books again"), str(err)
+    assert "!! REFUSED: 1 item (S05)" in said and "Nothing of this load was written." in said and "upserted" not in said
+    notice = [ln for ln in said.splitlines() if ln.startswith(ls.NOTICE_PREFIX)]
+    assert len(notice) == 1 and '"kind": "pricebook_overlap"' in notice[0] and '"codes": ["S05"]' in notice[0], notice
+    # both books in one load, sharing ZZ-03: refused from the two files alone
+    ma = [_sp(f"S{i:02}", "2026-01-01", 1.0, src=MA_B) for i in range(1, 13)] + [_sp("ZZ-03", "2026-01-01", 1.0, src=MA_B)]
+    state, said, err = load(ma + wk[:12])
+    assert isinstance(err, ls.PricebookOverlap) and "(ZZ-03)" in str(err) and state["unchanged"], (state, said)
+    # no item in two books: the load goes through (the books of the 'through the loader' test, one each)
+    state, said, err = load(ma[:12] + wk[:12])
+    assert err is None and not state["unchanged"] and "upserted selling_prices" in said, said
+
+
 @test("snapshot: refresh clears data/clean and passes --staged; the workbook import un-voids the row it updates")
 def _():
     from scripts.load_supabase import void_columns_present
@@ -752,6 +1018,90 @@ def _():
     # the ghost/stale query is scoped to Focus exports of the book, never workbook rows
     src = (ROOT / "scripts" / "verify_numbers.py").read_text(encoding="utf-8")
     assert "source_file ILIKE $2" in src and "AND voided_at IS NULL" in src and "CURRENT_DATE::text" in src
+
+
+@test("verify: each price-book family is checked against its own rows; the WEKOME book's checks carry its own name")
+def _():
+    from scripts import verify_numbers as vn
+    ma_rows = [_pb("T02", "2026-03-26", 2.95), _pb("UK10 C", "2026-06-09", 2.0)]
+    wk_rows = [_pb("ZZ-01", "2026-10-01", 1.234, src=WK_C)]
+    newest = {"masellingpricebook": MA_C, "wekomemasellerpricebook": WK_C}
+    names = ("_find_newest_book", "read_grid", "parse_pricebook", "export_date", "_db_book_prices",
+             "_db_live_focus_rows", "_db_today")
+    saved = {n: getattr(vn, n) for n in names}
+    asked: list = []
+
+    def live_rows(book, key):
+        asked.append((book, key))
+        return {"masellingpricebook": [_pb("T02", "2026-03-26", 2.95)],
+                "wekomemasellerpricebook": [_pb("ZZ-01", "2026-10-01", 1.234, src=WK_A),
+                                            _pb("ZZ-09", "2026-10-01", 9.5, src=WK_A)]}[key]
+    vn._find_newest_book = lambda key, src: newest.get(key)
+    vn.read_grid = lambda f: f
+    vn.parse_pricebook = lambda grid, src, book: wk_rows if src == WK_C else ma_rows
+    vn.export_date = lambda f: "2026-11-12"
+    vn._db_today = lambda: "2026-11-12"
+    vn._db_book_prices = lambda book: {"T02": 2.95, "UK10 C": 2.0, "ZZ-01": 1.234}     # the whole MA_base list
+    vn._db_live_focus_rows = live_rows
+    try:
+        checks: list = []
+        vn._price_book_checks(Path("."), checks)
+    finally:
+        for n, f in saved.items():
+            setattr(vn, n, f)
+    assert [c[0] for c in checks] == [
+        "MA_base price = file (2 SKUs)", "MA_base rows after 2026-11-12 not in file",
+        "MA_base live rows not in file (older exports)", "MA_base (WEKOME) price = file (1 SKUs)",
+        "MA_base (WEKOME) rows after 2026-11-12 not in file", "MA_base (WEKOME) live rows not in file (older exports)"], checks
+    assert checks[0][1:3] == (2.0, 2.0) and checks[3][1:3] == (1.0, 1.0)
+    assert checks[2][2] == 0.0, "the MA book never counts a WEKOME row as an older export of its own"
+    assert checks[5][2] == 1.0, "the WEKOME row its file no longer carries"
+    assert asked == [("MA_base", "masellingpricebook"), ("MA_base", "wekomemasellerpricebook")], asked
+
+
+@test("ingest: the WEKOME book is a report of its own -- two of its files keep the newest, as two MA books do; both books load")
+def _():
+    import csv
+    import time
+    from contextlib import redirect_stdout
+    from openpyxl import Workbook
+    from scripts import ingest as ing
+    header = list(ing.EXPECTED_HEADERS["selling_prices"])
+
+    def book(path: Path, rows, at: float) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.append(header)
+        for code, wh, rate in rows:
+            ws.append([f"Item {code}", code, None, None, wh, None, "Dinar", "1/1/2026", None, 0, 0, "Nos", rate,
+                       *([0] * 13), "Authorized"])
+        wb.save(path)
+        os.utime(path, (at, at))
+    with tempfile.TemporaryDirectory() as d:
+        src, out = Path(d) / "drop", Path(d) / "clean"
+        src.mkdir()
+        t = time.time() - 3600
+        book(src / "MASellingPriceBook (1).xlsx", [("S09", None, 9.5)], t - 60)                    # an older MA export
+        book(src / "MASellingPriceBook (2).xlsx", [("S01", None, 1.25), ("S01", "Causeway", 1.5)], t)
+        book(src / "WekomeMASellerPricebook (1).xlsx", [("ZZ-09", None, 9.5)], t - 60)             # an older WEKOME export
+        book(src / "WekomeMASellerPricebook (2).xlsx", [("ZZ-01", None, 1.234), ("ZZ-01", "YQ Roadshow", 1.456)], t)
+        saved_out, saved_argv = ing.OUT_DIR, sys.argv
+        ing.OUT_DIR, sys.argv = out, ["ingest", str(src)]
+        said = io.StringIO()
+        try:
+            with redirect_stdout(said):
+                code = ing.main()
+        finally:
+            ing.OUT_DIR, sys.argv = saved_out, saved_argv
+        with open(out / "selling_prices.csv", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    text = said.getvalue()
+    assert code == 0, text
+    assert sorted((r["sku_code"], r["warehouse_name"], r["source_file"], r["price_book"]) for r in rows) == [
+        ("S01", "", "MASellingPriceBook (2).xlsx", "MA_base"), ("S01", "Causeway", "MASellingPriceBook (2).xlsx", "MA_base"),
+        ("ZZ-01", "", "WekomeMASellerPricebook (2).xlsx", "MA_base"),
+        ("ZZ-01", "YQ Roadshow", "WekomeMASellerPricebook (2).xlsx", "MA_base")], rows
+    assert "using newest (selling_prices:MA_base)" in text and "using newest (selling_prices:MA_base:wekome)" in text, text
 
 
 # ── 6. alias matcher and the backfill preview ─────────────────────────────────

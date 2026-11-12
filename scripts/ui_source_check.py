@@ -7,7 +7,8 @@
 What it compares — the SOURCE FILES the owner dropped (never the database's copy of them) against
 what a merchant and a rep actually see:
 
-  1. PRICE.  The latest MASellingPriceBook in the newest drop folder that carries one, read with the
+  1. PRICE.  The latest MASellingPriceBook in the newest drop folder that carries one (and the latest
+     WekomeMASellerPricebook, whose codes are MA_base too: r12), read with the
      repo's own parser (scripts/ingest.parse_pricebook, month-first dates) and reduced with the live
      book's own rule (v_price_list_by_book: Authorized, rate > 0, in force today, the base row
      without a warehouse first, then the latest start date, then the latest row). Compared with the
@@ -505,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no DDMMYY drop folders under {data_root}", file=sys.stderr)
         return 2
     pb = newest_file(drops, "MASellingPriceBook")
+    wk = newest_file(drops, "WekomeMASellerPricebook")     # r12: the WEKOME book's rows are MA_base rows too
     sb = newest_file(drops, "Stock_balance_by_warehouse")
     dbk = newest_file(drops, "Sales_day_book")
     reg = newest_file(drops, "Summary_sales_register")
@@ -515,9 +517,18 @@ def main(argv: list[str] | None = None) -> int:
         notes.append(f"the Summary_sales_register is from another drop ({reg[1]}) than the day book ({dbk[1]}): the day book's Warehouse Name is used for every line")
         reg = None
     print(f"price book : {rel(pb[0], data_root)}  (drop {pb[1]}, saved {mtime(pb[0])})")
+    if wk:
+        print(f"WEKOME book: {rel(wk[0], data_root)}  (drop {wk[1]}, saved {mtime(wk[0])})")
     print(f"stock      : {rel(sb[0], data_root)}  (drop {sb[1]}, saved {mtime(sb[0])})")
     print(f"day book   : {rel(dbk[0], data_root)}  (drop {dbk[1]}, saved {mtime(dbk[0])})")
     prices, pb_meta = price_from_book(pb[0], today)
+    if wk:
+        # the WEKOME book is a family of its own (its newest export), its codes beside the MA book's in MA_base: a
+        # code both books name keeps the MA book's row here (the live list picks between them by its own rule)
+        wk_prices, wk_meta = price_from_book(wk[0], today)
+        for code, row in wk_prices.items():
+            prices.setdefault(code, row)
+        pb_meta = dict(pb_meta, wekome=wk_meta)
     srows, stock_as_of = stock_rows(sb[0])
     lines = daybook(dbk[0])
     reg_map = register(reg[0]) if reg else {}
@@ -677,6 +688,9 @@ def main(argv: list[str] | None = None) -> int:
     L.append("| Source | File | Drop | Saved | Notes |")
     L.append("|---|---|---|---|---|")
     L.append(f"| Price (MA_base) | `{md_escape(rel(pb[0], data_root))}` | {pb[1]} | {mtime(pb[0])} | {pb_meta['rows']} rows, {pb_meta['live_rows']} in force today, {pb_meta['skus']} SKUs; statuses {pb_meta['statuses']} |")
+    if wk:
+        wm = pb_meta["wekome"]
+        L.append(f"| Price (MA_base, WEKOME book) | `{md_escape(rel(wk[0], data_root))}` | {wk[1]} | {mtime(wk[0])} | {wm['rows']} rows, {wm['live_rows']} in force today, {wm['skus']} SKUs; statuses {wm['statuses']} |")
     L.append(f"| Stock | `{md_escape(rel(sb[0], data_root))}` | {sb[1]} | {mtime(sb[0])} | as on {stock_as_of}; {len(srows)} rows; {len(stock)} catalog codes matched; {len(unmatched)} rows unmatched |")
     L.append(f"| Sales | `{md_escape(rel(dbk[0], data_root))}` | {dbk[1]} | {mtime(dbk[0])} | {len(lines)} lines to {file_max_sale}; salesman from the register on {len(reg_map)} invoices |")
     L.append(f"| Marketplace | {a.base} (grid `/shop`, panel `/p/{{code}}`) | | | payload: {len(items)} items, stock as of {payload.get('stock_as_of')}, prices updated {payload.get('prices_updated')}, fresh={payload.get('stock_fresh')} |")

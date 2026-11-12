@@ -4205,6 +4205,208 @@ def _():
         assert "held back for the second load in a row" in res["text"], res["text"]      # the 05-Jan load held its own
 
 
+# ── r12 (12-Nov-2026): the WEKOME price book, a family of its own in MA_base ───────────────────
+# WekomeMASellerPricebook has MASellingPriceBook's layout and its rows load as MA_base; it is judged, staged and
+# guarded as a book of its own, against its own family's live rows. Every code and rate is invented.
+
+WK_NAME = "WekomeMASellerPricebook.xlsx"
+WK_LIVE = "WekomeMASellerPricebook _3_.xlsx"             # the WEKOME export production holds now
+WK_PRICES = [("Wekome cable", "ZZ-01", None, None, None, "1/1/2026", None, 1.234),
+             ("Wekome cable", "ZZ-01", None, None, "Causeway", "1/1/2026", None, 1.456),
+             ("Wekome charger", "ZZ-02", None, None, None, "1/1/2026", None, 2.345)]
+WK_DEARER = [WK_PRICES[0][:7] + (1.3,)] + WK_PRICES[1:]  # ZZ-01's general price changed, nothing else
+
+
+def both_books(**over) -> FakeSession:
+    """Production holding the MA book's live rows and the WEKOME book's, both MA_base."""
+    return FakeSession(**dict({"prices": live_prices() + live_prices(WK_PRICES, source=WK_LIVE)}, **over))
+
+
+@test("the WEKOME book: a line of its own, judged against its own rows only: LEAVE OUT when equal, NEEDS YOUR DECISION when not")
+def _():
+    with data_root() as root:
+        drop = make_drop(root)
+        price_file(drop / WK_NAME, WK_PRICES)
+        res, deps = check("070126", deps=FakeDeps(both_books()))
+        text, table = res["text"], table_of(res["text"])
+        assert res["ok"] and res["token"], text
+        assert table[shown("selling_prices:MA_base")] == "LEAVE OUT" and table[WK_NAME] == "LEAVE OUT", text
+        assert "is no longer in the book" not in text, "neither book drops the other's rows"
+        assert "Price book: LEAVE OUT; Price book (WEKOME): LEAVE OUT." in step_line(deps, 6)
+        assert "no key added, changed or dropped against the live book" in text and "Price book (WEKOME) (exported " in text
+        # a price changed and a key gone in the WEKOME book: its own decision; the MA book stays the same as its rows
+        price_file(drop / WK_NAME, [WK_DEARER[0], WK_PRICES[1]])
+        res, deps = check("070126", deps=FakeDeps(both_books()))
+        text, table = res["text"], table_of(res["text"])
+        assert table[WK_NAME] == "NEEDS YOUR DECISION" and table[shown("selling_prices:MA_base")] == "LEAVE OUT", text
+        assert "ZZ-01: general price 1.300 from Thu 01 Jan (was 1.234" in text
+        assert "ZZ-02: general price 2.345 from Thu 01 Jan is no longer in the book (it would be switched off)" in text
+        assert text.count("is no longer in the book") == 1, "the MA rows beside it in MA_base are never its own to drop"
+        assert "Price book (WEKOME): NEEDS YOUR DECISION (1 changed, 1 dropped)" in step_line(deps, 6)
+        assert "One decision covers every price book of this folder: say \"load the price book\"" in text
+        assert res["token"] and "needs_decision" in res["flags"]
+        # the other way round: the MA book changes, and the WEKOME rows are never dropped by it
+        price_file(drop / WK_NAME, WK_PRICES)
+        price_file(drop / NAMES["selling_prices:MA_base"], PRICES[:3])           # Cable one's Shop 1 row is gone
+        res, deps = check("070126", deps=FakeDeps(both_books()))
+        text, table = res["text"], table_of(res["text"])
+        assert table[shown("selling_prices:MA_base")] == "NEEDS YOUR DECISION" and table[WK_NAME] == "LEAVE OUT", text
+        assert text.count("is no longer in the book") == 1 and "C1: scoped to Shop 1" in text and "ZZ-0" not in text, text
+
+
+@test("the WEKOME book on his word: staged under its own family's name, never handed to the preview; both books load")
+def _():
+    from scripts import ingest as ing
+    with data_root() as root:
+        drop = make_drop(root)
+        price_file(drop / WK_NAME, WK_DEARER)
+        before = snapshot_of(drop)
+        res, deps = check("070126", "--pricebook", "load", deps=FakeDeps(both_books()))
+        run, text, table = res["run"], res["text"], table_of(res["text"])
+        assert res["ok"] and res["token"], text
+        assert table[shown("selling_prices:MA_base")] == "LOAD" and table[WK_NAME] == "LOAD", text
+        ma, wk = f"MASellingPriceBook {run}.xlsx", f"WekomeMASellerPricebook {run}.xlsx"
+        staged = sorted(p.name for p in loadplan.staging_path(run).iterdir())
+        assert ma in staged and wk in staged and WK_NAME not in staged, staged
+        assert ing.classify(wk) == lc.WEKOME and ing.pricebook_family(wk) == "wekomemasellerpricebook"
+        assert loadplan.sha256_file(loadplan.staging_path(run) / wk) == loadplan.sha256_file(drop / WK_NAME)
+        assert ma in deps.previewed[-1] and wk not in deps.previewed[-1], "the batch engine refuses it: step 6 alone judges it"
+        assert "Price book MA_base: 0 rows added, 0 changed, 0 switched off." in text
+        assert "Price book MA_base (WEKOME): 0 rows added, 1 changed, 0 switched off." in text
+        assert "Loader guards: none is predicted to fire." in text and "the price list these books would give" in text
+        plan = loadplan.read_plan(run)
+        assert [v["staged"] for v in plan["verdicts"] if v["kind"] == lc.WEKOME] == [wk] and lc.WEKOME in plan["as_on"]
+        assert snapshot_of(drop) == before, "the owner's folder is only read"
+        # "leave it out": both books stay out, each said on its own line
+        res, _ = check("070126", "--pricebook", "skip", deps=FakeDeps(both_books()))
+        table = table_of(res["text"])
+        assert table[WK_NAME] == "LEAVE OUT" and "left out on your word (--pricebook skip): 1 changed" in res["text"], res["text"]
+
+
+@test("two WEKOME books in one folder stop the check, as two MA books do; one of each is two reports")
+def _():
+    with data_root() as root:
+        drop = make_drop(root)
+        price_file(drop / WK_NAME, WK_PRICES)
+        price_file(drop / "WekomeMASellerPricebook (1).xlsx", WK_PRICES)
+        res, _ = check("070126")
+        assert res["exit"] == 2 and res["token"] is None, res["text"]
+        assert ("Price book (WEKOME): 2 files (WekomeMASellerPricebook (1).xlsx, WekomeMASellerPricebook.xlsx). Keep one "
+                "file per report in the folder.") in res["text"], res["text"]
+        (drop / "WekomeMASellerPricebook (1).xlsx").unlink()
+        price_file(drop / "MASellingPriceBook (8).xlsx")
+        res, _ = check("070126")
+        assert res["exit"] == 2 and ("Price book: 2 files (MASellingPriceBook (7).xlsx, MASellingPriceBook (8).xlsx). Keep one "
+                                     "file per report in the folder.") in res["text"], res["text"]
+        (drop / "MASellingPriceBook (8).xlsx").unlink()
+        res, _ = check("070126", deps=FakeDeps(both_books()))
+        assert res["ok"] and res["token"] and "Keep one file" not in res["text"], res["text"]
+
+
+@test("only the WEKOME book in a drop: judged, the rest loads; its guard counts its own rows; the preview's MA guard never stops it")
+def _():
+    with data_root() as root:
+        drop = make_drop(root, leave_out=("selling_prices:MA_base",))
+        price_file(drop / WK_NAME, WK_PRICES)
+        res, deps = check("070126", deps=FakeDeps(both_books()))
+        table = table_of(res["text"])
+        assert res["ok"] and res["token"] and table[WK_NAME] == "LEAVE OUT", res["text"]
+        assert shown("selling_prices:MA_base") not in table and "Price book (WEKOME): LEAVE OUT." in step_line(deps, 6)
+        assert table[shown("order_lines")] == "LOAD" and "nothing in this drop is ready to load" not in res["text"]
+        # a filtered WEKOME export (2 of its 12 live rows) on his word would switch off too much of ITS rows: it stops,
+        # while the MA book beside it, the same as its own rows, loads
+        many = [(f"Wekome item {i}", f"ZZ-{i:02d}", None, None, None, "1/1/2026", None, 1.0 + i / 8) for i in range(1, 13)]
+        live = live_prices() + live_prices(many, source=WK_LIVE)
+        price_file(drop / WK_NAME, many[:2])
+        price_file(drop / NAMES["selling_prices:MA_base"])
+        res, _ = check("070126", "--pricebook", "load", deps=FakeDeps(FakeSession(prices=live)))
+        text, table = res["text"], table_of(res["text"])
+        assert res["exit"] == 2 and table[WK_NAME] == "STOP" and table[shown("selling_prices:MA_base")] == "LOAD", text
+        assert ("Loader guards predicted to fire: price book MA_base (WEKOME): it would switch off too much of the live book "
+                "(10 stale rows are more than 10% of the book's 12 live rows)") in text, text
+        # the whole WEKOME book loads; a void guard the preview raises (it compares the MA book alone) stops the MA line only
+        price_file(drop / WK_NAME, many)
+        guarded = FakeDeps(FakeSession(prices=live))
+        guarded.exceptions = [blocking("snapshot_void_guard", "selling_prices", message="the file names 2 of the book's 9 live SKUs")]
+        res, _ = check("070126", "--pricebook", "load", deps=guarded)
+        table = table_of(res["text"])
+        assert res["exit"] == 2 and table[shown("selling_prices:MA_base")] == "STOP" and table[WK_NAME] == "LOAD", res["text"]
+        assert "price book MA_base: it would switch off" in res["text"] and "price book MA_base (WEKOME)" not in res["text"]
+
+
+@test("loaded already: a WEKOME book the same as its rows is named outside the load; on his word it is part of it")
+def _():
+    with data_root() as root:
+        drop = make_drop(root)
+        price_file(drop / WK_NAME, WK_PRICES)
+        status.write_state({"last_load": dict(LAST_LOAD)})
+        held = {"prices": live_prices() + live_prices(WK_PRICES, source=WK_LIVE)}
+        res, _ = check("070126", deps=already_loaded(session=held))
+        text, lines = res["text"], res["text"].splitlines()
+        assert lines[-1] == NOTHING_NEW and res["token"] is None, text
+        assert lines[-5:-1] == ["Not part of this load:", SAME_BOOK,
+                                "- Price book (WEKOME): LEAVE OUT (the same as the live price book: nothing to load).", ""], lines[-6:]
+        # "load the price book": the preview never sees the WEKOME book, so step 6's own comparison says what its load
+        # does: the check is not "nothing new", it ends on a GO line
+        res, _ = check("070126", "--pricebook", "load", deps=already_loaded(session=held))
+        assert res["token"] and res["text"].splitlines()[-1].startswith("GO: ") and "Nothing new" not in res["text"], res["text"]
+        assert "Price book (WEKOME): 3 rows written again under the staged name" in loadplan.read_plan(res["run"])["new_in_drop"]
+        # a changed WEKOME book on his word: what changes, in its own words
+        price_file(drop / WK_NAME, WK_DEARER)
+        res, _ = check("070126", "--pricebook", "load", deps=already_loaded(session=held))
+        assert "Price book (WEKOME): 1 changed" in loadplan.read_plan(res["run"])["new_in_drop"], res["text"]
+
+
+@test("the catalog after a load: the WEKOME book keeps the MA codes on, the MA book keeps the WEKOME codes on")
+def _():
+    on = [{"item_code": c, "is_active": True, "hidden": False, "updated_by": lc.AUTO_SYNC} for c in ("C1", "C2", "C3", "ZZ-01", "ZZ-02")]
+    codes = [{"sku_code": c} for c in ("C1", "C2", "C3", "ZZ-01", "ZZ-02")]
+    with data_root() as root:
+        drop = make_drop(root)
+        price_file(drop / WK_NAME, WK_PRICES)
+        res, _ = check("070126", "--pricebook", "load", deps=FakeDeps(both_books(catalog=on, book=codes, candidates=codes)))
+        assert ("Catalog: the sync that follows the load would switch nothing on or off. Compared with the price list these "
+                "books would give.") in res["text"], res["text"]
+    with data_root() as root:                     # the WEKOME book alone loads, with a new code the catalog holds switched off
+        drop = make_drop(root, leave_out=("selling_prices:MA_base",))
+        price_file(drop / WK_NAME, WK_PRICES + [("Wekome lamp", "ZZ-03", None, None, None, "1/1/2026", None, 3.456)])
+        off = on + [{"item_code": "ZZ-03", "is_active": False, "hidden": False, "updated_by": lc.AUTO_SYNC}]
+        res, _ = check("070126", "--pricebook", "load", deps=FakeDeps(both_books(catalog=off, book=codes, candidates=codes)))
+        assert table_of(res["text"])[WK_NAME] == "LOAD", res["text"]
+        assert ("Catalog: the sync that follows the load would switch ON 1 item: ZZ-03. Compared with the price list this "
+                "book would give.") in res["text"], res["text"]
+
+
+@test("one item, one book: an item in both MA_base books stops the check (both files, or a file and the other's live rows)")
+def _():
+    said = ("1 item (ZZ-01) is in both MASellingPriceBook and WekomeMASellerPricebook: keep each item in one Focus price "
+            "book, then export the books again")
+    with data_root() as root:
+        drop = make_drop(root)
+        price_file(drop / NAMES["selling_prices:MA_base"],
+                   PRICES + [("Wekome cable", "ZZ-01", None, None, None, "1/1/2026", None, 1.234)])
+        price_file(drop / WK_NAME, WK_PRICES)
+        res, _ = check("070126", deps=FakeDeps(both_books()))          # no decision: neither book loads, nothing collides
+        assert res["ok"] and res["token"], res["text"]
+        res, _ = check("070126", "--pricebook", "load", deps=FakeDeps(both_books()))
+        text, table = res["text"], table_of(res["text"])
+        assert res["exit"] == 2 and res["token"] is None and "GO:" not in text, text
+        assert table[shown("selling_prices:MA_base")] == "STOP" and table[WK_NAME] == "STOP", text
+        assert f"Loader guards predicted to fire: {said}." in text and f"- Price book (WEKOME): {said}." in text, text
+    with data_root() as root:                     # only the WEKOME book, naming an item the MA book's live rows hold
+        drop = make_drop(root, leave_out=("selling_prices:MA_base",))
+        price_file(drop / WK_NAME, WK_PRICES + [("Charger two", "C2", None, None, None, "1/1/2026", None, 2.5)])
+        res, _ = check("070126", "--pricebook", "load", deps=FakeDeps(both_books()))
+        assert res["exit"] == 2 and res["token"] is None and table_of(res["text"])[WK_NAME] == "STOP", res["text"]
+        assert ("1 item (C2) is in both MASellingPriceBook and WekomeMASellerPricebook: keep each item in one Focus price "
+                "book") in res["text"], res["text"]
+        # no item in two books passes: the same drop without that row loads
+        price_file(drop / WK_NAME, WK_PRICES)
+        res, _ = check("070126", "--pricebook", "load", deps=FakeDeps(both_books()))
+        assert res["ok"] and res["token"] and table_of(res["text"])[WK_NAME] == "LOAD", res["text"]
+        assert "Loader guards: none is predicted to fire." in res["text"]
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

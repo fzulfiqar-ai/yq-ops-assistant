@@ -204,28 +204,77 @@ export function isOut(item?: ShopItem | null): boolean {
 
 /* ───────────────────────── product names ─────────────────────────
    Catalog data is uneven: for many SKUs `display_name` is just the code ("X01") and the real
-   name lives in the first line of `spec` ("X01 3A 3in1 PVC USB Cable (…) (VFAN)"). The house
-   brand suffix "(VFAN)" is noise on a single-brand shelf. One helper, used everywhere, so a
-   merchant always reads a product name, and the code sits underneath it. */
+   name lives in the first line of `spec` ("X01 3A 3in1 PVC USB Cable (…) (VFAN)"). The brand
+   suffix — "(VFAN)", "(WEKOME)" — is noise in a name: the card's kicker already says the brand.
+   One helper, used everywhere, so a merchant always reads a product name, and the code sits
+   underneath it. */
 
-/** "(VFAN)" anywhere in a line — the export often repeats the code after it. */
-const BRAND_TAG = /\s*\((?:vfan|v-fan)\)/gi
+/** "(VFAN)" or "(WEKOME)" anywhere in a line — the export often repeats the code after it. */
+const BRAND_TAG = /\s*\((?:vfan|v-fan|wekome)\)/gi
 /** Upper-case variant suffixes the export leaves at the front of a name ("P04 CL 1Mtr …"). */
 const VARIANT_LEAD = /^(?:CCC|CCL|CC|CL|UC|UL|UM|TC|LT|MK)\s+/
 
 const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+/** What the name helpers read: the code, the two name fields and, where the caller has it, the brand. */
+type NameSource = Pick<ShopItem, 'item_code' | 'display_name' | 'spec'> & Partial<Pick<ShopItem, 'brand'>>
+
+/**
+ * A code written as a model and a variant the name does not repeat: WEKOME's "WG-08-BK" is the
+ * WG-08 in black, named "WG-08 Wireless Earphone Black (WEKOME)"; "YB13-3.5" is the YB13 with a
+ * 3.5 mm jack. The item's brand says so, or the export's "(WEKOME)" tag. Any other item reads the
+ * same way when its name starts with a hyphenated model its code carries a variant after: VFAN's
+ * "TB-D3-CC" named "TB-D3 Display Box 30 Cables (…)". Every other name reads as it always did.
+ */
+const MODEL_CODED_BRAND = /^wekome$/i
+const MODEL_CODED_TAG = /\(wekome\)/i
+
+/** the line a name is read from: the display name, or the spec's first line when it is only the code */
+function nameLine(item: NameSource): string {
+  const dn = (item.display_name || '').trim()
+  return dn && dn.toUpperCase() !== item.item_code.toUpperCase() ? dn : (item.spec || '').split('\n')[0].trim()
+}
+
+/** "TB-D3" leading "TB-D3 Display Box …" for code "TB-D3-CC": a hyphenated model, then a variant only the code has */
+function hyphenModelLead(line: string, code: string): boolean {
+  const lead = line.trim().split(/\s+/)[0].toUpperCase()
+  const full = code.trim().toUpperCase()
+  return lead.includes('-') && full.length > lead.length && full.startsWith(lead) && /[\s-]/.test(full[lead.length])
+}
+
+function modelCoded(item: NameSource): boolean {
+  return (
+    MODEL_CODED_BRAND.test((item.brand || '').trim()) ||
+    MODEL_CODED_TAG.test(`${item.display_name || ''}\n${item.spec || ''}`) ||
+    hyphenModelLead(nameLine(item), item.item_code)
+  )
+}
+
 /**
  * The code at the start of a line; spaces and hyphens in the code match either ("X05 UC-1Mtr" ~
  * "X05 UC 1Mtr"). A length the code ends with stays in the name ("X24 CC 1Mtr Cable …" →
  * "1Mtr Cable …"), so "P01-1Mtr" and "P01-2Mtr" do not both read "TPE (…)".
+ *
+ * `byModel` (modelCoded): the whole code is tried first, then without its last part, down to the
+ * model's two parts (the first part alone is productName's own fallback), and a match must end
+ * where the line's word ends. So the model leaves the line whole ("WG-08", never "WG" with
+ * "08 Wireless …" left over) and a variant suffix never eats into the name ("YB13-3.5" on
+ * "YB13 3.5mm Jack …" keeps "3.5mm").
  */
-function stripCode(text: string, code: string): string {
+function stripCode(text: string, code: string, byModel = false): string {
   const parts = code.trim().split(/[\s-]+/).filter(Boolean)
   if (parts.length > 1 && /^\d+(?:\.\d+)?\s*mtrs?$/i.test(parts[parts.length - 1])) parts.pop()
   else if (parts.length > 2 && /^mtrs?$/i.test(parts[parts.length - 1]) && /^\d+(?:\.\d+)?$/.test(parts[parts.length - 2])) parts.splice(-2)
   if (!parts.length) return text
-  return text.replace(new RegExp(`^\\s*${parts.map(escRe).join('[\\s-]*')}\\s*[-–:·]?\\s*`, 'i'), '')
+  if (!byModel) return text.replace(new RegExp(`^\\s*${parts.map(escRe).join('[\\s-]*')}\\s*[-–:·]?\\s*`, 'i'), '')
+  for (let n = parts.length; n >= Math.min(parts.length, 2); n--) {
+    const head = parts.slice(0, n)
+    // a code part that ends in a letter, a digit or a dot must end the word too ("3.5" is not "3.5mm")
+    const wordEnd = /[\w.]$/.test(head[n - 1]) ? '(?![\\w.])' : ''
+    const re = new RegExp(`^\\s*${head.map(escRe).join('[\\s-]*')}${wordEnd}\\s*[-–:·]?\\s*`, 'i')
+    if (re.test(text)) return text.replace(re, '')
+  }
+  return text
 }
 
 /** The model token of a code: "X05 UC-1Mtr" → "X05". */
@@ -251,7 +300,7 @@ function cleanLine(text: string, code: string): string {
  * Acronyms the trade really does write in capitals. Everything else the ERP shouts
  * ("NYLON BRAIDED LIGHTNING") is a word, not an initialism.
  */
-const KEEP_CAPS = new Set(['USB', 'PVC', 'TPE', 'TPU', 'ABS', 'EVA', 'TWS', 'ANC', 'ENC', 'CVC', 'AUX', 'LED', 'OTG', 'HDMI', 'RGB', 'IPX', 'MAH', 'VFAN', 'PPS', 'GPS', 'NFC', 'LCD', 'SBC', 'AAC', 'LDAC', 'CCC', 'CCL', 'USA'])
+const KEEP_CAPS = new Set(['USB', 'PVC', 'TPE', 'TPU', 'ABS', 'EVA', 'TWS', 'ANC', 'ENC', 'CVC', 'AUX', 'LED', 'OTG', 'HDMI', 'RGB', 'IPX', 'MAH', 'VFAN', 'WEKOME', 'PPS', 'GPS', 'NFC', 'LCD', 'SBC', 'AAC', 'LDAC', 'CCC', 'CCL', 'USA'])
 const SHOUT = /\b[A-Z]{3,}\b/g
 
 /**
@@ -283,19 +332,20 @@ export function contentsList(text: string): { code: string; qty: number }[] | nu
 }
 
 /** the line as the export wrote it, without the item's own code or the brand tag */
-function bareLine(text: string, code: string): string {
-  return stripCode(cleanLine(text, code), code).replace(/^[\s\-–:·]+/, '').trim()
+function bareLine(text: string, code: string, byModel = false): string {
+  return stripCode(cleanLine(text, code), code, byModel).replace(/^[\s\-–:·]+/, '').trim()
 }
 
-export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>): string {
+export function productName(item: NameSource): string {
   const code = item.item_code
+  const byModel = modelCoded(item)
   const dn = (item.display_name || '').trim()
   const firstSpec = (item.spec || '').split('\n')[0].trim()
   const raw = cleanLine(dn && dn.toUpperCase() !== code.toUpperCase() ? dn : firstSpec, code)
   // a box named by its contents (TB-D10, TB-D12): say what it is; productDetail lists the contents
-  const box = contentsList(bareLine(raw, code))
+  const box = contentsList(bareLine(raw, code, byModel))
   if (box) return S.card.mixedBox(box.length, box.reduce((n, l) => n + l.qty, 0))
-  let noCode = stripCode(raw, code).trim()
+  let noCode = stripCode(raw, code, byModel).trim()
   if (noCode === raw) {
     // the line starts with the model only ("X24 2Mtr Cable …" for code "X24 CC")
     const head = codeHead(code)
@@ -312,7 +362,7 @@ export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 
  * that read the same — "3.5mm Jack Flat In-Ear Phones" at two prices — each carry their code, so the
  * merchant can tell them apart. A unique name is left as it is.
  */
-export function distinctNames(items: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>[]): Map<string, string> {
+export function distinctNames(items: NameSource[]): Map<string, string> {
   const named = items.map((it) => [it.item_code, productName(it)] as const)
   const seen = new Map<string, number>()
   for (const [, n] of named) seen.set(n.toLowerCase(), (seen.get(n.toLowerCase()) || 0) + 1)
@@ -321,9 +371,10 @@ export function distinctNames(items: Pick<ShopItem, 'item_code' | 'display_name'
 
 /** The detail line under a name: the spec minus whatever the name already said. A mixed box named
  *  by its contents list gets the contents, one "CODE ×qty" each. */
-export function productDetail(item: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>): string {
+export function productDetail(item: NameSource): string {
+  const byModel = modelCoded(item)
   const listed = [item.display_name || '', ...(item.spec || '').split('\n')]
-    .map((l) => contentsList(bareLine(l, item.item_code)))
+    .map((l) => contentsList(bareLine(l, item.item_code, byModel)))
     .find(Boolean)
   if (listed) return listed.map((l) => `${l.code} ×${l.qty}`).join(' · ')
   const name = productName(item).toLowerCase()
@@ -332,7 +383,7 @@ export function productDetail(item: Pick<ShopItem, 'item_code' | 'display_name' 
     .map((l) => cleanLine(l, item.item_code))
     .filter(Boolean)
   const rest = lines.filter((l) => {
-    const t = stripCode(l, item.item_code).trim().toLowerCase()
+    const t = stripCode(l, item.item_code, byModel).trim().toLowerCase()
     return t && t !== name && !name.includes(t) && !t.includes(name)
   })
   return rest.join(' · ')
