@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Navigate, useParams } from 'react-router-dom'
+import { Navigate, useLocation, useParams } from 'react-router-dom'
 import { LayoutGrid } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ComingSoonCard } from '../components/ComingSoonCard'
@@ -33,6 +33,7 @@ import { CardSkeleton } from '../ui/Skeleton'
  */
 export default function BrandPage() {
   const { brand: raw = '' } = useParams()
+  const { search } = useLocation()
   const brand = decodeURIComponent(raw).trim().toUpperCase()
   const t = upcomingCopy()
   const { items, status, reload } = useMarket()
@@ -81,8 +82,14 @@ export default function BrandPage() {
   const circles = useMemo(() => groups.map(([category, list]) => ({ id: sectionId(category), category, first: list[0] })), [groups])
 
   if (!brand) return <Navigate to="/shop" replace />
-  // nothing announced but the brand is on the shelf: Browse, filtered, is the brand page
-  if (data && data !== 'error' && upcoming.length === 0 && live.length > 0) return <Navigate to={`/shop?brand=${encodeURIComponent(brand)}`} replace />
+  // nothing announced but the brand is on the shelf: Browse, filtered, is the brand page. The link's own
+  // query (a rep's ?ref=, a ?src=) goes along, so a rep link stays a rep link in the address bar too
+  // (MarketApp has already made the ref the session's on entry; 15-Nov-2026, the QA harness's brand-ref)
+  if (data && data !== 'error' && upcoming.length === 0 && live.length > 0) {
+    const q = new URLSearchParams(search)
+    q.set('brand', brand)
+    return <Navigate to={`/shop?${q.toString()}`} replace />
+  }
 
   const when = data && data !== 'error' ? (locale.lang === 'ar' ? data.expected_label_ar : data.expected_label_en) : ''
   const browse = `/shop?brand=${encodeURIComponent(brand)}`

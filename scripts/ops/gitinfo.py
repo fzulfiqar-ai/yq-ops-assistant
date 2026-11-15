@@ -8,7 +8,8 @@ imports subprocess, os.system or os.popen).
 and scripts/ and the two requirement files the API image is built from. SQL migration files, docs
 and the ops skills themselves do not ship with an API deploy, so they never block a load. Nor do
 the owner-side programs scripts/yq_*.py (the load's writer, the brief's sender, the secrets and
-backup tools): nothing in the API runs them. One file of scripts/ops does ship with it and run
+backup tools), nor the browser QA harness and its helpers under scripts/qa (15-Nov-2026: a harness fix
+had made /yq-load ask for an API deploy that would change nothing): nothing in the API runs them. One file of scripts/ops does ship with it and run
 there (ENGINE_FILES_IN_OPS: the transfer pairing that /stock/flow runs). An exclude in a pathspec
 list cannot be undone for one path inside it, so each engine question asks git twice, once per list.
 """
@@ -20,7 +21,7 @@ from pathlib import Path
 VERBS = ("rev-parse", "merge-base", "diff", "status", "cat-file", "ls-files")
 ENGINE_PATHS = (
     ":(glob)app/**/*.py", ":(glob)scripts/**/*.py", "requirements.txt", "requirements.lock",
-    ":(exclude)scripts/ops", ":(exclude,glob)scripts/yq_*.py",
+    ":(exclude)scripts/ops", ":(exclude,glob)scripts/yq_*.py", ":(exclude)scripts/qa",
 )
 ENGINE_FILES_IN_OPS = ("scripts/ops/pairing.py",)      # the one file inside scripts/ops that the API runs
 
