@@ -140,9 +140,15 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 - Real loads so far: the drops 111026, 141026, 151026, 181026 (without its Stock ledger), 201026 and 221026 (the
   first one-transaction load: 3.8 minutes). Each load's journal is in `business_data/ops/loads/` (git-ignored).
 
+- Release r12, "WEKOME live": live 12-Nov-2026 (`cc1ff62`, API, web and migration `r12_b2c_causeway` applied;
+  `audit_grants` clean; gate compare PASS). The WEKOME book loaded on 15-Nov-2026 through `/yq-load` as its own
+  family; the catalog took its items with brand, category, stock and photos; the "Coming soon" cards are linked and
+  retired; the marketplace shows the Causeway shop price (`shop_show_retail_compare` on, the owner's 12-Nov
+  decision). Details below.
+
 ## In progress
 
-- Release r12, "WEKOME live" (built 12-Nov-2026; steps in `docs/RELEASE.md` § Release r12).
+- Release r12's details (live, see above; steps in `docs/RELEASE.md` § Release r12), and what it left open:
   - The second supplier's Focus price book (`WekomeMASellerPricebook*.xlsx`) loads through `/yq-load`. Each Focus
     price-book file family voids only its own superseded rows (`scripts/ingest.py`, `scripts/load_supabase.py`,
     `scripts/ops/load_check.py`, `scripts/verify_numbers.py`). The portal's batch upload refuses that book; its SQL
