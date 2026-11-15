@@ -222,7 +222,7 @@ class State:
     assist: str | None = None  # YQ Assistant: 'launcher' (button only) | 'panel' (opened, one question asked) | 'list' (a pasted order list, reviewed) | 'hello' (opened: it speaks first, 2.1)
 
 
-def states(slug: str | None) -> list[State]:
+def states(slug: str | None, announced: bool = True) -> list[State]:
     out = [
         State("home", "/", "Home, first visit", ready="main", full_page=True),
         State("shop", "/shop", "Browse", ready="main", full_page=True),
@@ -270,7 +270,8 @@ def states(slug: str | None) -> list[State]:
         State("about", "/about", "About & help", ready="main"),
         State("about_trade", "/about#trade", "About · trade prices", ready="main"),
         State("product", "/p/UK04-C", "Product · UK04-C (the page on desktop, the sheet on phones)", ready="main"),
-        State("brand", "/brands/wekome", "Brand · WEKOME (Coming soon)", ready="main", needles=(STR["upcoming.price"],), full_page=True),
+        State("brand", "/brands/wekome", "Brand · WEKOME (Coming soon)" if announced else "Brand · WEKOME (arrived: Browse filtered to the brand)",
+              ready="main", needles=(STR["upcoming.price"],) if announced else (), full_page=True),
         State("tracking", "/o/qa-token", "Tracking · a mocked order", ready="main"),
         State("campaign", "/", "Home with an injected campaign", kind="campaign", ready="main", lead_only=True),
         State("reduced_home", "/", "Home, reduced motion", ready="main", reduced=True, lead_only=True),
@@ -293,7 +294,7 @@ def states(slug: str | None) -> list[State]:
         out.insert(1, State("storefront", "/" + slug, "Rep storefront /" + slug, ready="main"))
         # a rep's WEKOME link: the same page, and the ?ref= must survive every jump on it
         i = next(k for k, s in enumerate(out) if s.key == "brand")
-        out.insert(i + 1, State("brand_ref", "/brands/wekome?ref=" + slug, "Brand · WEKOME via a rep link", ready="main", needles=(STR["upcoming.price"],)))
+        out.insert(i + 1, State("brand_ref", "/brands/wekome?ref=" + slug, "Brand · WEKOME via a rep link", ready="main", needles=(STR["upcoming.price"],) if announced else ()))
     return out
 
 
@@ -545,6 +546,7 @@ PROBE = r"""
   for (const s of main.querySelectorAll('section[aria-labelledby]')) {
     const key = s.getAttribute('aria-labelledby');
     if (key === 'home-all') continue;                       /* the all-products grid repeats on purpose */
+    if (key === 'home-brands') continue;                    /* a brand tile's photo is the brand's emblem, not a product card (15-Nov-2026) */
     if (s.parentElement && s.parentElement.closest('section[aria-labelledby]')) continue;
     out.sections.push({ key, codes: codesIn(s) });
   }
@@ -1675,6 +1677,21 @@ def brand_checks(run: Run, page: Page, vp: Viewport, out: Path, lead: bool) -> N
     session's ref on this FIRST visit — no catalog request goes out without it, and a submitted
     notify carries it (answered by the no-prod-writes net; nothing reaches any API).
     """
+    # arrived (15-Nov-2026): nothing is announced any more, so the brand page hands over to Browse filtered to the
+    # brand. Proved here: it lands on /shop?brand=WEKOME, a rep link keeps its ref, and the brand's cards are there.
+    if "/brands/" not in page.url:
+        if not re.search(r"/shop\?(?:.*&)?brand=WEKOME", page.url, re.I):
+            finding(run, "fail", "brand-handover", "the arrived brand page did not hand over to Browse filtered to WEKOME: " + page.url)
+        if run.state == "brand_ref":
+            m = re.search(r"[?&]ref=([^&#]+)", run.route)
+            if m and ("ref=" + m.group(1)) not in page.url:
+                finding(run, "fail", "brand-ref", "the hand-over dropped the rep link's ref: " + page.url)
+        cards = page.locator("main article").count()
+        if cards < 3:
+            finding(run, "fail", "brand-handover", "fewer than three cards on the brand's Browse page (" + str(cards) + ")")
+        else:
+            run.notes.append("arrived: " + page.url + " with " + str(cards) + " cards")
+        return
     text = page.evaluate("() => (document.querySelector('main') || document.body).textContent || ''")
     for pat, what in ((r"\bpremium\b", "the tier word"), (r"\b\d+\s+(?:models?|products?|skus?|designs?)\b", "a count of the range")):
         hit = re.search(pat, text, re.I)
@@ -2196,6 +2213,18 @@ def find_slug(api: str) -> str | None:
     return None
 
 
+def brand_announced(api: str) -> bool:
+    """Is WEKOME still a "Coming soon" range (the upcoming payload lists cards)? Once the cards are linked to
+    live items (15-Nov-2026) /brands/wekome hands over to Browse filtered to the brand, and the brand states
+    check that hand-over instead of the coming-soon page. Unknown (the API did not answer): assume announced."""
+    try:
+        with urllib.request.urlopen(api + "/public/market/upcoming", timeout=10) as r:
+            data = json.load(r) or {}
+    except Exception:  # noqa: BLE001
+        return True
+    return bool(data.get("enabled", True)) and bool(data.get("items"))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="YQ Marketplace browser QA harness")
     ap.add_argument("--base", default="http://localhost:5174", help="the preview or production origin")
@@ -2220,7 +2249,7 @@ def main() -> int:
     repo = Path(__file__).resolve().parents[2]
 
     slug = find_slug(args.api.rstrip("/"))
-    all_states = states(slug)
+    all_states = states(slug, announced=brand_announced(args.api.rstrip("/")))
     if args.list:
         for s in all_states:
             print(s.key.ljust(18), s.route.ljust(22), s.label)

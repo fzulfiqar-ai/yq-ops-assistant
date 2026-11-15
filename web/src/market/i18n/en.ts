@@ -213,6 +213,12 @@ export const en = {
     play: 'Play slideshow',
     /** the round sticker on the New arrivals slide (words only, never a number) */
     stickerNew: 'New',
+    /** a brand's own promotion (lib/brands.ts): the kicker over its title, and the seal's two lines when YQ
+     *  holds the brand exclusively in Bahrain (a written fact: the brand's distributor certificate) */
+    brandNew: 'New brand',
+    brandNewExclusive: 'New brand · Exclusive in Bahrain',
+    sealTop: 'Exclusive',
+    sealBottom: 'in Bahrain',
   },
   promise: {
     title: 'The YQ promise',

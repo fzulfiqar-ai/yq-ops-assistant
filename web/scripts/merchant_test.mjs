@@ -57,7 +57,8 @@ registerHooks({
         fileName: file,
         compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
       })
-      return { format: 'module', source: outputText, shortCircuit: true }
+      // Vite's build-time env does not exist in plain node: lib/slides.ts reaches lib/shopApi.ts, which reads it
+      return { format: 'module', source: outputText.replace(/import\.meta\.env/g, '({})'), shortCircuit: true }
     }
     return next(url, ctx)
   },
@@ -592,6 +593,32 @@ check('categories: SCREEN PROTECTOR (WEKOME) reads like the other categories in 
   eq(F.niceCategory('BLUETOOTH HEADSET'), 'Bluetooth headset', 'the other categories as before')
   eq(Object.keys(en.categoryNames), [], 'English lists no category label')
   eq(ar.categoryNames['SCREEN PROTECTOR'], 'واقيات الشاشة', 'Arabic')
+})
+
+// a brand's own promotion (15-Nov-2026, lib/brands.ts): a campaign every product of which is one themed brand's
+const BR = await mod('market/lib/brands.ts')
+const SL = await mod('market/lib/slides.ts')
+const pic = (code, brand, extra = {}) => ({ item_code: code, display_name: code, brand, category: 'CABLE', stock_status: 'in_stock', price_bhd: 1, product_image_url: `https://img.test/${code}.jpg`, thumb_url: `https://img.test/${code}-t.jpg`, ...extra })
+const camp = (codes, extra = {}) => ({ id: 7, title: 'Just landed.', line: 'Only at YQ.', cta_label: 'Shop it', cta_to: '/brands/wekome', canvas: 'night', placement: ['hero'], audience: 'all', product_codes: codes, image_url: null, sponsored: false, ...extra })
+const range = [pic('ZW-1', 'WEKOME'), pic('ZW-2', 'WEKOME'), pic('ZW-3', 'WEKOME'), pic('ZW-4', 'WEKOME'), pic('ZW-5', 'WEKOME', { stock_status: 'out_of_stock' }), pic('ZV-1', 'VFAN'), pic('ZV-2', 'VFAN')]
+check('brand promotion: a campaign of one themed brand wears its look; mixed, unthemed or with an image of its own it does not', () => {
+  eq(BR.themedBrand([{ brand: 'WEKOME' }, { brand: ' wekome ' }])?.key, 'WEKOME', 'one brand, any spelling')
+  eq(BR.themedBrand([{ brand: 'WEKOME' }, { brand: 'VFAN' }]), null, 'mixed')
+  eq(BR.themedBrand([{ brand: 'VFAN' }]), null, 'a brand with no theme')
+  eq(BR.themedBrand([]), null, 'no pictures')
+  const deck = SL.buildSlides({ items: range, campaigns: [camp(['ZW-1', 'ZW-2', 'ZW-3'])], recognized: false })
+  const s = deck[0]
+  eq([s.id, s.brand, s.kicker], ['c:7', 'WEKOME', en.slides.brandNewExclusive], 'slide 1: the campaign, in the brand look, its kicker the fact')
+  eq(s.products.map((i) => i.item_code), ['ZW-1', 'ZW-2', 'ZW-3'], 'the three photos the office picked')
+  eq((s.reel || []).map((i) => i.item_code), ['ZW-4'], 'the reel: the rest of the brand in stock (ZW-5 is out, VFAN never)')
+  eq(SL.buildSlides({ items: range, campaigns: [camp(['ZW-1', 'ZV-1'])], recognized: false })[0].brand, undefined, 'a mixed campaign: no brand look')
+  eq(SL.buildSlides({ items: range, campaigns: [camp(['ZV-1', 'ZV-2'])], recognized: false })[0].brand, undefined, 'VFAN only: no theme')
+  eq(SL.buildSlides({ items: range, campaigns: [camp(['ZW-1'], { image_url: 'https://img.test/banner.webp' })], recognized: false })[0].brand, undefined, 'its own uploaded image wins')
+  eq(SL.buildSlides({ items: range, campaigns: [camp(['ZW-1'], { sponsored: true, sponsor_name: 'Acme' })], recognized: false })[0].kicker, en.slides.brandNewExclusive === null ? null : en.campaign.sponsored('Acme'), 'a sponsored campaign always says so first')
+})
+check('brand promotion: the words in Arabic, and the logo file is there', () => {
+  ok(hasArabic(ar.slides.brandNewExclusive) && hasArabic(ar.slides.sealTop) && hasArabic(ar.slides.sealBottom), 'Arabic kicker and seal')
+  ok(isFile(path.join(SRC, '..', 'public', BR.BRAND_THEMES.WEKOME.logo.replace(/^\//, ''))), 'public/brands/wekome.png')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

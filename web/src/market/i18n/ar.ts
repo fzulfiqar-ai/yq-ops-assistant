@@ -201,6 +201,10 @@ export const ar: Strings = {
     pause: 'أوقف العرض',
     play: 'شغّل العرض',
     stickerNew: 'جديد',
+    brandNew: 'علامة جديدة',
+    brandNewExclusive: 'علامة جديدة · حصريًا في البحرين',
+    sealTop: 'حصريًا',
+    sealBottom: 'في البحرين',
   },
   promise: {
     title: 'وعد YQ',

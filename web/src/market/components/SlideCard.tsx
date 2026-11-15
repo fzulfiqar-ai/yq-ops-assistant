@@ -2,6 +2,7 @@ import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight, Clock, ClipboardList, Megaphone, Package, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { BRAND_THEMES } from '../lib/brands'
 import { track } from '../lib/events'
 import { useCountdown } from '../lib/format'
 import { endsSoon, firstSlideImage, onSlideActive, whenWatched, type Slide, type SlideSize } from '../lib/slides'
@@ -79,6 +80,13 @@ const ENDS_AT: Record<SlideSize, string> = {
   hero: 'end-[3%] top-[6%]',
   tile: 'end-2 top-2',
   aside: 'end-3 top-3',
+}
+/** a brand's "Exclusive in Bahrain" seal (lib/brands.ts) sits where a sticker would; a tile is too small */
+const SEAL_AT: Record<SlideSize, string | null> = {
+  phone: 'end-2 top-2',
+  hero: 'end-[3.5%] top-[7%]',
+  tile: null,
+  aside: 'start-3 top-3',
 }
 const STICKER_TONE = {
   deal: 'bg-deal text-deal-ink',
@@ -159,7 +167,9 @@ function counted(text: string): ReactNode {
 }
 
 export function SlideCard({ slide, size, priority, className, where, live }: SlideCardProps) {
-  const dark = slide.canvas === 'plum' || slide.canvas === 'night'
+  // a brand's own promotion: its black canvas (market.css "A brand's own promotion"), so always dark
+  const theme = slide.brand ? BRAND_THEMES[slide.brand] || null : null
+  const dark = Boolean(theme) || slide.canvas === 'plum' || slide.canvas === 'night'
   const cover = slide.image?.fit === 'cover'
   const img = slide.image ? firstSlideImage(slide, size) : null
   const kicker = slide.kicker || slide.sponsored || null
@@ -187,7 +197,9 @@ export function SlideCard({ slide, size, priority, className, where, live }: Sli
 
   const body: ReactNode = (
     <>
-      {slide.canvas === 'night' ? (
+      {theme ? (
+        <span className="brand-glow" aria-hidden="true" />
+      ) : slide.canvas === 'night' ? (
         <div className="horizon is-small is-offset" aria-hidden="true">
           <i />
           <i />
@@ -198,7 +210,7 @@ export function SlideCard({ slide, size, priority, className, where, live }: Sli
         !cover && <span className="slide-sash" aria-hidden="true" />
       )}
       {cover && imgTag}
-      {(cover || slide.canvas === 'night') && <span className="slide-scrim" aria-hidden="true" />}
+      {(cover || slide.canvas === 'night' || theme) && <span className="slide-scrim" aria-hidden="true" />}
 
       {!cover && (
         <div className={cn('slide-art absolute', ART[size], size === 'hero' ? 'p-0' : size === 'phone' ? 'py-1' : 'py-0.5')} aria-hidden="true">
@@ -223,9 +235,21 @@ export function SlideCard({ slide, size, priority, className, where, live }: Sli
           {slide.sticker.label}
         </span>
       )}
+      {theme?.exclusive && SEAL_AT[size] && (
+        // the kicker already says it in words; the seal is its picture
+        <span className={cn('brand-seal absolute z-[3]', SEAL_AT[size])} aria-hidden="true">
+          <span className="brand-seal-ring" />
+          <span className="brand-seal-text">
+            {S.slides.sealTop}
+            <br />
+            {S.slides.sealBottom}
+          </span>
+        </span>
+      )}
       {slide.endsAt && <EndsChip endsAt={slide.endsAt} dark={dark && !cover} className={cn('absolute', ENDS_AT[size])} />}
 
       <span className={cn('slide-copy absolute flex flex-col', COPY[size])}>
+        {theme && <img className="brand-logo" src={theme.logo} alt={theme.key} width={theme.logoWidth} height={theme.logoHeight} decoding="async" draggable={false} />}
         {kicker && <span className={cn('slide-kicker mb-1.5 truncate', dark ? 'text-white/80' : 'text-plum')}>{kicker}</span>}
         <span className={cn('slide-title line-clamp-2 font-display font-extrabold', dark ? 'text-white' : 'text-ink')}>{countTitle ? counted(slide.title) : slide.title}</span>
         {slide.line && <span className={cn('slide-line mt-1 line-clamp-2 text-[12.5px] leading-4', size === 'hero' && 'mt-3 max-w-[34ch] leading-snug', dark ? 'text-white/80' : 'text-ink-2')}>{countLine ? counted(slide.line) : slide.line}</span>}
@@ -249,7 +273,7 @@ export function SlideCard({ slide, size, priority, className, where, live }: Sli
 
   const cls = cn(
     'slide-card group relative isolate block overflow-hidden text-start',
-    `canvas-${slide.canvas}`,
+    theme ? `canvas-brand brand-${theme.key.toLowerCase()}` : `canvas-${slide.canvas}`,
     FRAME[size],
     // the ring is an overlay: an inset box-shadow would paint under the art and the horizon
     slide.to && 'after:pointer-events-none after:absolute after:inset-0 after:z-10 after:rounded-[inherit] focus-visible:outline-none focus-visible:after:shadow-[inset_0_0_0_3px_hsl(var(--m-focus)),inset_0_0_0_5px_#fff]',
