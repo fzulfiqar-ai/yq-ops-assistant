@@ -1774,6 +1774,63 @@ html[data-lite] .m-photo::after {
 .canvas-brand .slide-kicker {
   color: hsl(var(--brand-accent));
 }
+/* a dated season's countdown (lib/season.ts, Black Friday 2026): the kicker becomes the brand's orange pill,
+ * a dot before the words; sentence case like every label. It never grows past the copy column (truncate). */
+.canvas-brand .slide-kicker.season-kicker {
+  align-self: flex-start;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 8px;
+  border-radius: 9999px;
+  background-color: hsl(var(--brand-accent));
+  color: hsl(var(--brand-ink));
+  font-weight: 800;
+}
+.season-kicker::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background-color: hsl(var(--brand-ink));
+}
+/* on the stage the pill sits beside the wordmark (SlideCard brand-row), and the button closes up a little:
+ * a fixed-height column must hold the row, a two-line headline, a two-line line and the button at 1366 px */
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+.brand-row .brand-logo {
+  margin-bottom: 0;
+}
+.brand-row .season-kicker {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.slide-card[data-size='hero'] .slide-kicker.season-kicker {
+  font-size: 13px;
+  line-height: 18px;
+  padding: 4px 12px 4px 10px;
+}
+.slide-card[data-size='hero'].canvas-brand .slide-cta {
+  margin-top: 18px;
+}
+.slide-card[data-size='hero'].canvas-brand .slide-copy {
+  padding-top: 4%;
+  padding-bottom: 4%;
+}
+/* a phone card under ~390 px wide (a 360-414 px phone) cannot hold the wordmark, the pill, a two-line headline,
+ * a two-line line and the button in its 2:1 frame: the line goes (the photos and the seal already say it) */
+@container slide (max-width: 389px) {
+  .canvas-brand[data-size='phone'] .season-kicker ~ .slide-line {
+    display: none;
+  }
+}
 .canvas-brand .slide-cta {
   background-color: hsl(var(--brand-accent));
   color: hsl(var(--brand-ink));

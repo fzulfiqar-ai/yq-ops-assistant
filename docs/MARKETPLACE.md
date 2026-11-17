@@ -371,6 +371,30 @@ products** (code picker with search), plus the fit toggle and the canvas picker,
 that renders exactly what the market renders, and help text explaining that a hero campaign is kept
 out of the strip automatically.
 
+### A dated season (`market/lib/season.ts`, 17-Nov-2026: Black Friday)
+
+The owner's Black Friday push with **no price change**. One code-side window (`BLACK_FRIDAY`: 17-Nov-2026
+00:00 to 30-Nov-2026 23:59:59, Bahrain) drives two things, and both stop by themselves the next page load
+after it ends (no second deploy):
+
+- **The clearing lines' words.** `i18n/index.ts` lays `season.*` (en/ar) over `deals.lastChance`, `deals.line`,
+  `deals.dealsLine`, `deals.dealsLineMixed`, `deals.last`, `deals.badge`, `shop.clearance`, `slides.last`,
+  `slides.lastLine`, `slides.lastCta` and `campaign.categoryLast`: "Black Friday picks · trade price". The
+  lines are still the ordinary clearing set (`_badges`) at the ordinary trade price, so nothing says sale,
+  discount or saving. They are stock a shop can run its own Black Friday offers on, and the card still shows
+  the real retail price and margin. The keys and the year-round words are unchanged (pinned by tests).
+- **A themed brand card's kicker** (`lib/brands.ts`; WEKOME). While the season runs, the kicker is an orange
+  pill counting to Fri 27-Nov ("Black Friday in 10 days" → "is today" → "weekend" → "Cyber Monday today"). It
+  sits beside the wordmark on the desktop stage. The card's "Ends in" chip stays off: the date is when the
+  shops' customers come, not an offer running out. Below a 390 px card the line is dropped so the two-line
+  headline fits.
+
+The campaign itself is an ordinary `shop_campaigns` row (WEKOME products only, so it wears the brand look;
+`ends_at` 30-Nov 23:59 +03:00). Outside a browser there is no page clock, so the node test scripts read the
+year-round words, and `web/scripts/merchant_test.mjs` tests the season with a fixed clock. Arabic writes
+«بلاك فرايدي», never «الجمعة السوداء». Slider stages now take a themed card's own black (`stageCanvas`), not
+its stored canvas.
+
 ## The opening (`components/Splash.tsx`)
 
 The marketplace opens the way the ops portal signs in: deep night, the glow horizon rising from

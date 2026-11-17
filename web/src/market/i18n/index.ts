@@ -1,3 +1,4 @@
+import { pageNow, withSeason } from '../lib/season'
 import { ar } from './ar'
 import { en, plural, type Strings } from './en'
 
@@ -61,8 +62,12 @@ const LANG: Lang = detect()
 
 export const locale: { lang: Lang; dir: 'ltr' | 'rtl' } = { lang: LANG, dir: LANG === 'ar' ? 'rtl' : 'ltr' }
 
-/** Every word the marketplace shows, in this page load's language. */
-export const S: Strings = LANG === 'ar' ? ar : en
+/**
+ * Every word the marketplace shows, in this page load's language — with a dated season's words laid over
+ * the year-round ones while it runs (lib/season.ts: Black Friday until 30-Nov-2026; the next load after
+ * it reads the year-round words again). Outside a browser there is no page clock: the year-round words.
+ */
+export const S: Strings = withSeason(LANG === 'ar' ? ar : en, pageNow())
 
 /**
  * Change the language: keep the choice on this phone and reload the same page in it. A `lang` in

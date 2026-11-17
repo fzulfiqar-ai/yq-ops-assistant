@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { bhd, distinctNames, productName } from '../lib/format'
 import { bestSellers } from '../lib/home'
-import { buildSlides, useCarousel, useClaimedSlides, useSlideClaimsActive } from '../lib/slides'
+import { buildSlides, stageCanvas, useCarousel, useClaimedSlides, useSlideClaimsActive } from '../lib/slides'
 import { useUpcoming } from '../lib/upcoming'
 import { useCartLines } from '../store/cart'
 import { ltrText } from '../i18n'
@@ -109,7 +109,7 @@ export function Spotlight({ className }: { className?: string }) {
       {/* the stage wears the incoming slide's canvas and the two slides are sequenced, never
           simultaneous (components/PromoSlider.tsx): a plain opacity crossfade painted both
           headlines on top of each other over a mix of two canvases */}
-      <div className={cn('slider-stage relative mt-1.5 aspect-[6/5] overflow-hidden rounded-lg', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'} data-carousel={c.autoplay ? (c.userPaused ? 'paused' : c.running ? 'running' : 'held') : undefined}>
+      <div className={cn('slider-stage relative mt-1.5 aspect-[6/5] overflow-hidden rounded-lg', stageCanvas(slides[idx]))} aria-live={c.running ? 'off' : 'polite'} data-carousel={c.autoplay ? (c.userPaused ? 'paused' : c.running ? 'running' : 'held') : undefined}>
         {slides.map((s, i) => {
           const active = i === idx
           return (

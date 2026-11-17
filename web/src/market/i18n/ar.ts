@@ -206,6 +206,31 @@ export const ar: Strings = {
     sealTop: 'حصريًا',
     sealBottom: 'في البحرين',
   },
+  /* «بلاك فرايدي» as Gulf shops write it — never «الجمعة السوداء» (a "black" Friday reads badly in Arabic);
+     the picks are never a تخفيض / خصم: prices do not change (en.ts season); «تخفيضات حقيقية» names only real drops */
+  season: {
+    picks: 'مختارات بلاك فرايدي',
+    picksTitle: 'مختارات بلاك فرايدي · بسعر الجملة',
+    picksLine: 'مخزون وافر بسعر الجملة، لعروضك أنت في بلاك فرايدي.',
+    dealsLine: 'تخفيضات حقيقية ومختارات بلاك فرايدي، بسعر الجملة.',
+    dealsLineMixed: 'عروض حقيقية من قائمة أسعارنا، ومختارات بلاك فرايدي — بسعر الجملة.',
+    badge: 'مختار لبلاك فرايدي',
+    slideLine: (n: number) => `${lines(n)} لبلاك فرايدي في محلك.`,
+    slideCta: 'شاهد المختارات',
+    categoryPicks: (n: number) => `${lines(n)} لبلاك فرايدي`,
+    kicker: (days: number) =>
+      days >= 3
+        ? `بلاك فرايدي بعد ${pa(days, 'يوم', 'أيام', 'يومًا')}`
+        : days === 2
+          ? 'بلاك فرايدي بعد يومين'
+          : days === 1
+            ? 'بلاك فرايدي غدًا'
+            : days === 0
+              ? 'بلاك فرايدي اليوم'
+              : days >= -2
+                ? 'عطلة بلاك فرايدي'
+                : 'سايبر مونداي اليوم',
+  },
   promise: {
     title: 'وعد YQ',
     app: 'أضف تطبيق YQ',

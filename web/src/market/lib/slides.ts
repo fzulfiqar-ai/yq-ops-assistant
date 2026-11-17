@@ -5,6 +5,7 @@ import { locale, S } from '../strings'
 import { themedBrand } from './brands'
 import { categorySlug, countdownLabel, hasBadge, niceCategory } from './format'
 import { dealSets, hasPhoto, inStock } from './home'
+import { pageNow, seasonKicker } from './season'
 import type { UpcomingPayload } from './marketApi'
 import { stageArt } from './upcoming'
 
@@ -49,6 +50,8 @@ export interface Slide {
   reel?: SlideArt[]
   /** a campaign every product of which is one themed brand's (lib/brands.ts): the card wears that brand's look */
   brand?: string | null
+  /** the kicker is a dated season's countdown (lib/season.ts): it carries the date, so no "Ends in" chip */
+  seasonal?: boolean
 }
 
 /** what a composed creative draws: a photo set and nothing a price or a stock level could be read from */
@@ -292,8 +295,9 @@ function trimDeck(slides: Slide[], max: number, deals: number): Slide[] {
 /**
  * One campaign as a slide (Arabic copy when the locale is Arabic; sponsor label always carried). A campaign
  * whose every product is one themed brand's (lib/brands.ts) — and that has no uploaded image of its own —
- * wears the brand's look: its kicker says "New brand" (and "Exclusive in Bahrain" where that is a fact),
- * and the desktop's discs turn through the rest of the brand's range in stock, not only the three picked.
+ * wears the brand's look: its kicker says "New brand" (and "Exclusive in Bahrain" where that is a fact) —
+ * or, while a dated season runs (lib/season.ts), counts down to its day — and the desktop's discs turn
+ * through the rest of the brand's range in stock, not only the three picked.
  */
 function campaignSlide(c: Campaign, fallbackCanvas: SlideCanvas, byCode: Map<string, ShopItem>): Slide {
   const ar = locale.lang === 'ar'
@@ -303,6 +307,7 @@ function campaignSlide(c: Campaign, fallbackCanvas: SlideCanvas, byCode: Map<str
     .filter((i): i is ShopItem => i != null && hasPhoto(i))
     .slice(0, ART)
   const theme = c.image_url ? null : themedBrand(products)
+  const season = theme && !sponsor ? seasonKicker(S, pageNow()) : null
   const shown = new Set(products.map((i) => i.item_code))
   const reel = theme
     ? inStock([...byCode.values()]).filter((i) => (i.brand || '').trim().toUpperCase() === theme.key && hasPhoto(i) && !shown.has(i.item_code)).slice(0, REEL)
@@ -310,7 +315,7 @@ function campaignSlide(c: Campaign, fallbackCanvas: SlideCanvas, byCode: Map<str
   return {
     id: `c:${c.id}`,
     kind: 'campaign',
-    kicker: sponsor || (theme ? (theme.exclusive ? S.slides.brandNewExclusive : S.slides.brandNew) : null),
+    kicker: sponsor || season || (theme ? (theme.exclusive ? S.slides.brandNewExclusive : S.slides.brandNew) : null),
     title: (ar && c.title_ar) || c.title,
     line: (ar && c.line_ar) || c.line || null,
     cta: (ar && c.cta_label_ar) || c.cta_label || S.campaign.cta,
@@ -322,7 +327,16 @@ function campaignSlide(c: Campaign, fallbackCanvas: SlideCanvas, byCode: Map<str
     endsAt: c.ends_at || null,
     campaignId: c.id,
     ...(theme ? { brand: theme.key, reel } : {}),
+    ...(season ? { seasonal: true } : {}),
   }
+}
+
+/**
+ * The class a slider stage wears for the slide coming in (PromoSlider, Spotlight): a themed brand card's own
+ * black, not its stored canvas — the WEKOME card is stored as `night`, whose plum-black showed through the swap.
+ */
+export function stageCanvas(slide?: Slide | null): string {
+  return slide?.brand ? `canvas-brand brand-${slide.brand.toLowerCase()}` : `canvas-${slide?.canvas || 'lilac'}`
 }
 
 /**

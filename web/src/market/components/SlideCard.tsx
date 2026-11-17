@@ -246,11 +246,23 @@ export function SlideCard({ slide, size, priority, className, where, live }: Sli
           </span>
         </span>
       )}
-      {slide.endsAt && <EndsChip endsAt={slide.endsAt} dark={dark && !cover} className={cn('absolute', ENDS_AT[size])} />}
+      {/* a season's countdown kicker carries the date; an "Ends in" beside it would read as an offer running out */}
+      {slide.endsAt && !slide.seasonal && <EndsChip endsAt={slide.endsAt} dark={dark && !cover} className={cn('absolute', ENDS_AT[size])} />}
 
       <span className={cn('slide-copy absolute flex flex-col', COPY[size])}>
-        {theme && <img className="brand-logo" src={theme.logo} alt={theme.key} width={theme.logoWidth} height={theme.logoHeight} decoding="async" draggable={false} />}
-        {kicker && <span className={cn('slide-kicker mb-1.5 truncate', dark ? 'text-white/80' : 'text-plum')}>{kicker}</span>}
+        {theme && slide.seasonal && kicker && size === 'hero' ? (
+          // a season's pill rides beside the wordmark on the stage: stacked, the two pushed a two-line
+          // headline out of a 1366 px desktop's copy column (the column is a fixed-height flex column)
+          <span className="brand-row">
+            <img className="brand-logo" src={theme.logo} alt={theme.key} width={theme.logoWidth} height={theme.logoHeight} decoding="async" draggable={false} />
+            <span className="slide-kicker season-kicker truncate">{kicker}</span>
+          </span>
+        ) : (
+          <>
+            {theme && <img className="brand-logo" src={theme.logo} alt={theme.key} width={theme.logoWidth} height={theme.logoHeight} decoding="async" draggable={false} />}
+            {kicker && <span className={cn('slide-kicker mb-1.5 truncate', slide.seasonal && 'season-kicker', dark ? 'text-white/80' : 'text-plum')}>{kicker}</span>}
+          </>
+        )}
         <span className={cn('slide-title line-clamp-2 font-display font-extrabold', dark ? 'text-white' : 'text-ink')}>{countTitle ? counted(slide.title) : slide.title}</span>
         {slide.line && <span className={cn('slide-line mt-1 line-clamp-2 text-[12.5px] leading-4', size === 'hero' && 'mt-3 max-w-[34ch] leading-snug', dark ? 'text-white/80' : 'text-ink-2')}>{countLine ? counted(slide.line) : slide.line}</span>}
         {slide.to && (

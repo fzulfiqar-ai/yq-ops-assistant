@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { heroDeck, SLIDE_DWELL, useCarousel, useClaimSlides, type Slide } from '../lib/slides'
+import { heroDeck, SLIDE_DWELL, stageCanvas, useCarousel, useClaimSlides, type Slide } from '../lib/slides'
 import { useReducedMotion } from '../shell/useViewport'
 import { S } from '../strings'
 import { SlideCard } from './SlideCard'
@@ -221,7 +221,7 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
           overlapping at half opacity — which, between an apricot and a night slide, painted both
           headlines, both lines and both CTAs on top of each other over mud. */}
       {/* data-carousel: whether the slideshow turns (the reel, the light and the floats in it hold with it: a pause stops what moves, WCAG 2.2.2) */}
-      <div className={cn('slider-stage relative aspect-[21/9] overflow-hidden rounded-xl', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'} data-carousel={c.autoplay ? (c.userPaused ? 'paused' : c.running ? 'running' : 'held') : undefined}>
+      <div className={cn('slider-stage relative aspect-[21/9] overflow-hidden rounded-xl', stageCanvas(slides[idx]))} aria-live={c.running ? 'off' : 'polite'} data-carousel={c.autoplay ? (c.userPaused ? 'paused' : c.running ? 'running' : 'held') : undefined}>
         {slides.map((s, i) => {
           const active = i === idx
           return (

@@ -220,6 +220,28 @@ export const en = {
     sealTop: 'Exclusive',
     sealBottom: 'in Bahrain',
   },
+  /**
+   * A dated season (lib/season.ts): inside its window these stand in for the clearing lines' words and lead a
+   * themed brand card's kicker; the day after, the year-round words return by themselves. Black Friday 2026
+   * (owner, 17-Nov-2026): prices do not change, so nothing here is a sale, a discount or a saving. The
+   * clearing lines are "picks" at the trade price (deep stock a shop runs its OWN Black Friday offers on),
+   * and the kicker counts to the day the shops' customers come: a date, not a deadline.
+   */
+  season: {
+    picks: 'Black Friday picks',
+    picksTitle: 'Black Friday picks · trade price',
+    picksLine: 'Deep stock at trade price, for your own Black Friday offers.',
+    dealsLine: 'Real price drops and Black Friday picks, at trade price.',
+    dealsLineMixed: 'Real deals from our price book, and Black Friday picks — at trade price.',
+    badge: 'Black Friday pick',
+    /* one clause of at most 34 characters, like every slide line */
+    slideLine: (n: number) => `${plural(n, 'line', 'lines')} for your Black Friday.`,
+    slideCta: 'See the picks',
+    categoryPicks: (n: number) => plural(n, 'Black Friday pick', 'Black Friday picks'),
+    /** days from today (Bahrain) to Black Friday: 10 … 1, 0 on the day, -1 / -2 the weekend, -3 Cyber Monday */
+    kicker: (days: number) =>
+      days >= 2 ? `Black Friday in ${days} days` : days === 1 ? 'Black Friday is tomorrow' : days === 0 ? 'Black Friday is today' : days >= -2 ? 'Black Friday weekend' : 'Cyber Monday today',
+  },
   promise: {
     title: 'The YQ promise',
     app: 'Add YQ app',

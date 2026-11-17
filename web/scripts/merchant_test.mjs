@@ -621,5 +621,47 @@ check('brand promotion: the words in Arabic, and the logo file is there', () => 
   ok(isFile(path.join(SRC, '..', 'public', BR.BRAND_THEMES.WEKOME.logo.replace(/^\//, ''))), 'public/brands/wekome.png')
 })
 
+// a dated season (17-Nov-2026, lib/season.ts): Black Friday from go-live to Cyber Monday, then the year-round words by themselves
+const SE = await mod('market/lib/season.ts')
+const at = (iso) => Date.parse(iso)
+check('season: Black Friday runs 17 to 30 Nov 2026 (Bahrain), counts to Fri 27 Nov, and ends by itself', () => {
+  eq(SE.seasonAt(at('2026-11-16T23:59:59+03:00')), null, 'the second before')
+  eq(SE.seasonAt(at('2026-11-17T00:00:00+03:00'))?.key, 'black_friday', 'its first instant')
+  eq(SE.seasonAt(at('2026-11-30T23:59:59+03:00'))?.key, 'black_friday', 'its last instant')
+  eq(SE.seasonAt(at('2026-12-01T00:00:00+03:00')), null, 'the day after')
+  eq(SE.seasonAt(null), null, 'no page clock (node): no season')
+  const days = ['2026-11-17T08:00:00+03:00', '2026-11-26T23:00:00+03:00', '2026-11-27T00:00:00+03:00', '2026-11-28T12:00:00+03:00', '2026-11-30T23:59:00+03:00'].map((d) => SE.daysToDay(at(d)))
+  eq(days, [10, 1, 0, -1, -3], 'days to Black Friday')
+  eq(SE.daysToDay(at('2026-11-26T21:30:00Z')), 0, 'counted on Bahrain dates (00:30 on the 27th there), not UTC')
+  eq(
+    [10, 2, 1, 0, -1, -2, -3].map((d) => en.season.kicker(d)),
+    ['Black Friday in 10 days', 'Black Friday in 2 days', 'Black Friday is tomorrow', 'Black Friday is today', 'Black Friday weekend', 'Black Friday weekend', 'Cyber Monday today'],
+    'English kicker',
+  )
+  const arK = [10, 3, 2, 1, 0, -1, -3].map((d) => ar.season.kicker(d))
+  ok(arK.every((k) => hasArabic(k) && !/[٠-٩۰-۹]/.test(k)), 'Arabic kicker, Western digits')
+  eq([arK[0], arK[2]], ['بلاك فرايدي بعد 10 أيام', 'بلاك فرايدي بعد يومين'], 'Arabic counts (dual for two)')
+})
+check('season: the clearing words read "Black Friday picks · trade price" inside it and come back after it — never a sale', () => {
+  const inside = SE.withSeason(en, at('2026-11-20T12:00:00+03:00'))
+  eq([inside.deals.badge, inside.deals.lastChance, inside.deals.last, inside.shop.clearance, inside.slides.last, inside.slides.lastCta], ['Black Friday pick', 'Black Friday picks · trade price', 'Black Friday picks', 'Black Friday picks', 'Black Friday picks · trade price', 'See the picks'], 'English inside')
+  eq(inside.campaign.categoryLast(3), '3 Black Friday picks', 'category banner')
+  eq(inside.deals.title, en.deals.title, 'everything else untouched')
+  ok(SE.withSeason(en, at('2026-12-01T00:00:00+03:00')) === en && SE.withSeason(ar, null) === ar, 'after it, and with no clock: the year-round words themselves')
+  const arIn = SE.withSeason(ar, at('2026-11-20T12:00:00+03:00'))
+  ok(arIn.deals.badge.includes('بلاك فرايدي') && arIn.deals.lastChance.includes('بسعر الجملة') && arIn.shop.clearance.includes('بلاك فرايدي'), 'Arabic inside, trade price said')
+  const picks = (t) => [t.season.picks, t.season.picksTitle, t.season.picksLine, t.season.badge, t.season.slideCta, ...[1, 24].map((n) => t.season.slideLine(n) + ' ' + t.season.categoryPicks(n)), ...[10, 0, -3].map((d) => t.season.kicker(d))].join(' | ')
+  ok(!/\bsale\b|discount|\bsave\b|% off|limited|\bends?\b|hurry|last.chance|sub-?premium/i.test(picks(en)), 'English: no sale, discount, saving or deadline')
+  ok(!/خصم|تخفيض|لفترة محدودة|لا تفوت|الجمعة السوداء/.test(picks(ar)), 'Arabic: no discount words, never «الجمعة السوداء»')
+  ok(en.season.slideLine(24).length <= 34 && ar.season.slideLine(24).length <= 34, 'the slide line stays one clause of ≤34 characters')
+})
+check('season: a themed brand card counts down instead of "New brand"; a slider stage wears the brand black', () => {
+  eq(SE.seasonKicker(en, at('2026-11-17T09:00:00+03:00')), 'Black Friday in 10 days', 'inside')
+  eq(SE.seasonKicker(en, at('2026-12-01T09:00:00+03:00')), null, 'after')
+  eq(SE.seasonKicker(en, null), null, 'no clock')
+  eq(SL.buildSlides({ items: range, campaigns: [camp(['ZW-1', 'ZW-2'])], recognized: false })[0].seasonal, undefined, 'node has no page clock: the year-round card')
+  eq([SL.stageCanvas({ brand: 'WEKOME', canvas: 'night' }), SL.stageCanvas({ canvas: 'apricot' }), SL.stageCanvas(undefined)], ['canvas-brand brand-wekome', 'canvas-apricot', 'canvas-lilac'], 'stage class')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
