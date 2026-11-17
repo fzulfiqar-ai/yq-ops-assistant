@@ -79,7 +79,8 @@ def _():
     assert "export const ar: Strings = {" in ar, "ar must be declared Strings, so tsc fails on a missing key"
     assert "NATIVE REVIEW NEEDED" in ar.split("export const ar", 1)[0], "the Arabic file must carry the native-review flag"
     idx = _m("i18n/index.ts")
-    assert "export const S: Strings = LANG === 'ar' ? ar : en" in idx
+    # S is the page's language; a dated season (lib/season.ts, 17-Nov-2026) lays its words over it while it runs
+    assert "export const S: Strings = withSeason(LANG === 'ar' ? ar : en, pageNow())" in idx
     assert "export const locale" in idx and "dir: LANG === 'ar' ? 'rtl' : 'ltr'" in idx
     # every component still imports S / locale from strings.ts — no call site imports a language
     for f in MARKET.rglob("*.tsx"):
